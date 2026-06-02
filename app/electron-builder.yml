@@ -1,0 +1,38 @@
+appId: com.kingo.desktop
+productName: KiNGO
+directories:
+  output: dist
+
+publish:
+  provider: github
+  owner: KINGHY02
+  repo: KiNGO
+
+extraResources:
+  - from: ../clash.meta     to: clash.meta
+  - from: ../Xray           to: Xray
+  - from: ../hysteria       to: hysteria
+  - from: ../hysteria2      to: hysteria2
+  - from: ../singbox        to: singbox
+  - from: ../naiveproxy     to: naiveproxy
+  - from: ../juicity        to: juicity
+  - from: ../mieru          to: mieru
+  - from: ../shadowquic     to: shadowquic
+  - from: ../Browser        to: Browser
+  - from: ../wget.exe       to: wget.exe
+
+win:
+  target:
+    - target: nsis
+      arch: [x64]
+  requestedExecutionLevel: requireAdministrator
+  icon: electron-resources/icon.ico
+
+nsis:
+  oneClick: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  shortcutName: KiNGO
+  installerIcon: electron-resources/icon.ico
+  uninstallerIcon: electron-resources/icon.ico

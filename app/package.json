@@ -1,0 +1,40 @@
+{
+  "name": "kingo",
+  "version": "1.0.0",
+  "description": "KiNGO - 网络代理管理桌面客户端",
+  "main": "./out/main/index.js",
+  "author": "KiNGO",
+  "license": "MIT",
+  "scripts": {
+    "dev": "node scripts/clean-env.js electron-vite dev",
+    "build": "node scripts/clean-env.js electron-vite build",
+    "preview": "node scripts/clean-env.js electron-vite preview",
+    "pack": "node scripts/clean-env.js electron-vite build && electron-builder --dir",
+    "dist": "node scripts/clean-env.js electron-vite build && electron-builder"
+  },
+  "dependencies": {
+    "@ant-design/icons": "^5.5.0",
+    "@monaco-editor/react": "^4.7.0",
+    "antd": "^5.22.0",
+    "electron-store": "^8.2.0",
+    "electron-updater": "^6.8.3",
+    "js-yaml": "^4.1.0",
+    "monaco-editor": "^0.55.1",
+    "react": "^18.3.0",
+    "react-dom": "^18.3.0",
+    "react-router-dom": "^6.28.0"
+  },
+  "devDependencies": {
+    "@electron-toolkit/preload": "^3.0.0",
+    "@electron-toolkit/utils": "^3.0.0",
+    "@types/js-yaml": "^4.0.9",
+    "@types/react": "^18.3.0",
+    "@types/react-dom": "^18.3.0",
+    "@vitejs/plugin-react": "^4.3.0",
+    "electron": "^28.3.3",
+    "electron-builder": "^24.13.0",
+    "electron-vite": "^2.3.0",
+    "typescript": "^5.5.0",
+    "vite": "^5.4.0"
+  }
+}

@@ -1,0 +1,30 @@
+node_modules/
+app/dist/
+app/out/
+chrome-user-data/
+.claude/
+
+# Proxy binaries (too large, not source code)
+clash.meta/
+Xray/
+hysteria/
+hysteria2/
+singbox/
+naiveproxy/
+juicity/
+mieru/
+shadowquic/
+
+# Portable browser
+Browser/
+wget.exe
+
+# Original batch scripts (replaced by Electron app)
+*.cmd
+
+# IDE
+.vscode/
+.idea/
+
+# Windows compatibility (large binaries)
+win7-win8/
