@@ -1,7 +1,31 @@
 import { Tray, Menu, nativeImage, BrowserWindow, app } from 'electron'
 import { join } from 'path'
+import { existsSync } from 'fs'
 import { ProxyManager } from './proxy-manager'
 import { launchChrome } from './chrome-launcher'
+
+function findTrayIcon(baseDir: string): nativeImage {
+  // Prefer dedicated tray .ico, then main icon, then PNG fallbacks
+  const candidates = [
+    join(baseDir, 'icons', 'tray.ico'),
+    join(baseDir, 'icons', 'tray-32.ico'),
+    join(baseDir, 'app', 'electron-resources', 'tray.ico'),
+    join(baseDir, 'app', 'electron-resources', 'tray-32.ico'),
+    join(baseDir, 'icon.ico'),
+    join(baseDir, 'app', 'electron-resources', 'icon.ico'),
+    join(baseDir, 'icons', 'tray-32.png'),
+    join(baseDir, 'icons', 'tray-16.png'),
+  ]
+
+  for (const p of candidates) {
+    if (existsSync(p)) {
+      const img = nativeImage.createFromPath(p)
+      if (!img.isEmpty()) return img
+    }
+  }
+
+  return nativeImage.createEmpty()
+}
 
 export class TrayManager {
   private tray: Tray | null = null
@@ -16,24 +40,7 @@ export class TrayManager {
   }
 
   create(): void {
-    // Use project icons - try multiple paths
-    const iconPaths = [
-      join(this.baseDir, 'icons', '32.png'),
-      join(this.baseDir, 'icons', '16.png')
-    ]
-
-    let trayIcon: nativeImage | undefined
-    for (const iconPath of iconPaths) {
-      try {
-        trayIcon = nativeImage.createFromPath(iconPath)
-        if (!trayIcon.isEmpty()) break
-      } catch { /* ignore */ }
-    }
-
-    // Fallback: create a simple icon if icons not found
-    if (!trayIcon || trayIcon.isEmpty()) {
-      trayIcon = nativeImage.createEmpty()
-    }
+    const trayIcon = findTrayIcon(this.baseDir)
 
     this.tray = new Tray(trayIcon.resize({ width: 16, height: 16 }))
     this.tray.setToolTip('KiNGO')

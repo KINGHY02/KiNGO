@@ -8,7 +8,19 @@ import { TrayManager } from './tray-manager'
 import { getSettings } from './settings-store'
 import { initUpdater, checkForUpdates, setUpdateFeedURL } from './updater'
 
-const { app, BrowserWindow } = electron
+const { app, BrowserWindow, dialog } = electron
+
+// Catch unhandled errors so the user sees something instead of silent crash
+process.on('uncaughtException', (err) => {
+  console.error('Uncaught exception:', err)
+  try {
+    dialog.showErrorBox('KiNGO 启动错误', `${err.message}\n\n${err.stack || ''}`)
+  } catch { /* dialog might not be available */ }
+})
+
+process.on('unhandledRejection', (reason) => {
+  console.error('Unhandled rejection:', reason)
+})
 
 let trayManager: TrayManager | null = null
 let proxyManager: ProxyManager
@@ -17,6 +29,11 @@ let logService: LogService
 let BASE_DIR: string
 
 function createWindow(): void {
+  // Find the app icon for the window (taskbar thumbnail)
+  const iconPath = app.isPackaged
+    ? join(process.resourcesPath, 'icon.ico')
+    : join(__dirname, '..', '..', 'electron-resources', 'icon.ico')
+
   const mainWindow = new BrowserWindow({
     width: 1100,
     height: 750,
@@ -26,6 +43,7 @@ function createWindow(): void {
     frame: false,
     title: 'KiNGO',
     backgroundColor: '#0d1124',
+    icon: iconPath,
     webPreferences: {
       preload: join(__dirname, '../preload/index.js'),
       sandbox: false,
@@ -98,20 +116,28 @@ function createWindow(): void {
 }
 
 app.whenReady().then(() => {
-  BASE_DIR = app.isPackaged
-    ? process.resourcesPath
-    : join(__dirname, '..', '..', '..')
+  try {
+    BASE_DIR = app.isPackaged
+      ? process.resourcesPath
+      : join(__dirname, '..', '..', '..')
 
-  logService = new LogService(10000)
-  proxyManager = new ProxyManager(BASE_DIR)
-  configService = new ConfigService(BASE_DIR)
+    logService = new LogService(10000)
+    proxyManager = new ProxyManager(BASE_DIR)
+    configService = new ConfigService(BASE_DIR)
 
-  registerIpcHandlers(proxyManager, configService, logService, BASE_DIR)
-  createWindow()
+    registerIpcHandlers(proxyManager, configService, logService, BASE_DIR)
+    createWindow()
 
-  app.on('activate', () => {
-    if (BrowserWindow.getAllWindows().length === 0) createWindow()
-  })
+    app.on('activate', () => {
+      if (BrowserWindow.getAllWindows().length === 0) createWindow()
+    })
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err)
+    const stack = err instanceof Error ? err.stack : ''
+    console.error('Startup error:', msg, stack)
+    dialog.showErrorBox('KiNGO 启动失败', `${msg}\n\n${stack}`)
+    app.quit()
+  }
 })
 
 app.on('before-quit', () => {
