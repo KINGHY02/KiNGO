@@ -12,6 +12,8 @@ permissions:
 jobs:
   release:
     runs-on: windows-latest
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
       - uses: actions/checkout@v4
 
@@ -30,17 +32,5 @@ jobs:
       - name: Install dependencies
         run: cd app && npm ci
 
-      - name: Build & Package Installer
+      - name: Build & Publish
         run: cd app && npm run dist
-
-      - name: Create Release & Upload Installer
-        uses: softprops/action-gh-release@v2
-        with:
-          name: ${{ github.ref_name }}
-          tag_name: ${{ github.ref_name }}
-          generate_release_notes: true
-          files: |
-            app/dist/*.exe
-            app/dist/latest.yml
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
