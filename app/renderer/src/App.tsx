@@ -6,7 +6,7 @@ import UpdateNotification from './components/UpdateNotification/UpdateNotificati
 import { ThemeContext, getThemeTokens, ThemeMode } from './hooks/useTheme'
 
 export default function App(): JSX.Element {
-  const [themeMode, setThemeMode] = useState<ThemeMode>('dark')
+  const [themeMode, setThemeMode] = useState<ThemeMode>('light')
 
   useEffect(() => {
     const api = window.electronAPI
@@ -23,6 +23,9 @@ export default function App(): JSX.Element {
           setThemeMode(s.theme)
         }
       })
+    }
+    return () => {
+      api.removeAllListeners('settings:changed')
     }
   }, [])
 

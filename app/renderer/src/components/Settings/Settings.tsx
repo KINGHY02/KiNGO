@@ -22,10 +22,12 @@ export default function Settings(): JSX.Element {
   const loadSettings = async (): Promise<void> => {
     try {
       const settings = await getSettings()
-      form.setFieldsValue(settings)
       setSystemProxyEnabled(settings.systemProxy)
       setLoaded(true)
+      // Defer setFieldsValue until after Form mounts (loaded → re-render → Form exists)
+      setTimeout(() => form.setFieldsValue(settings), 0)
     } catch {
+      setLoaded(true)
       message.error('加载设置失败')
     }
   }
