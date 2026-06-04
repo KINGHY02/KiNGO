@@ -27,8 +27,15 @@ export async function restoreBackup(proxyId: string): Promise<{ success: boolean
   return api.restoreBackup(proxyId)
 }
 
-export async function testLatency(proxyId: string): Promise<{ nodes: { host: string; port: number; latency: number }[] }> {
+export async function testLatency(proxyId: string): Promise<{
+  current: { host: string; port: number; latency: number }[]
+  slots: { slot: number; description: string; nodes: { host: string; port: number; latency: number }[] }[]
+}> {
   return api.testLatency(proxyId)
+}
+
+export async function testRealLatency(proxyId: string): Promise<{ latency: number }> {
+  return api.testRealLatency(proxyId)
 }
 
 export async function updateIP(proxyId: string, slot: number): Promise<{ success: boolean; error?: string }> {
@@ -57,6 +64,10 @@ export async function getSettings(): Promise<AppSettings> {
 
 export async function setSettings(settings: Partial<AppSettings>): Promise<{ success: boolean }> {
   return api.setSettings(settings)
+}
+
+export async function getSystemProxyStatus(): Promise<{ enabled: boolean; server: string | null; pacUrl: string | null }> {
+  return api.getSystemProxyStatus()
 }
 
 export async function getLogs(proxyId?: string, limit?: number): Promise<LogEntry[]> {

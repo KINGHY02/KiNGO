@@ -1,7 +1,8 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useMemo } from 'react'
 import { Card, Select, Button, Table, Typography, Space, Tag, message, Row, Col, Tooltip } from 'antd'
-import { ThunderboltOutlined, CloudDownloadOutlined, SwapOutlined } from '@ant-design/icons'
-import { testLatency, updateIP, getSlots, switchSlot } from '../../services/ipc-client'
+import { ThunderboltOutlined, CloudDownloadOutlined, SwapOutlined, LoadingOutlined, DashboardOutlined } from '@ant-design/icons'
+import { testLatency, updateIP, getSlots, switchSlot, testRealLatency } from '../../services/ipc-client'
+import { useProxyStatus } from '../../hooks/useProxyStatus'
 
 const PROXY_OPTIONS = [
   { value: 'clash-meta', label: 'Clash.Meta' },
@@ -15,10 +16,16 @@ const PROXY_OPTIONS = [
   { value: 'shadowquic', label: 'ShadowQUIC' }
 ]
 
+// Proxies that use UDP/QUIC transport — raw TCP connect will always fail
+const UDP_PROXY_IDS = new Set([
+  'clash-meta', 'hysteria', 'hysteria2', 'singbox', 'juicity', 'shadowquic'
+])
+
 interface LatencyNode {
   host: string
   port: number
   latency: number
+  source: string
 }
 
 export default function NodeManager(): JSX.Element {
@@ -28,10 +35,20 @@ export default function NodeManager(): JSX.Element {
   const [slots, setSlots] = useState<SlotInfo[]>([])
   const [updatingSlots, setUpdatingSlots] = useState<Set<number>>(new Set())
   const [switchingSlots, setSwitchingSlots] = useState<Set<number>>(new Set())
+  const [realLatency, setRealLatency] = useState<number | null>(null)
+  const [testingReal, setTestingReal] = useState(false)
+
+  const { statuses } = useProxyStatus()
+  const isProxyRunning = useMemo(
+    () => statuses.some((s) => s.id === selectedId && s.running),
+    [statuses, selectedId]
+  )
+  const isUdpProxy = UDP_PROXY_IDS.has(selectedId)
 
   useEffect(() => {
     loadSlots(selectedId)
     setNodes([])
+    setRealLatency(null)
   }, [selectedId])
 
   const loadSlots = async (proxyId: string): Promise<void> => {
@@ -45,15 +62,41 @@ export default function NodeManager(): JSX.Element {
 
   const handleTestLatency = async (): Promise<void> => {
     setTesting(true)
+    setNodes([])
+    setRealLatency(null)
     try {
       const result = await testLatency(selectedId)
-      setNodes(result.nodes || [])
-      const available = result.nodes?.filter((n: LatencyNode) => n.latency >= 0).length ?? 0
-      message.success(`测试完成: ${available}/${result.nodes?.length ?? 0} 个节点可达`)
+      const allNodes: LatencyNode[] = [
+        ...result.current.map((n) => ({ ...n, source: '当前配置' })),
+        ...result.slots.flatMap((s) =>
+          s.nodes.map((n) => ({ ...n, source: `${s.description} (IP${s.slot})` }))
+        )
+      ]
+      setNodes(allNodes)
+      const available = allNodes.filter((n) => n.latency >= 0).length
+      message.success(`测速完成: ${available}/${allNodes.length} 个节点可达`)
     } catch {
       message.error('延迟测试失败')
     } finally {
       setTesting(false)
+    }
+  }
+
+  const handleRealLatencyTest = async (): Promise<void> => {
+    setTestingReal(true)
+    setRealLatency(null)
+    try {
+      const result = await testRealLatency(selectedId)
+      setRealLatency(result.latency)
+      if (result.latency >= 0) {
+        message.success(`真实测速: ${result.latency}ms`)
+      } else {
+        message.warning('测速失败，请确认代理已连接')
+      }
+    } catch {
+      message.error('测速出错')
+    } finally {
+      setTestingReal(false)
     }
   }
 
@@ -112,10 +155,11 @@ export default function NodeManager(): JSX.Element {
   }
 
   const columns = [
-    { title: '服务器地址', dataIndex: 'host', key: 'host' },
-    { title: '端口', dataIndex: 'port', key: 'port', width: 100 },
+    { title: '来源', dataIndex: 'source', key: 'source', width: 90, ellipsis: true },
+    { title: '地址', dataIndex: 'host', key: 'host', width: 140, ellipsis: true },
+    { title: '端口', dataIndex: 'port', key: 'port', width: 60 },
     {
-      title: '延迟', dataIndex: 'latency', key: 'latency', width: 150,
+      title: '延迟', dataIndex: 'latency', key: 'latency', width: 90,
       render: (ms: number) => <Tag color={latencyColor(ms)}>{latencyText(ms)}</Tag>
     }
   ]
@@ -201,22 +245,63 @@ export default function NodeManager(): JSX.Element {
           <Card
             title="延迟测试"
             extra={
-              <Button
-                type="primary"
-                icon={<ThunderboltOutlined />}
-                onClick={handleTestLatency}
-                loading={testing}
-              >
-                全部测试
-              </Button>
+              <Space size={8}>
+                {isProxyRunning && (
+                  <Button
+                    type="default"
+                    icon={<DashboardOutlined />}
+                    onClick={handleRealLatencyTest}
+                    loading={testingReal}
+                  >
+                    真实测速
+                  </Button>
+                )}
+                <Button
+                  type="primary"
+                  icon={<ThunderboltOutlined />}
+                  onClick={handleTestLatency}
+                  loading={testing}
+                >
+                  全部测试
+                </Button>
+              </Space>
             }
           >
+            {isUdpProxy && (
+              <Typography.Text type="warning" style={{ display: 'block', marginBottom: 8, fontSize: 12 }}>
+                UDP协议 — TCP检测无效，请先连接代理后使用"真实测速"
+              </Typography.Text>
+            )}
+            {testing && (
+              <Typography.Text type="secondary" style={{ display: 'block', marginBottom: 8, fontSize: 13 }}>
+                <LoadingOutlined style={{ marginRight: 6 }} spin />
+                正在测速...
+              </Typography.Text>
+            )}
+            {!testing && nodes.length > 0 && (
+              <Typography.Text type="secondary" style={{ display: 'block', marginBottom: 8, fontSize: 13 }}>
+                测速完成: {nodes.filter((n) => n.latency >= 0).length}/{nodes.length} 个节点可达
+              </Typography.Text>
+            )}
+            {realLatency !== null && (
+              <div style={{ marginBottom: 8 }}>
+                <Tag color={latencyColor(realLatency)} style={{ fontSize: 13 }}>
+                  真实延迟: {latencyText(realLatency)}
+                </Tag>
+              </div>
+            )}
+            {testingReal && (
+              <Typography.Text type="secondary" style={{ display: 'block', marginBottom: 8, fontSize: 13 }}>
+                <LoadingOutlined style={{ marginRight: 6 }} spin />
+                正在通过代理测速...
+              </Typography.Text>
+            )}
             <Table
               columns={columns}
               dataSource={nodes.map((n, i) => ({ ...n, key: i }))}
               size="small"
               pagination={false}
-              locale={{ emptyText: '点击"全部测试"开始延迟检测' }}
+              locale={{ emptyText: '点击"全部测试"检测当前配置及所有 IP 延迟' }}
             />
           </Card>
         </Col>

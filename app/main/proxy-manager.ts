@@ -2,6 +2,7 @@ import { ChildProcess, spawn } from 'child_process'
 import { join } from 'path'
 import { EventEmitter } from 'events'
 import { app } from 'electron'
+import { testRealLatency } from './latency-tester'
 
 export interface ProxyDefinition {
   id: string
@@ -86,6 +87,7 @@ export const PROXY_DEFINITIONS: ProxyDefinition[] = [
 export class ProxyManager extends EventEmitter {
   private processes = new Map<string, ChildProcess>()
   private statuses = new Map<string, ProxyStatus>()
+  private latencyTimers = new Map<string, ReturnType<typeof setInterval>>()
   private baseDir: string
 
   constructor(baseDir: string) {
@@ -191,6 +193,10 @@ export class ProxyManager extends EventEmitter {
       })
 
       this.emit('log', proxyId, `启动成功，PID: ${proc.pid}`, 'info')
+
+      // Auto-test real latency 2s after proxy starts
+      setTimeout(() => this.runLatencyTest(proxyId), 2000)
+
       return { success: true, pid: proc.pid ?? undefined }
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err)
@@ -227,6 +233,29 @@ export class ProxyManager extends EventEmitter {
     }
   }
 
+  private async runLatencyTest(proxyId: string): Promise<void> {
+    const def = this.getDef(proxyId)
+    if (!def) return
+
+    const latency = await testRealLatency(def.port)
+    this.updateStatus(proxyId, { latency })
+
+    // Schedule periodic re-test every 30s while running
+    if (latency >= 0 && this.processes.has(proxyId)) {
+      const existing = this.latencyTimers.get(proxyId)
+      if (existing) clearInterval(existing)
+      this.latencyTimers.set(proxyId, setInterval(async () => {
+        if (!this.processes.has(proxyId)) {
+          const timer = this.latencyTimers.get(proxyId)
+          if (timer) { clearInterval(timer); this.latencyTimers.delete(proxyId) }
+          return
+        }
+        const newLatency = await testRealLatency(def.port)
+        this.updateStatus(proxyId, { latency: newLatency })
+      }, 30_000))
+    }
+  }
+
   private spawnAndWait(exePath: string, args: string[], cwd: string): Promise<void> {
     return new Promise((resolve, reject) => {
       const proc = spawn(exePath, args, {
@@ -244,7 +273,10 @@ export class ProxyManager extends EventEmitter {
 
   private cleanup(proxyId: string): void {
     this.processes.delete(proxyId)
-    this.updateStatus(proxyId, { running: false, pid: null })
+    // Clear latency timer
+    const timer = this.latencyTimers.get(proxyId)
+    if (timer) { clearInterval(timer); this.latencyTimers.delete(proxyId) }
+    this.updateStatus(proxyId, { running: false, pid: null, latency: null })
   }
 
   updateStatus(proxyId: string, partial: Partial<ProxyStatus>): void {

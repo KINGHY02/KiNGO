@@ -41,26 +41,13 @@ export function getAvailableSlots(baseDir: string, proxyDirName: string): SlotIn
     const match = file.match(/^ip_(\d+)\.bat$/)
     if (match) {
       const slot = Number(match[1])
-      const description = extractBatTitle(join(ipUpdateDir, file), slot)
+      const description = `IP${slot}`
       const downloaded = checkCachedSlot(ipUpdateDir, slot)
       const active = currentSlot?.slot === slot
       slots.push({ slot, description, downloaded, active })
     }
   }
   return slots.sort((a, b) => a.slot - b.slot)
-}
-
-function extractBatTitle(filePath: string, fallbackSlot: number): string {
-  try {
-    const content = readFileSync(filePath, 'latin1')
-    const titleMatch = content.match(/^Title\s+(.+)/im)
-    if (titleMatch) {
-      const gbkBytes = Buffer.from(titleMatch[1], 'latin1')
-      const title = gbkBytes.toString('gbk').trim()
-      return title || `槽位 ${fallbackSlot}`
-    }
-  } catch { /* use fallback */ }
-  return `槽位 ${fallbackSlot}`
 }
 
 function checkCachedSlot(ipUpdateDir: string, slot: number): boolean {
@@ -135,13 +122,13 @@ export function switchSlot(
   const cachedFile = findCachedFile(ipUpdateDir, slot)
 
   if (!cachedFile) {
-    return { success: false, error: `槽位 ${slot} 尚未下载，请先点击"更新"下载配置` }
+    return { success: false, error: `IP${slot} 尚未下载，请先点击"更新"下载配置` }
   }
 
   try {
     const slots = getAvailableSlots(baseDir, proxyDirName)
     const slotInfo = slots.find((s) => s.slot === slot)
-    applySlot(baseDir, proxyDirName, configFileName, slot, slotInfo?.description || `槽位 ${slot}`)
+    applySlot(baseDir, proxyDirName, configFileName, slot, slotInfo?.description || `IP${slot}`)
     return { success: true }
   } catch (err) {
     return { success: false, error: `切换失败: ${err instanceof Error ? err.message : String(err)}` }
@@ -204,7 +191,7 @@ export async function updateConfig(
 
     const record: SlotRecord = {
       slot,
-      description: slotInfo?.description || `槽位 ${slot}`,
+      description: slotInfo?.description || `IP${slot}`,
       updatedAt: new Date().toISOString()
     }
     writeFileSync(join(baseDir, proxyDirName, '.kingo-slot.json'), JSON.stringify(record, null, 2), 'utf-8')

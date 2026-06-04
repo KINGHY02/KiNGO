@@ -3,9 +3,9 @@ import { ProxyManager, PROXY_DEFINITIONS } from './proxy-manager'
 import { ConfigService } from './config-service'
 import { LogService } from './log-service'
 import { getSettings, setSettings, AppSettings } from './settings-store'
-import { testProxyNodes } from './latency-tester'
+import { testProxyNodes, testRealLatency } from './latency-tester'
 import { launchChrome } from './chrome-launcher'
-import { setSystemProxy } from './system-proxy'
+import { getSystemProxyStatus, syncSystemProxy } from './system-proxy'
 import { getAvailableSlots, updateConfig, getCurrentSlot, switchSlot } from './ip-updater'
 import { checkForUpdates, downloadUpdate, installUpdate, getAppVersion, setUpdateFeedURL } from './updater'
 
@@ -45,10 +45,31 @@ export function registerIpcHandlers(
 
   // Latency test
   ipcMain.handle('proxy:test-latency', async (_e, proxyId: string) => {
-    const servers = configService.extractServerInfo(proxyId, PROXY_DEFINITIONS)
-    if (servers.length === 0) return { nodes: [] }
-    const results = await testProxyNodes(servers)
-    return { nodes: results }
+    // Test current active config
+    const currentServers = configService.extractServerInfo(proxyId, PROXY_DEFINITIONS)
+    const currentNodes = await testProxyNodes(currentServers, true)
+
+    // Test all downloaded slot configs
+    const slotServers = configService.extractAllSlotServers(proxyId, PROXY_DEFINITIONS)
+    const slotResults = await Promise.all(
+      slotServers.map(async (s) => ({
+        slot: s.slot,
+        description: s.description,
+        nodes: await testProxyNodes(s.servers, true)
+      }))
+    )
+
+    return { current: currentNodes, slots: slotResults }
+  })
+
+  // Real latency test through running local proxy
+  ipcMain.handle('proxy:test-real-latency', async (_e, proxyId: string) => {
+    const def = PROXY_DEFINITIONS.find((d) => d.id === proxyId)
+    if (!def) return { latency: -1 }
+    const latency = await testRealLatency(def.port)
+    // Also update the proxy status so dashboard picks it up
+    proxyManager.updateStatus(proxyId, { latency: latency >= 0 ? latency : null })
+    return { latency }
   })
 
   // IP update
@@ -93,7 +114,16 @@ export function registerIpcHandlers(
     if (settings.updateMirror !== undefined) {
       setUpdateFeedURL(settings.updateMirror)
     }
+    // Re-apply system proxy if relevant settings changed
+    if ('systemProxy' in settings || 'proxyMode' in settings) {
+      syncSystemProxy(proxyManager)
+    }
     return { success: true }
+  })
+
+  // System proxy
+  ipcMain.handle('system-proxy:status', () => {
+    return getSystemProxyStatus()
   })
 
   // Logs

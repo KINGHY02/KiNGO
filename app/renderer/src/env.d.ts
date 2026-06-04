@@ -20,6 +20,7 @@ interface LogEntry {
 
 interface AppSettings {
   systemProxy: boolean
+  proxyMode: 'global' | 'rule'
   autoStart: boolean
   browserPath: string
   minimizeToTray: boolean
@@ -42,7 +43,12 @@ interface ElectronAPI {
   getConfig: (proxyId: string) => Promise<{ content: string; format: string; backupExists: boolean }>
   saveConfig: (proxyId: string, content: string) => Promise<{ success: boolean; error?: string }>
   restoreBackup: (proxyId: string) => Promise<{ success: boolean }>
-  testLatency: (proxyId: string) => Promise<{ nodes: { host: string; port: number; latency: number }[] }>
+  testLatency: (proxyId: string) => Promise<{
+    current: { host: string; port: number; latency: number }[]
+    slots: { slot: number; description: string; nodes: { host: string; port: number; latency: number }[] }[]
+  }>
+  testRealLatency: (proxyId: string) => Promise<{ latency: number }>
+  getSystemProxyStatus: () => Promise<{ enabled: boolean; server: string | null; pacUrl: string | null }>
   updateIP: (proxyId: string, slot: number) => Promise<{ success: boolean; error?: string }>
   getSlots: (proxyId: string) => Promise<SlotInfo[]>
   getCurrentSlot: (proxyId: string) => Promise<{ slot: number; description: string; updatedAt: string } | null>

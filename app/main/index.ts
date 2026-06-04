@@ -7,6 +7,8 @@ import { registerIpcHandlers } from './ipc-handlers'
 import { TrayManager } from './tray-manager'
 import { getSettings } from './settings-store'
 import { initUpdater, checkForUpdates, setUpdateFeedURL } from './updater'
+import { syncSystemProxy, clearSystemProxy } from './system-proxy'
+import { stopPacServer } from './pac-server'
 
 const { app, BrowserWindow, dialog } = electron
 
@@ -63,6 +65,7 @@ function createWindow(): void {
       mainWindow.webContents.send('proxy:status-changed', status)
     }
     trayManager?.updateMenu()
+    syncSystemProxy(proxyManager)
   })
 
   proxyManager.on('log', (proxyId: string, message: string, level: 'info' | 'warn' | 'error') => {
@@ -143,4 +146,6 @@ app.whenReady().then(() => {
 app.on('before-quit', () => {
   proxyManager?.stopAll()
   trayManager?.destroy()
+  clearSystemProxy()
+  stopPacServer()
 })

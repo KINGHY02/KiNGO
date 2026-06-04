@@ -11,6 +11,7 @@ const electronAPI = {
   restoreBackup: (proxyId: string) => ipcRenderer.invoke('proxy:restore-backup', proxyId),
   // Latency & IP update
   testLatency: (proxyId: string) => ipcRenderer.invoke('proxy:test-latency', proxyId),
+  testRealLatency: (proxyId: string) => ipcRenderer.invoke('proxy:test-real-latency', proxyId),
   updateIP: (proxyId: string, slot: number) => ipcRenderer.invoke('proxy:update-ip', proxyId, slot),
   getSlots: (proxyId: string) => ipcRenderer.invoke('proxy:get-slots', proxyId),
   getCurrentSlot: (proxyId: string) => ipcRenderer.invoke('proxy:get-current-slot', proxyId),
@@ -20,6 +21,7 @@ const electronAPI = {
   // Settings
   getSettings: () => ipcRenderer.invoke('settings:get'),
   setSettings: (settings: Record<string, unknown>) => ipcRenderer.invoke('settings:set', settings),
+  getSystemProxyStatus: () => ipcRenderer.invoke('system-proxy:status'),
   // Logs
   getLogs: (proxyId?: string, limit?: number) => ipcRenderer.invoke('logs:get', proxyId, limit),
   clearLogs: () => ipcRenderer.invoke('logs:clear'),

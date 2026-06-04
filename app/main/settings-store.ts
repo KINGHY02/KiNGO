@@ -2,6 +2,7 @@ import Store from 'electron-store'
 
 export interface AppSettings {
   systemProxy: boolean
+  proxyMode: 'global' | 'rule'
   autoStart: boolean
   browserPath: string
   minimizeToTray: boolean
@@ -12,6 +13,7 @@ export interface AppSettings {
 
 const defaults: AppSettings = {
   systemProxy: false,
+  proxyMode: 'rule',
   autoStart: false,
   browserPath: 'Browser\\chrome.exe',
   minimizeToTray: true,
@@ -25,6 +27,7 @@ const store = new Store<AppSettings>({
   defaults,
   schema: {
     systemProxy: { type: 'boolean' },
+    proxyMode: { type: 'string', enum: ['global', 'rule'] },
     autoStart: { type: 'boolean' },
     browserPath: { type: 'string' },
     minimizeToTray: { type: 'boolean' },

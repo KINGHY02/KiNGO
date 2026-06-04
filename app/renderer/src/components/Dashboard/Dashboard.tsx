@@ -1,9 +1,9 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
-import { Button, Tag, Typography, Select, message, Spin } from 'antd'
-import { ChromeOutlined, StopOutlined, LoadingOutlined, ThunderboltOutlined, PauseCircleOutlined } from '@ant-design/icons'
+import { Button, Tag, Typography, Select, message, Spin, Switch } from 'antd'
+import { ChromeOutlined, StopOutlined, LoadingOutlined, ThunderboltOutlined, PauseCircleOutlined, DashboardOutlined } from '@ant-design/icons'
 import { useProxyStatus } from '../../hooks/useProxyStatus'
 import { useTheme } from '../../hooks/useTheme'
-import { startProxy, stopProxy, launchChrome, getCurrentSlot, getSlots, switchSlot, updateIP } from '../../services/ipc-client'
+import { startProxy, stopProxy, launchChrome, getCurrentSlot, getSlots, switchSlot, updateIP, testRealLatency, getSettings, setSettings } from '../../services/ipc-client'
 
 const PROXY_OPTIONS = [
   { value: 'clash-meta', label: 'Clash.Meta' },
@@ -46,9 +46,34 @@ export default function Dashboard(): JSX.Element {
   const [activeSlot, setActiveSlot] = useState<number | null>(null)
   const [switchingSlot, setSwitchingSlot] = useState(false)
   const [autoUpdating, setAutoUpdating] = useState(false)
+  const [latency, setLatency] = useState<number | null>(null)
+  const [testingLatency, setTestingLatency] = useState(false)
+  const [proxyMode, setProxyMode] = useState<'global' | 'rule'>('rule')
+  const [systemProxyEnabled, setSystemProxyEnabled] = useState(false)
 
   const selectedProxy = statuses.find((s) => s.id === selectedId)
   const running = selectedProxy?.running ?? false
+
+  // Sync latency from proxy status
+  useEffect(() => {
+    if (selectedProxy?.latency !== undefined && selectedProxy.latency !== null) {
+      setLatency(selectedProxy.latency)
+    }
+    if (!running) setLatency(null)
+  }, [selectedProxy?.latency, running])
+
+  // Load settings for proxy mode controls
+  useEffect(() => {
+    getSettings().then((s) => {
+      setProxyMode(s.proxyMode || 'rule')
+      setSystemProxyEnabled(s.systemProxy || false)
+    }).catch(() => {})
+    window.electronAPI.onSettingsChanged((s) => {
+      setProxyMode(s.proxyMode || 'rule')
+      setSystemProxyEnabled(s.systemProxy || false)
+    })
+    return () => { window.electronAPI.removeAllListeners('settings:changed') }
+  }, [])
 
   const loadSlots = useCallback(async (proxyId: string) => {
     setSlotsLoading(true)
@@ -123,12 +148,43 @@ export default function Dashboard(): JSX.Element {
     else { message.warning(result.error || '浏览器启动失败') }
   }
 
+  const handleTestLatency = async () => {
+    if (!running) return
+    setTestingLatency(true)
+    try {
+      const result = await testRealLatency(selectedId)
+      setLatency(result.latency >= 0 ? result.latency : null)
+      if (result.latency >= 0) message.success(`延迟: ${result.latency}ms`)
+      else message.warning('测速失败，请检查代理是否正常运行')
+    } catch {
+      message.error('测速出错')
+    } finally {
+      setTestingLatency(false)
+    }
+  }
+
+  const handleSystemProxyToggle = async (checked: boolean) => {
+    setSystemProxyEnabled(checked)
+    try {
+      await setSettings({ systemProxy: checked, proxyMode })
+    } catch { message.error('设置失败') }
+  }
+
+  const handleProxyModeToggle = async (checked: boolean) => {
+    const mode = checked ? 'global' : 'rule'
+    setProxyMode(mode)
+    try {
+      await setSettings({ proxyMode: mode, systemProxy: systemProxyEnabled || true })
+      if (!systemProxyEnabled) setSystemProxyEnabled(true)
+    } catch { message.error('设置失败') }
+  }
+
   const handleSlotClick = async (slot: number) => {
     if (slot === activeSlot || switchingSlot) return
     setSwitchingSlot(true)
     try {
       const result = await switchSlot(selectedId, slot)
-      if (result.success) { setActiveSlot(slot); message.success(`已切换到槽位 ${slot}`) }
+      if (result.success) { setActiveSlot(slot); message.success(`已切换到 IP${slot}`) }
       else { message.error(`切换失败: ${result.error}`) }
     } catch { message.error('切换出错') }
     finally { setSwitchingSlot(false) }
@@ -248,9 +304,29 @@ export default function Dashboard(): JSX.Element {
           {running ? '已连接' : '点击连接'}
         </Typography.Text>
         {running && selectedProxy && (
-          <Typography.Text style={{ fontSize: 13, color: statusDimColor, marginTop: 4 }}>
-            {selectedProxy.localAddress} · PID {selectedProxy.pid}
-          </Typography.Text>
+          <>
+            <Typography.Text style={{ fontSize: 13, color: statusDimColor, marginTop: 4 }}>
+              {selectedProxy.localAddress} · PID {selectedProxy.pid}
+            </Typography.Text>
+            {latency !== null && (
+              <Typography.Text style={{ fontSize: 13, marginTop: 4 }}>
+                <Tag color={latency < 150 ? 'green' : latency < 350 ? 'orange' : 'red'} style={{ marginRight: 0 }}>
+                  延迟: {latency}ms
+                </Tag>
+              </Typography.Text>
+            )}
+            {running && latency === null && !testingLatency && (
+              <Typography.Text style={{ fontSize: 12, color: statusDimColor, marginTop: 2 }}>
+                等待测速...
+              </Typography.Text>
+            )}
+            {testingLatency && (
+              <Typography.Text style={{ fontSize: 12, color: statusDimColor, marginTop: 4 }}>
+                <LoadingOutlined style={{ marginRight: 4 }} spin />
+                正在测速...
+              </Typography.Text>
+            )}
+          </>
         )}
         {autoUpdating && (
           <Typography.Text style={{ fontSize: 12, color: statusDimColor, marginTop: 4 }}>
@@ -258,6 +334,31 @@ export default function Dashboard(): JSX.Element {
             正在更新线路配置...
           </Typography.Text>
         )}
+
+        {/* Proxy mode controls */}
+        <div style={{
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
+          gap: 24, marginTop: 16, width: '100%', maxWidth: 380
+        }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            <Typography.Text style={{ fontSize: 13, color: statusDimColor }}>系统代理</Typography.Text>
+            <Switch
+              size="small"
+              checked={systemProxyEnabled}
+              onChange={handleSystemProxyToggle}
+            />
+          </div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            <Typography.Text style={{ fontSize: 13, color: statusDimColor }}>代理模式</Typography.Text>
+            <Switch
+              size="small"
+              checked={proxyMode === 'global'}
+              onChange={handleProxyModeToggle}
+              checkedChildren="全局"
+              unCheckedChildren="规则"
+            />
+          </div>
+        </div>
 
         <div style={{ flex: 1, minHeight: 12 }} />
 
@@ -355,6 +456,23 @@ export default function Dashboard(): JSX.Element {
             onMouseLeave={(e) => { e.currentTarget.style.background = t.dashActionBtnBg; e.currentTarget.style.color = t.dashActionBtnColor }}
           >
             启动浏览器
+          </Button>
+          <Button
+            type="primary"
+            icon={<DashboardOutlined />}
+            onClick={handleTestLatency}
+            loading={testingLatency}
+            disabled={!running}
+            size="large"
+            style={{
+              height: 44, borderRadius: 10, minWidth: 44,
+              background: t.dashActionBtnBg, border: `1px solid ${t.dashActionBtnBorder}`,
+              color: t.dashActionBtnColor, fontWeight: 500, transition: 'all 0.2s ease'
+            }}
+            onMouseEnter={(e) => { if (running) { e.currentTarget.style.background = t.mode === 'dark' ? 'rgba(255,255,255,0.14)' : '#f0f0f0'; e.currentTarget.style.color = t.text } }}
+            onMouseLeave={(e) => { e.currentTarget.style.background = t.dashActionBtnBg; e.currentTarget.style.color = t.dashActionBtnColor }}
+          >
+            测速
           </Button>
           <Button
             danger

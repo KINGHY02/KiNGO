@@ -12,6 +12,7 @@ export default function Settings(): JSX.Element {
   const [version, setVersion] = useState('')
   const [checking, setChecking] = useState(false)
   const [lastCheck, setLastCheck] = useState<string | null>(null)
+  const [systemProxyEnabled, setSystemProxyEnabled] = useState(false)
 
   useEffect(() => {
     loadSettings()
@@ -22,6 +23,7 @@ export default function Settings(): JSX.Element {
     try {
       const settings = await getSettings()
       form.setFieldsValue(settings)
+      setSystemProxyEnabled(settings.systemProxy)
       setLoaded(true)
     } catch {
       message.error('加载设置失败')
@@ -32,6 +34,10 @@ export default function Settings(): JSX.Element {
     setLoading(true)
     try {
       const values = form.getFieldsValue()
+      // Always include proxyMode even if field is unmounted (systemProxy off)
+      if (!('proxyMode' in values)) {
+        values.proxyMode = form.getFieldValue('proxyMode') || 'rule'
+      }
       await setSettings(values)
       message.success('设置已保存')
     } catch {
@@ -59,21 +65,25 @@ export default function Settings(): JSX.Element {
   if (!loaded) return <Typography.Text>加载中...</Typography.Text>
 
   return (
-    <div style={{ maxWidth: 600 }}>
-      <Card title="基本设置">
-        <Form
-          form={form}
-          layout="vertical"
-          initialValues={{
-            systemProxy: false,
-            autoStart: false,
-            browserPath: 'Browser\\chrome.exe',
-            minimizeToTray: true,
-            theme: 'light',
-            autoCheckUpdates: true,
-            updateMirror: ''
-          }}
-        >
+    <Form
+      form={form}
+      layout="vertical"
+      initialValues={{
+        systemProxy: false,
+        proxyMode: 'rule',
+        autoStart: false,
+        browserPath: 'Browser\\chrome.exe',
+        minimizeToTray: true,
+        theme: 'light',
+        autoCheckUpdates: true,
+        updateMirror: ''
+      }}
+      onValuesChange={(changed) => {
+        if ('systemProxy' in changed) setSystemProxyEnabled(changed.systemProxy)
+      }}
+    >
+      <div style={{ maxWidth: 600 }}>
+        <Card title="基本设置">
           <Form.Item
             label="连接时自动设置系统代理"
             name="systemProxy"
@@ -81,6 +91,18 @@ export default function Settings(): JSX.Element {
           >
             <Switch />
           </Form.Item>
+
+          {systemProxyEnabled && (
+            <Form.Item label="代理模式" name="proxyMode">
+              <Select
+                options={[
+                  { label: '规则模式', value: 'rule' },
+                  { label: '全局模式', value: 'global' }
+                ]}
+                style={{ width: 160 }}
+              />
+            </Form.Item>
+          )}
 
           <Form.Item
             label="开机自动启动"
@@ -119,11 +141,9 @@ export default function Settings(): JSX.Element {
               保存设置
             </Button>
           </Form.Item>
-        </Form>
-      </Card>
+        </Card>
 
       <Card title="更新" style={{ marginTop: 16 }}>
-        <Form form={form} layout="vertical">
           <div style={{ marginBottom: 16, display: 'flex', alignItems: 'center', gap: 12 }}>
             <Text>当前版本:</Text>
             <Text strong style={{ fontSize: 15 }}>v{version || '1.0.0'}</Text>
@@ -160,7 +180,6 @@ export default function Settings(): JSX.Element {
           >
             <Input placeholder="https://example.com/updates" style={{ width: 320 }} />
           </Form.Item>
-        </Form>
       </Card>
 
       <Card title="关于" style={{ marginTop: 16 }}>
@@ -233,5 +252,6 @@ export default function Settings(): JSX.Element {
         </Text>
       </Card>
     </div>
+    </Form>
   )
 }

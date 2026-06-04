@@ -1,4 +1,4 @@
-import { readFileSync, writeFileSync, copyFileSync, existsSync } from 'fs'
+import { readFileSync, writeFileSync, copyFileSync, existsSync, readdirSync } from 'fs'
 import { join, dirname } from 'path'
 import * as yaml from 'js-yaml'
 import { ProxyDefinition } from './proxy-manager'
@@ -6,6 +6,12 @@ import { ProxyDefinition } from './proxy-manager'
 interface ServerInfo {
   host: string
   port: number
+}
+
+export interface SlotServers {
+  slot: number
+  description: string
+  servers: ServerInfo[]
 }
 
 export class ConfigService {
@@ -75,17 +81,19 @@ export class ConfigService {
   }
 
   extractServerInfo(proxyId: string, defs: ProxyDefinition[]): ServerInfo[] {
-    const def = defs.find((d) => d.id === proxyId)
     const cfg = this.readConfig(proxyId, defs)
-    if (!def || !cfg) return []
+    if (!cfg) return []
+    return this.parseServerInfo(proxyId, cfg.content, cfg.format)
+  }
 
+  private parseServerInfo(proxyId: string, content: string, format: string): ServerInfo[] {
     try {
-      const data = cfg.format === 'yaml' ? yaml.load(cfg.content) as Record<string, unknown> : JSON.parse(cfg.content)
+      const data = format === 'yaml' ? yaml.load(content) as Record<string, unknown> : JSON.parse(content)
 
-      switch (def.id) {
+      switch (proxyId) {
         case 'clash-meta': {
           const proxies = (data as { proxies?: Array<{ server: string; port: number }> }).proxies
-          return proxies ? proxies.map((p) => ({ host: p.server, port: p.port })) : []
+          return proxies ? proxies.map((p) => ({ host: p.server, port: p.port })).filter((s) => s.port > 0) : []
         }
         case 'xray': {
           const outbounds = (data as { outbounds?: Array<{ protocol: string; settings: { vnext?: Array<{ address: string; port: number }> } }> }).outbounds
@@ -95,11 +103,15 @@ export class ConfigService {
         }
         case 'hysteria': {
           const server = (data as { server?: string }).server
-          return server ? [parseHostPort(server)] : []
+          if (!server) return []
+          const info = parseHostPort(server)
+          return info ? [info] : []
         }
         case 'hysteria2': {
           const server = (data as { server?: string }).server
-          return server ? [parseHostPort(server)] : []
+          if (!server) return []
+          const info = parseHostPort(server)
+          return info ? [info] : []
         }
         case 'singbox': {
           const ob = (data as { outbounds?: Array<{ server: string; server_port: number }> }).outbounds
@@ -118,31 +130,67 @@ export class ConfigService {
         }
         case 'juicity': {
           const server = (data as { server?: string }).server
-          return server ? [parseHostPort(server)] : []
+          if (!server) return []
+          const info = parseHostPort(server)
+          return info ? [info] : []
         }
         case 'mieru': {
           const profiles = (data as { profiles?: Array<{ servers?: Array<{ ipAddress: string }> }> }).profiles
           const portBindings = (data as { portBindings?: Array<{ port: number }> }).portBindings
           const ip = profiles?.[0]?.servers?.[0]?.ipAddress
           const port = portBindings?.[0]?.port
-          return ip ? [{ host: ip, port: port ?? 0 }] : []
+          return ip && port ? [{ host: ip, port }] : []
         }
         case 'shadowquic': {
           const addr = (data as { outbound?: { addr?: string } }).outbound?.addr
-          return addr ? [parseHostPort(addr)] : []
+          if (!addr) return []
+          const info = parseHostPort(addr)
+          return info ? [info] : []
         }
       }
     } catch { /* ignore parse errors */ }
     return []
   }
+
+  extractAllSlotServers(proxyId: string, defs: ProxyDefinition[]): SlotServers[] {
+    const def = defs.find((d) => d.id === proxyId)
+    if (!def) return []
+
+    const ipUpdateDir = join(this.baseDir, def.dir, 'ip_Update')
+    if (!existsSync(ipUpdateDir)) return []
+
+    const results: SlotServers[] = []
+    let files: string[]
+    try {
+      files = readdirSync(ipUpdateDir)
+    } catch {
+      return []
+    }
+
+    for (const file of files) {
+      const match = file.match(/^slot_(\d+)_/)
+      if (!match) continue
+      const slot = Number(match[1])
+
+      // Read cached slot config
+      const content = readFileSync(join(ipUpdateDir, file), 'utf-8')
+      const servers = this.parseServerInfo(proxyId, content, def.configFormat)
+
+      results.push({ slot, description: `IP${slot}`, servers })
+    }
+
+    return results.sort((a, b) => a.slot - b.slot)
+  }
 }
 
-function parseHostPort(str: string): ServerInfo {
+function parseHostPort(str: string): ServerInfo | null {
   // Handle formats: "host:port" or "host"
   const parts = str.split(':')
   if (parts.length >= 2 && !isNaN(Number(parts[parts.length - 1]))) {
     const port = Number(parts.pop())
-    return { host: parts.join(':'), port }
+    if (port > 0) {
+      return { host: parts.join(':'), port }
+    }
   }
-  return { host: str, port: 0 }
+  return null
 }
