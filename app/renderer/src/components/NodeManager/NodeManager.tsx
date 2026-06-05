@@ -3,6 +3,7 @@ import { Card, Select, Button, Table, Typography, Space, Tag, message, Row, Col,
 import { ThunderboltOutlined, CloudDownloadOutlined, SwapOutlined, LoadingOutlined, DashboardOutlined } from '@ant-design/icons'
 import { testLatency, updateIP, getSlots, switchSlot, testRealLatency } from '../../services/ipc-client'
 import { useProxyStatus } from '../../hooks/useProxyStatus'
+import { useTheme } from '../../hooks/useTheme'
 
 const PROXY_OPTIONS = [
   { value: 'clash-meta', label: 'Clash.Meta' },
@@ -39,6 +40,7 @@ export default function NodeManager(): JSX.Element {
   const [testingReal, setTestingReal] = useState(false)
 
   const { statuses } = useProxyStatus()
+  const t = useTheme()
   const isProxyRunning = useMemo(
     () => statuses.some((s) => s.id === selectedId && s.running),
     [statuses, selectedId]
@@ -202,9 +204,9 @@ export default function NodeManager(): JSX.Element {
                       alignItems: 'center',
                       justifyContent: 'space-between',
                       padding: '8px 12px',
-                      background: s.active ? '#f6ffed' : '#fafafa',
+                      background: s.active ? t.dashSlotActiveBg : t.dashSlotBg,
                       borderRadius: 6,
-                      border: s.active ? '1px solid #b7eb8f' : '1px solid #d9d9d9'
+                      border: s.active ? `1px solid ${t.dashSlotActiveBorder}` : `1px solid ${t.dashSlotBorder}`
                     }}
                   >
                     <Tooltip title={s.description}>

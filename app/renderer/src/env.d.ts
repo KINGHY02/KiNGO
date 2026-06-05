@@ -24,7 +24,7 @@ interface AppSettings {
   autoStart: boolean
   browserPath: string
   minimizeToTray: boolean
-  theme: 'light' | 'dark'
+  theme: 'light' | 'dark' | 'pink' | 'blue'
   autoCheckUpdates: boolean
   updateMirror: string
 }
@@ -67,17 +67,16 @@ interface ElectronAPI {
   installUpdate: () => void
   getAppVersion: () => Promise<string>
   setUpdateFeedURL: (url: string) => Promise<void>
-  onStatusChanged: (callback: (status: ProxyStatus) => void) => void
-  onLog: (callback: (entry: LogEntry) => void) => void
-  onProxyUpdateProgress: (callback: (progress: { proxyId: string; slot: number; percent: number }) => void) => void
-  onMaximizeChanged: (callback: (maximized: boolean) => void) => void
-  onSettingsChanged: (callback: (settings: AppSettings) => void) => void
-  onUpdateStatus: (callback: (data: { status: string }) => void) => void
-  onUpdateAvailable: (callback: (data: { version: string; releaseDate?: string }) => void) => void
-  onUpdateProgress: (callback: (data: { percent: number; transferred: number; total: number }) => void) => void
-  onUpdateDownloaded: (callback: (data: { version: string }) => void) => void
-  onUpdateError: (callback: (data: { message: string }) => void) => void
-  removeAllListeners: (channel: string) => void
+  onStatusChanged: (callback: (status: ProxyStatus) => void) => () => void
+  onLog: (callback: (entry: LogEntry) => void) => () => void
+  onProxyUpdateProgress: (callback: (progress: { proxyId: string; slot: number; percent: number }) => void) => () => void
+  onMaximizeChanged: (callback: (maximized: boolean) => void) => () => void
+  onSettingsChanged: (callback: (settings: AppSettings) => void) => () => void
+  onUpdateStatus: (callback: (data: { status: string }) => void) => () => void
+  onUpdateAvailable: (callback: (data: { version: string; releaseDate?: string }) => void) => () => void
+  onUpdateProgress: (callback: (data: { percent: number; transferred: number; total: number }) => void) => () => void
+  onUpdateDownloaded: (callback: (data: { version: string }) => void) => () => void
+  onUpdateError: (callback: (data: { message: string }) => void) => () => void
 }
 
 interface Window {

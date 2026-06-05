@@ -31,7 +31,7 @@ const store = new Store<AppSettings>({
     autoStart: { type: 'boolean' },
     browserPath: { type: 'string' },
     minimizeToTray: { type: 'boolean' },
-    theme: { type: 'string', enum: ['light', 'dark'] },
+    theme: { type: 'string', enum: ['light', 'dark', 'pink', 'blue'] },
     autoCheckUpdates: { type: 'boolean' },
     updateMirror: { type: 'string' }
   }

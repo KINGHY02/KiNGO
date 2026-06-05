@@ -35,3 +35,8 @@ body {
 .ant-menu-item-selected {
   background: rgba(75, 108, 247, 0.15) !important;
 }
+
+/* Sider trigger — inherit background from Sider (which has theme-aware inline style) */
+.ant-layout-sider-trigger {
+  background: inherit !important;
+}

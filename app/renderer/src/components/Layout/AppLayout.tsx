@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react'
-import { Layout, Menu, Typography, Button } from 'antd'
+import { Layout, Menu, Typography, Button, Tooltip } from 'antd'
 import {
   DashboardOutlined,
   SettingOutlined,
@@ -11,7 +11,11 @@ import {
   CloseOutlined,
   BlockOutlined,
   LeftOutlined,
-  RightOutlined
+  RightOutlined,
+  SunOutlined,
+  MoonOutlined,
+  HeartOutlined,
+  StarOutlined
 } from '@ant-design/icons'
 import Dashboard from '../Dashboard/Dashboard'
 import ProxyDetail from '../ProxyDetail/ProxyDetail'
@@ -20,7 +24,7 @@ import Settings from '../Settings/Settings'
 import LogViewer from '../LogViewer/LogViewer'
 import logo from '../../assets/KiNGO.png'
 import { minimizeWindow, maximizeWindow, closeWindow, isMaximized as getIsMaximized, getAppVersion } from '../../services/ipc-client'
-import { useTheme } from '../../hooks/useTheme'
+import { useTheme, useSetTheme } from '../../hooks/useTheme'
 
 const { Sider, Content } = Layout
 
@@ -54,6 +58,7 @@ export default function AppLayout(): JSX.Element {
   const [maximized, setMaximized] = useState(false)
   const [version, setVersion] = useState('')
   const t = useTheme()
+  const setThemeMode = useSetTheme()
 
   useEffect(() => {
     getIsMaximized().then(setMaximized)
@@ -135,7 +140,18 @@ export default function AppLayout(): JSX.Element {
           collapsed={collapsed}
           onCollapse={setCollapsed}
           width={200}
-          trigger={null}
+          trigger={
+            <div style={{
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              height: '100%',
+              color: t.textSecondary,
+              fontSize: 12
+            }}>
+              {collapsed ? <RightOutlined /> : <LeftOutlined />}
+            </div>
+          }
           style={{
             background: t.sidebar,
             borderRight: `1px solid ${t.border}`
@@ -160,38 +176,48 @@ export default function AppLayout(): JSX.Element {
               }}
               theme={t.mode === 'dark' ? 'dark' : 'light'}
             />
+            {/* Theme toggle */}
+            <div style={{
+              display: 'flex',
+              justifyContent: 'center',
+              padding: collapsed ? '8px 0' : '6px 0',
+              borderTop: collapsed ? undefined : `1px solid ${t.border}`,
+              userSelect: 'none'
+            }}>
+              <Tooltip title={
+                t.mode === 'light' ? '切换暗色模式' : t.mode === 'dark' ? '切换粉色模式' : t.mode === 'pink' ? '切换冰川蓝模式' : '切换亮色模式'
+              } placement="right">
+                <Button
+                  type="text"
+                  size="small"
+                  icon={t.mode === 'light' ? <MoonOutlined /> : t.mode === 'dark' ? <HeartOutlined /> : t.mode === 'pink' ? <StarOutlined /> : <SunOutlined />}
+                  onClick={() => setThemeMode(t.mode === 'light' ? 'dark' : t.mode === 'dark' ? 'pink' : t.mode === 'pink' ? 'blue' : 'light')}
+                  style={{
+                    color: t.mode === 'pink' ? '#ff4088' : t.mode === 'blue' ? '#3b82f6' : t.textSecondary,
+                    fontSize: collapsed ? 16 : 14,
+                    width: collapsed ? 32 : undefined,
+                    height: 32,
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center'
+                  }}
+                />
+              </Tooltip>
+            </div>
             {/* Version at sidebar bottom */}
-            {!collapsed && (
-              <div style={{
-                padding: '6px 16px',
-                textAlign: 'center',
-                userSelect: 'none',
-                borderTop: `1px solid ${t.border}`
-              }}>
-                <Typography.Text style={{ fontSize: 11, color: t.textSecondary, opacity: 0.5 }}>
-                  v{version || '1.0.0'}
-                </Typography.Text>
-              </div>
-            )}
-            {/* Custom collapse trigger */}
-            <div
-              onClick={() => setCollapsed(!collapsed)}
-              style={{
-                height: 36,
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'center',
-                borderTop: `1px solid ${t.border}`,
-                cursor: 'pointer',
+            <div style={{
+              padding: collapsed ? '4px 0' : '6px 16px',
+              textAlign: 'center',
+              userSelect: 'none',
+              borderTop: `1px solid ${t.border}`
+            }}>
+              <Typography.Text style={{
+                fontSize: collapsed ? 10 : 11,
                 color: t.textSecondary,
-                background: t.sidebar,
-                transition: 'all 0.2s',
-                userSelect: 'none'
-              }}
-              onMouseEnter={(e) => { e.currentTarget.style.color = t.text }}
-              onMouseLeave={(e) => { e.currentTarget.style.color = t.textSecondary }}
-            >
-              {collapsed ? <RightOutlined /> : <LeftOutlined />}
+                opacity: collapsed ? 0.4 : 0.5
+              }}>
+                {collapsed ? (version || '1.0.0') : `v${version || '1.0.0'}`}
+              </Typography.Text>
             </div>
           </div>
         </Sider>

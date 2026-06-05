@@ -68,11 +68,11 @@ export default function Dashboard(): JSX.Element {
       setProxyMode(s.proxyMode || 'rule')
       setSystemProxyEnabled(s.systemProxy || false)
     }).catch(() => {})
-    window.electronAPI.onSettingsChanged((s) => {
+    const unsubscribe = window.electronAPI.onSettingsChanged((s) => {
       setProxyMode(s.proxyMode || 'rule')
       setSystemProxyEnabled(s.systemProxy || false)
     })
-    return () => { window.electronAPI.removeAllListeners('settings:changed') }
+    return () => { unsubscribe() }
   }, [])
 
   const loadSlots = useCallback(async (proxyId: string) => {

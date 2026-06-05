@@ -36,39 +36,56 @@ const electronAPI = {
   installUpdate: () => ipcRenderer.invoke('updater:install'),
   getAppVersion: () => ipcRenderer.invoke('updater:get-version'),
   setUpdateFeedURL: (url: string) => ipcRenderer.invoke('updater:set-feed-url', url),
-  // Events
+  // Events — each returns an unsubscribe function
   onStatusChanged: (callback: (status: unknown) => void) => {
-    ipcRenderer.on('proxy:status-changed', (_event, status) => callback(status))
+    const handler = (_event: Electron.IpcRendererEvent, status: unknown) => callback(status)
+    ipcRenderer.on('proxy:status-changed', handler)
+    return () => { ipcRenderer.removeListener('proxy:status-changed', handler) }
   },
   onLog: (callback: (entry: unknown) => void) => {
-    ipcRenderer.on('proxy:log', (_event, entry) => callback(entry))
+    const handler = (_event: Electron.IpcRendererEvent, entry: unknown) => callback(entry)
+    ipcRenderer.on('proxy:log', handler)
+    return () => { ipcRenderer.removeListener('proxy:log', handler) }
   },
   onProxyUpdateProgress: (callback: (progress: unknown) => void) => {
-    ipcRenderer.on('proxy:update-progress', (_event, progress) => callback(progress))
+    const handler = (_event: Electron.IpcRendererEvent, progress: unknown) => callback(progress)
+    ipcRenderer.on('proxy:update-progress', handler)
+    return () => { ipcRenderer.removeListener('proxy:update-progress', handler) }
   },
   onMaximizeChanged: (callback: (maximized: boolean) => void) => {
-    ipcRenderer.on('window:maximize-changed', (_event, maximized) => callback(maximized))
+    const handler = (_event: Electron.IpcRendererEvent, maximized: boolean) => callback(maximized)
+    ipcRenderer.on('window:maximize-changed', handler)
+    return () => { ipcRenderer.removeListener('window:maximize-changed', handler) }
   },
   onSettingsChanged: (callback: (settings: unknown) => void) => {
-    ipcRenderer.on('settings:changed', (_event, settings) => callback(settings))
+    const handler = (_event: Electron.IpcRendererEvent, settings: unknown) => callback(settings)
+    ipcRenderer.on('settings:changed', handler)
+    return () => { ipcRenderer.removeListener('settings:changed', handler) }
   },
   onUpdateStatus: (callback: (data: unknown) => void) => {
-    ipcRenderer.on('updater:status', (_event, data) => callback(data))
+    const handler = (_event: Electron.IpcRendererEvent, data: unknown) => callback(data)
+    ipcRenderer.on('updater:status', handler)
+    return () => { ipcRenderer.removeListener('updater:status', handler) }
   },
   onUpdateAvailable: (callback: (data: unknown) => void) => {
-    ipcRenderer.on('updater:available', (_event, data) => callback(data))
+    const handler = (_event: Electron.IpcRendererEvent, data: unknown) => callback(data)
+    ipcRenderer.on('updater:available', handler)
+    return () => { ipcRenderer.removeListener('updater:available', handler) }
   },
   onUpdateProgress: (callback: (data: unknown) => void) => {
-    ipcRenderer.on('updater:progress', (_event, data) => callback(data))
+    const handler = (_event: Electron.IpcRendererEvent, data: unknown) => callback(data)
+    ipcRenderer.on('updater:progress', handler)
+    return () => { ipcRenderer.removeListener('updater:progress', handler) }
   },
   onUpdateDownloaded: (callback: (data: unknown) => void) => {
-    ipcRenderer.on('updater:downloaded', (_event, data) => callback(data))
+    const handler = (_event: Electron.IpcRendererEvent, data: unknown) => callback(data)
+    ipcRenderer.on('updater:downloaded', handler)
+    return () => { ipcRenderer.removeListener('updater:downloaded', handler) }
   },
   onUpdateError: (callback: (data: unknown) => void) => {
-    ipcRenderer.on('updater:error', (_event, data) => callback(data))
-  },
-  removeAllListeners: (channel: string) => {
-    ipcRenderer.removeAllListeners(channel)
+    const handler = (_event: Electron.IpcRendererEvent, data: unknown) => callback(data)
+    ipcRenderer.on('updater:error', handler)
+    return () => { ipcRenderer.removeListener('updater:error', handler) }
   }
 }
 

@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { Card, Table, Button, Space, Tag, Select, Input, Typography, message } from 'antd'
 import { ClearOutlined, DownloadOutlined } from '@ant-design/icons'
-import { getLogs, clearLogs, onLog, removeAllListeners } from '../../services/ipc-client'
+import { getLogs, clearLogs, onLog } from '../../services/ipc-client'
 
 const PROXY_OPTIONS = [
   { value: 'all', label: '全部代理' },
@@ -34,7 +34,7 @@ export default function LogViewer(): JSX.Element {
   }, [loadLogs])
 
   useEffect(() => {
-    onLog((entry) => {
+    const unsub = onLog((entry) => {
       setLogs((prev) => {
         const next = [...prev, entry]
         if (next.length > 200) next.shift()
@@ -43,7 +43,7 @@ export default function LogViewer(): JSX.Element {
     })
 
     return () => {
-      removeAllListeners('proxy:log')
+      unsub()
     }
   }, [])
 

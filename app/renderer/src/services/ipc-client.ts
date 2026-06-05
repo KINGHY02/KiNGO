@@ -114,18 +114,14 @@ export async function setUpdateFeedURL(url: string): Promise<void> {
   return api.setUpdateFeedURL(url)
 }
 
-export function onStatusChanged(callback: (status: ProxyStatus) => void): void {
-  api.onStatusChanged(callback)
+export function onStatusChanged(callback: (status: ProxyStatus) => void): () => void {
+  return api.onStatusChanged(callback)
 }
 
-export function onLog(callback: (entry: LogEntry) => void): void {
-  api.onLog(callback)
+export function onLog(callback: (entry: LogEntry) => void): () => void {
+  return api.onLog(callback)
 }
 
-export function onProxyUpdateProgress(callback: (progress: { proxyId: string; slot: number; percent: number }) => void): void {
-  api.onProxyUpdateProgress(callback)
-}
-
-export function removeAllListeners(channel: string): void {
-  api.removeAllListeners(channel)
+export function onProxyUpdateProgress(callback: (progress: { proxyId: string; slot: number; percent: number }) => void): () => void {
+  return api.onProxyUpdateProgress(callback)
 }

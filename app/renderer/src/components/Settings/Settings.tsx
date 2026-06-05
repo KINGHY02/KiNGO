@@ -5,9 +5,19 @@ import { getSettings, setSettings, getAppVersion, checkForUpdates } from '../../
 
 const { Link, Text, Title } = Typography
 
+const INITIAL_VALUES = {
+  systemProxy: false,
+  proxyMode: 'rule',
+  autoStart: false,
+  browserPath: 'Browser\\chrome.exe',
+  minimizeToTray: true,
+  theme: 'light',
+  autoCheckUpdates: true,
+  updateMirror: ''
+}
+
 export default function Settings(): JSX.Element {
   const [form] = Form.useForm()
-  const [loading, setLoading] = useState(false)
   const [loaded, setLoaded] = useState(false)
   const [version, setVersion] = useState('')
   const [checking, setChecking] = useState(false)
@@ -32,23 +42,6 @@ export default function Settings(): JSX.Element {
     }
   }
 
-  const handleSave = async (): Promise<void> => {
-    setLoading(true)
-    try {
-      const values = form.getFieldsValue()
-      // Always include proxyMode even if field is unmounted (systemProxy off)
-      if (!('proxyMode' in values)) {
-        values.proxyMode = form.getFieldValue('proxyMode') || 'rule'
-      }
-      await setSettings(values)
-      message.success('设置已保存')
-    } catch {
-      message.error('保存设置失败')
-    } finally {
-      setLoading(false)
-    }
-  }
-
   const handleCheckUpdate = async (): Promise<void> => {
     setChecking(true)
     try {
@@ -70,18 +63,14 @@ export default function Settings(): JSX.Element {
     <Form
       form={form}
       layout="vertical"
-      initialValues={{
-        systemProxy: false,
-        proxyMode: 'rule',
-        autoStart: false,
-        browserPath: 'Browser\\chrome.exe',
-        minimizeToTray: true,
-        theme: 'light',
-        autoCheckUpdates: true,
-        updateMirror: ''
-      }}
+      initialValues={INITIAL_VALUES}
       onValuesChange={(changed) => {
         if ('systemProxy' in changed) setSystemProxyEnabled(changed.systemProxy)
+        const [key] = Object.keys(changed)
+        // Instant save for Switch/Select fields (not Input fields which use onBlur)
+        if (key !== 'browserPath' && key !== 'updateMirror') {
+          setSettings({ [key]: changed[key] as never }).catch(() => {})
+        }
       }}
     >
       <div style={{ maxWidth: 600 }}>
@@ -125,24 +114,21 @@ export default function Settings(): JSX.Element {
           <Divider />
 
           <Form.Item label="浏览器路径" name="browserPath">
-            <Input style={{ width: 320 }} />
+            <Input style={{ width: 320 }} onBlur={(e) => setSettings({ browserPath: e.target.value }).catch(() => {})} />
           </Form.Item>
 
           <Form.Item label="界面主题" name="theme">
             <Select
               options={[
                 { label: '亮色', value: 'light' },
-                { label: '暗色', value: 'dark' }
+                { label: '暗色', value: 'dark' },
+                { label: '粉色', value: 'pink' },
+                { label: '冰川蓝', value: 'blue' }
               ]}
               style={{ width: 120 }}
             />
           </Form.Item>
 
-          <Form.Item>
-            <Button type="primary" onClick={handleSave} loading={loading}>
-              保存设置
-            </Button>
-          </Form.Item>
         </Card>
 
       <Card title="更新" style={{ marginTop: 16 }}>
@@ -180,7 +166,7 @@ export default function Settings(): JSX.Element {
             name="updateMirror"
             extra="留空则使用 GitHub Releases 直连"
           >
-            <Input placeholder="https://example.com/updates" style={{ width: 320 }} />
+            <Input placeholder="https://example.com/updates" style={{ width: 320 }} onBlur={(e) => setSettings({ updateMirror: e.target.value }).catch(() => {})} />
           </Form.Item>
       </Card>
 

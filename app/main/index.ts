@@ -1,4 +1,4 @@
-import electron from 'electron'
+import { app, BrowserWindow, dialog } from 'electron'
 import { join } from 'path'
 import { ProxyManager } from './proxy-manager'
 import { ConfigService } from './config-service'
@@ -10,7 +10,6 @@ import { initUpdater, checkForUpdates, setUpdateFeedURL } from './updater'
 import { syncSystemProxy, clearSystemProxy } from './system-proxy'
 import { stopPacServer } from './pac-server'
 
-const { app, BrowserWindow, dialog } = electron
 
 // Catch unhandled errors so the user sees something instead of silent crash
 process.on('uncaughtException', (err) => {
@@ -29,6 +28,7 @@ let proxyManager: ProxyManager
 let configService: ConfigService
 let logService: LogService
 let BASE_DIR: string
+let forceQuitting = false
 
 function createWindow(): void {
   // Find the app icon for the window (taskbar thumbnail)
@@ -73,6 +73,7 @@ function createWindow(): void {
   })
 
   mainWindow.on('close', (event) => {
+    if (forceQuitting) return // Let window close during quit (e.g. update install)
     const settings = getSettings()
     if (settings.minimizeToTray) {
       event.preventDefault()
@@ -144,6 +145,7 @@ app.whenReady().then(() => {
 })
 
 app.on('before-quit', () => {
+  forceQuitting = true
   proxyManager?.stopAll()
   trayManager?.destroy()
   clearSystemProxy()

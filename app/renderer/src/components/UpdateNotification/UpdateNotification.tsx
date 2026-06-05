@@ -26,55 +26,50 @@ export default function UpdateNotification(): JSX.Element {
 
   useEffect(() => {
     const api = window.electronAPI
+    const unsubs: (() => void)[] = []
 
     if (api.onUpdateStatus) {
-      api.onUpdateStatus((data: { status: string }) => {
+      unsubs.push(api.onUpdateStatus((data: { status: string }) => {
         if (data.status === 'checking') {
           setPhase('checking')
         } else if (data.status === 'not-available') {
           setPhase('not-available')
           setTimeout(resetState, 3000)
         }
-      })
+      }))
     }
 
     if (api.onUpdateAvailable) {
-      api.onUpdateAvailable((data: { version: string; releaseDate?: string }) => {
+      unsubs.push(api.onUpdateAvailable((data: { version: string; releaseDate?: string }) => {
         setUpdateInfo(data)
         setPhase('available')
         setVisible(true)
-      })
+      }))
     }
 
     if (api.onUpdateProgress) {
-      api.onUpdateProgress((data: { percent: number }) => {
+      unsubs.push(api.onUpdateProgress((data: { percent: number }) => {
         setPhase('downloading')
         setProgress(Math.round(data.percent))
-      })
+      }))
     }
 
     if (api.onUpdateDownloaded) {
-      api.onUpdateDownloaded(() => {
+      unsubs.push(api.onUpdateDownloaded(() => {
         setPhase('downloaded')
         setProgress(100)
-      })
+      }))
     }
 
     if (api.onUpdateError) {
-      api.onUpdateError((data: { message: string }) => {
+      unsubs.push(api.onUpdateError((data: { message: string }) => {
         setPhase('error')
         setErrorMsg(data.message || '更新过程出错')
-      })
+      }))
     }
 
     return () => {
-      if (api.removeAllListeners) {
-        api.removeAllListeners('updater:status')
-        api.removeAllListeners('updater:available')
-        api.removeAllListeners('updater:progress')
-        api.removeAllListeners('updater:downloaded')
-        api.removeAllListeners('updater:error')
-      }
+      unsubs.forEach((u) => u())
     }
   }, [resetState])
 
