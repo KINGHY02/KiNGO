@@ -9,6 +9,7 @@ export interface AppSettings {
   theme: 'light' | 'dark'
   autoCheckUpdates: boolean
   updateMirror: string
+  defaultCoreByProtocol: Record<string, string>
 }
 
 const defaults: AppSettings = {
@@ -19,7 +20,22 @@ const defaults: AppSettings = {
   minimizeToTray: true,
   theme: 'light',
   autoCheckUpdates: true,
-  updateMirror: ''
+  updateMirror: '',
+  defaultCoreByProtocol: {
+    vmess: 'xray',
+    vless: 'xray',
+    trojan: 'xray',
+    ss: 'xray',
+    ss2022: 'singbox',
+    ssr: 'singbox',
+    hysteria: 'hysteria',
+    hysteria2: 'hysteria2',
+    tuic: 'singbox',
+    naive: 'naiveproxy',
+    juicity: 'juicity',
+    mieru: 'mieru',
+    shadowquic: 'shadowquic'
+  }
 }
 
 const store = new Store<AppSettings>({
@@ -33,7 +49,11 @@ const store = new Store<AppSettings>({
     minimizeToTray: { type: 'boolean' },
     theme: { type: 'string', enum: ['light', 'dark', 'pink', 'blue'] },
     autoCheckUpdates: { type: 'boolean' },
-    updateMirror: { type: 'string' }
+    updateMirror: { type: 'string' },
+    defaultCoreByProtocol: {
+      type: 'object',
+      additionalProperties: { type: 'string' }
+    }
   }
 })
 

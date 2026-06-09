@@ -1,5 +1,6 @@
 import { ChildProcess, spawn } from 'child_process'
 import { join } from 'path'
+import { writeFileSync, copyFileSync, existsSync, unlinkSync } from 'fs'
 import { EventEmitter } from 'events'
 import { app } from 'electron'
 import { testRealLatency } from './latency-tester'
@@ -89,6 +90,8 @@ export class ProxyManager extends EventEmitter {
   private statuses = new Map<string, ProxyStatus>()
   private latencyTimers = new Map<string, ReturnType<typeof setInterval>>()
   private baseDir: string
+  private customConfigBackups = new Map<string, string>()
+  private customConfigRunning = new Set<string>()
 
   constructor(baseDir: string) {
     super()
@@ -135,6 +138,11 @@ export class ProxyManager extends EventEmitter {
       return { success: false, error: '代理已在运行中' }
     }
 
+    // A single active core keeps the system/PAC route deterministic.
+    for (const [id] of this.processes) {
+      if (id !== proxyId) await this.stop(id)
+    }
+
     // Check port conflict and auto-stop conflicting proxy
     for (const [id, proc] of this.processes) {
       const otherDef = this.getDef(id)
@@ -146,6 +154,16 @@ export class ProxyManager extends EventEmitter {
     const proxyDir = join(this.baseDir, def.dir)
     const exePath = join(proxyDir, def.executable)
     const configPath = join(proxyDir, def.configFile)
+
+    if (!this.customConfigRunning.has(proxyId)) {
+      this.recoverConfigIfNeeded(proxyId)
+    }
+    if (!existsSync(exePath)) {
+      return { success: false, error: `Executable not found: ${exePath}` }
+    }
+    if (!existsSync(configPath)) {
+      return { success: false, error: `Config file not found: ${configPath}` }
+    }
 
     // Build args by replacing placeholders
     const args = def.args.map((arg) =>
@@ -184,9 +202,11 @@ export class ProxyManager extends EventEmitter {
         this.emit('log', proxyId, `进程错误: ${err.message}`, 'error')
         this.updateStatus(proxyId, { running: false, pid: null })
         this.processes.delete(proxyId)
+        this.cleanup(proxyId)
       })
 
       proc.on('close', (code) => {
+        this.cleanup(proxyId)
         this.emit('log', proxyId, `进程退出，代码: ${code}`, code === 0 ? 'info' : 'error')
         this.updateStatus(proxyId, { running: false, pid: null })
         this.processes.delete(proxyId)
@@ -202,6 +222,117 @@ export class ProxyManager extends EventEmitter {
       const msg = err instanceof Error ? err.message : String(err)
       return { success: false, error: msg }
     }
+  }
+
+  async startWithConfig(proxyId: string, configContent: string): Promise<{ success: boolean; pid?: number; error?: string }> {
+    const def = this.getDef(proxyId)
+    if (!def) return { success: false, error: `未知代理: ${proxyId}` }
+
+    // Force-stop if already running (from dashboard or previous connect)
+    if (this.processes.has(proxyId)) {
+      try { await this.stop(proxyId) } catch { /* ignore */ }
+      // Small delay to let port release
+      await new Promise((resolve) => setTimeout(resolve, 500))
+    }
+
+    const configPath = join(this.baseDir, def.dir, def.configFile)
+    const backupPath = configPath + '.usernode_backup'
+
+    this.recoverConfigIfNeeded(proxyId)
+
+    // Backup existing config if not already backed up
+    try {
+      if (existsSync(configPath) && !existsSync(backupPath)) {
+        copyFileSync(configPath, backupPath)
+        this.customConfigBackups.set(proxyId, backupPath)
+      }
+    } catch {
+      return { success: false, error: '备份原配置失败' }
+    }
+
+    // Write custom config
+    try {
+      writeFileSync(configPath, configContent, 'utf-8')
+    } catch {
+      return { success: false, error: '写入配置文件失败' }
+    }
+
+    this.customConfigRunning.add(proxyId)
+
+    // Mieru special: apply config first
+    if (proxyId === 'mieru') {
+      const proxyDir = join(this.baseDir, def.dir)
+      const exePath = join(proxyDir, def.executable)
+      try {
+        await this.spawnAndWait(exePath, ['apply', 'config', configPath], proxyDir)
+      } catch (err) {
+        this.restoreConfig(proxyId)
+        const msg = err instanceof Error ? err.message : String(err)
+        return { success: false, error: `Mieru config apply 失败: ${msg}` }
+      }
+    }
+
+    const result = await this.start(proxyId)
+
+    if (!result.success) {
+      this.restoreConfig(proxyId)
+    }
+
+    return result
+  }
+
+  private restoreConfig(proxyId: string): void {
+    this.customConfigRunning.delete(proxyId)
+    const def = this.getDef(proxyId)
+    if (!def) return
+    const configPath = join(this.baseDir, def.dir, def.configFile)
+    const backupPath = this.customConfigBackups.get(proxyId) || `${configPath}.usernode_backup`
+    try {
+      if (existsSync(backupPath)) {
+        copyFileSync(backupPath, configPath)
+        unlinkSync(backupPath)
+        this.emit('log', proxyId, 'Restored original config after custom node session', 'info')
+      }
+    } catch { /* best-effort restore */ }
+    this.customConfigBackups.delete(proxyId)
+  }
+
+  private recoverConfigIfNeeded(proxyId: string): void {
+    const def = this.getDef(proxyId)
+    if (!def) return
+
+    const configPath = join(this.baseDir, def.dir, def.configFile)
+    const tempBackupPath = `${configPath}.usernode_backup`
+    const persistentBackup = this.findPersistentBackup(configPath)
+
+    try {
+      if (existsSync(tempBackupPath)) {
+        const restoreFrom = existsSync(configPath) ? tempBackupPath : (persistentBackup || tempBackupPath)
+        copyFileSync(restoreFrom, configPath)
+        unlinkSync(tempBackupPath)
+        this.customConfigBackups.delete(proxyId)
+        this.customConfigRunning.delete(proxyId)
+        this.emit('log', proxyId, 'Recovered leftover custom-node config backup', 'info')
+      } else if (!existsSync(configPath) && persistentBackup) {
+        copyFileSync(persistentBackup, configPath)
+        this.emit('log', proxyId, 'Recovered missing config from persistent backup', 'info')
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err)
+      this.emit('log', proxyId, `Config recovery failed: ${msg}`, 'warn')
+    }
+  }
+
+  private findPersistentBackup(configPath: string): string | null {
+    const candidates = [
+      `${configPath}_backup`,
+      configPath.replace(/(\.(json|yaml|yml))$/i, '_backup$1')
+    ]
+    return candidates.find((path) => existsSync(path)) || null
+  }
+
+  isCustomConfigRunning(proxyId: string): boolean {
+    return this.customConfigRunning.has(proxyId)
   }
 
   async stop(proxyId: string): Promise<{ success: boolean; error?: string }> {
@@ -229,7 +360,7 @@ export class ProxyManager extends EventEmitter {
 
   stopAll(): void {
     for (const [id] of this.processes) {
-      this.stop(id)
+      void this.stop(id)
     }
   }
 
@@ -272,6 +403,7 @@ export class ProxyManager extends EventEmitter {
   }
 
   private cleanup(proxyId: string): void {
+    this.restoreConfig(proxyId)
     this.processes.delete(proxyId)
     // Clear latency timer
     const timer = this.latencyTimers.get(proxyId)

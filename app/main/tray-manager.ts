@@ -1,10 +1,10 @@
-import { Tray, Menu, nativeImage, BrowserWindow, app } from 'electron'
+import { Tray, Menu, nativeImage, BrowserWindow, app, NativeImage } from 'electron'
 import { join } from 'path'
 import { existsSync } from 'fs'
 import { ProxyManager } from './proxy-manager'
 import { launchChrome } from './chrome-launcher'
 
-function findTrayIcon(baseDir: string): nativeImage {
+function findTrayIcon(baseDir: string): NativeImage {
   // Prefer dedicated tray .ico, then main icon, then PNG fallbacks
   const candidates = [
     join(baseDir, 'icons', 'tray.ico'),

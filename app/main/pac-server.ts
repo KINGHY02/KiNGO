@@ -14,11 +14,12 @@ const CN_DOMAINS = [
 ]
 
 function generatePac(proxyHost: string, proxyPort: number, _protocol: string, mode: 'global' | 'rule'): string {
-  // Use standard "SOCKS" directive (not "SOCKS5") for broader PAC compatibility
-  const proxyStr = `SOCKS ${proxyHost}:${proxyPort}`
+  const proxyStr = _protocol === 'http'
+    ? `PROXY ${proxyHost}:${proxyPort}`
+    : `SOCKS5 ${proxyHost}:${proxyPort}; SOCKS ${proxyHost}:${proxyPort}`
 
   if (mode === 'global') {
-    return `function FindProxyForURL(url, host) { return "${proxyStr}"; }`
+    return `function FindProxyForURL(url, host) { return "${proxyStr}; DIRECT"; }`
   }
 
   // Rule mode: direct for China domains, proxy for everything else
@@ -28,7 +29,7 @@ function generatePac(proxyHost: string, proxyPort: number, _protocol: string, mo
   for (var i = 0; i < direct.length; i++) {
     if (shExpMatch(host, direct[i])) return "DIRECT";
   }
-  return "${proxyStr}";
+  return "${proxyStr}; DIRECT";
 }`
 }
 

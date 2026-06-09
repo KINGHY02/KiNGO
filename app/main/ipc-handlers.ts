@@ -5,9 +5,14 @@ import { LogService } from './log-service'
 import { getSettings, setSettings, AppSettings } from './settings-store'
 import { testProxyNodes, testRealLatency } from './latency-tester'
 import { launchChrome } from './chrome-launcher'
-import { getSystemProxyStatus, syncSystemProxy } from './system-proxy'
+import { getSystemProxyStatus, syncSystemProxy, clearSystemProxy } from './system-proxy'
 import { getAvailableSlots, updateConfig, getCurrentSlot, switchSlot } from './ip-updater'
 import { checkForUpdates, downloadUpdate, installUpdate, getAppVersion, setUpdateFeedURL } from './updater'
+import { checkAllVersions } from './core-version'
+import { parseNodeUrl, parseNodeUrls, StoredNode } from './protocol-parser'
+import { generateConfig, compatibleCores } from './config-generator'
+import { listNodes, addNode, addNodes, updateNode, deleteNodes, deleteSubscriptionNode, deleteSubscriptionNodes, updateNodeLatency, findNodeById, getAllNodes, getActiveConnection, setActiveConnection, listSubscriptions } from './nodes-store'
+import { createSubscription, updateSubscriptionNodes, updateSubscription, deleteSubscription } from './subscription-service'
 
 export function registerIpcHandlers(
   proxyManager: ProxyManager,
@@ -16,14 +21,34 @@ export function registerIpcHandlers(
   baseDir: string
 ): void {
   const mainWindow = (): BrowserWindow => BrowserWindow.getAllWindows()[0]
+  const publishSettings = (): void => {
+    const win = mainWindow()
+    if (win && !win.isDestroyed()) {
+      win.webContents.send('settings:changed', getSettings())
+    }
+  }
+
+  const enableSystemProxySetting = (): void => {
+    if (!getSettings().systemProxy) {
+      setSettings({ systemProxy: true })
+      publishSettings()
+    }
+  }
 
   // Proxy start/stop/status
   ipcMain.handle('proxy:start', async (_e, proxyId: string) => {
-    return proxyManager.start(proxyId)
+    const result = await proxyManager.start(proxyId)
+    if (result.success) {
+      enableSystemProxySetting()
+      syncSystemProxy(proxyManager, true)
+    }
+    return result
   })
 
   ipcMain.handle('proxy:stop', async (_e, proxyId: string) => {
-    return proxyManager.stop(proxyId)
+    const result = await proxyManager.stop(proxyId)
+    syncSystemProxy(proxyManager, true)
+    return result
   })
 
   ipcMain.handle('proxy:status', () => {
@@ -177,5 +202,148 @@ export function registerIpcHandlers(
 
   ipcMain.handle('updater:set-feed-url', (_e, url: string) => {
     setUpdateFeedURL(url)
+  })
+
+  // Core version check
+  ipcMain.handle('core:check-versions', async () => {
+    return checkAllVersions(baseDir)
+  })
+
+  // ---- Node management (unified) ----
+
+  ipcMain.handle('node:import-url', (_e, url: string) => {
+    const node = parseNodeUrl(url)
+    if (!node) return null
+    // Set groupId for manual nodes
+    node.groupId = 'manual'
+    addNode(node)
+    return node
+  })
+
+  ipcMain.handle('node:import-batch', (_e, urls: string[]) => {
+    const nodes = parseNodeUrls(urls).map((node) => ({ ...node, groupId: 'manual' }))
+    addNodes(nodes)
+    return nodes
+  })
+
+  ipcMain.handle('node:list', () => {
+    return listNodes()
+  })
+
+  ipcMain.handle('node:update', (_e, id: string, fields: Partial<StoredNode>) => {
+    return updateNode(id, fields)
+  })
+
+  ipcMain.handle('node:delete', (_e, ids: string[]) => {
+    deleteNodes(ids)
+  })
+
+  ipcMain.handle('node:list-all', () => {
+    return getAllNodes()
+  })
+
+  ipcMain.handle('node:delete-one', (_e, nodeId: string, groupId: string) => {
+    if (groupId === 'manual') {
+      deleteNodes([nodeId])
+    } else {
+      deleteSubscriptionNode(groupId, nodeId)
+    }
+  })
+
+  ipcMain.handle('node:delete-many', (_e, nodeIds: string[], groupId: string) => {
+    if (groupId === 'manual') {
+      deleteNodes(nodeIds)
+    } else {
+      deleteSubscriptionNodes(groupId, nodeIds)
+    }
+  })
+
+  ipcMain.handle('node:test-latency', async (_e, nodeIds: string[]) => {
+    const nodes: StoredNode[] = []
+    for (const id of nodeIds) {
+      const result = findNodeById(id)
+      if (result) nodes.push(result.node)
+    }
+    const results = await Promise.all(
+      nodes.map(async (n) => {
+        try {
+          const result = await testProxyNodes([{ host: n.host, port: n.port }], false)
+          const latency = result[0]?.latency ?? -1
+          updateNodeLatency(n.id, latency)
+          return { id: n.id, latency }
+        } catch {
+          return { id: n.id, latency: -1 }
+        }
+      })
+    )
+    return results
+  })
+
+  ipcMain.handle('node:compatible-cores', (_e, protocol: string) => {
+    return compatibleCores(protocol)
+  })
+
+  ipcMain.handle('node:connect', async (_e, nodeId: string, coreId: string) => {
+    const found = findNodeById(nodeId)
+    if (!found) return { success: false, error: '节点不存在' }
+
+    const { node, groupId } = found
+
+    const config = generateConfig(node, coreId)
+
+    const result = await proxyManager.startWithConfig(coreId, config.content)
+    if (result.success) {
+      setActiveConnection({
+        nodeId: node.id,
+        groupId,
+        nodeName: node.name,
+        coreId,
+        pid: result.pid ?? null,
+        connectedAt: Date.now(),
+      })
+      enableSystemProxySetting()
+      // Set system proxy — use syncSystemProxy for proper PAC/SOCKS5 bridging
+      syncSystemProxy(proxyManager, true)
+    }
+    return result
+  })
+
+  ipcMain.handle('node:disconnect', async (_e, coreId: string) => {
+    setActiveConnection(null)
+    clearSystemProxy()
+    return proxyManager.stop(coreId)
+  })
+
+  ipcMain.handle('node:get-active-connection', () => {
+    return getActiveConnection()
+  })
+
+  // ---- Subscription management ----
+
+  ipcMain.handle('sub:list', () => {
+    return listSubscriptions()
+  })
+
+  ipcMain.handle('sub:add', async (_e, name: string, url: string) => {
+    const sub = createSubscription(name, url)
+    try {
+      const diff = await updateSubscriptionNodes(sub.id)
+      return { sub, diff }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err)
+      return { sub, diff: null, error: msg }
+    }
+  })
+
+  ipcMain.handle('sub:update', async (_e, id: string) => {
+    return updateSubscriptionNodes(id)
+  })
+
+  ipcMain.handle('sub:delete', (_e, id: string) => {
+    deleteSubscription(id)
+  })
+
+  ipcMain.handle('sub:toggle-auto', (_e, id: string, enabled: boolean) => {
+    updateSubscription(id, { autoUpdate: enabled })
   })
 }

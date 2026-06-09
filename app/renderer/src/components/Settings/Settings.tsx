@@ -1,7 +1,8 @@
 import { useState, useEffect } from 'react'
 import { Card, Form, Switch, Input, Button, Typography, Divider, message, Select, Space } from 'antd'
 import { CloudDownloadOutlined, GithubOutlined, LinkOutlined, CopyrightCircleOutlined, WarningOutlined } from '@ant-design/icons'
-import { getSettings, setSettings, getAppVersion, checkForUpdates } from '../../services/ipc-client'
+import { getSettings, setSettings, getAppVersion, checkForUpdates, getCompatibleCores } from '../../services/ipc-client'
+import CoreVersion from '../CoreVersion/CoreVersion'
 
 const { Link, Text, Title } = Typography
 
@@ -13,7 +14,52 @@ const INITIAL_VALUES = {
   minimizeToTray: true,
   theme: 'light',
   autoCheckUpdates: true,
-  updateMirror: ''
+  updateMirror: '',
+  defaultCoreByProtocol: {}
+}
+
+const DEFAULT_CORE_BY_PROTOCOL: Record<string, string> = {
+  vmess: 'xray',
+  vless: 'xray',
+  trojan: 'xray',
+  ss: 'xray',
+  ss2022: 'singbox',
+  ssr: 'singbox',
+  hysteria: 'hysteria',
+  hysteria2: 'hysteria2',
+  tuic: 'singbox',
+  naive: 'naiveproxy',
+  juicity: 'juicity',
+  mieru: 'mieru',
+  shadowquic: 'shadowquic'
+}
+
+const PROTOCOL_LABELS: Array<{ protocol: string; label: string }> = [
+  { protocol: 'vmess', label: 'VMess' },
+  { protocol: 'vless', label: 'VLESS' },
+  { protocol: 'trojan', label: 'Trojan' },
+  { protocol: 'ss', label: 'Shadowsocks' },
+  { protocol: 'ss2022', label: 'Shadowsocks 2022' },
+  { protocol: 'ssr', label: 'ShadowsocksR' },
+  { protocol: 'hysteria', label: 'Hysteria v1' },
+  { protocol: 'hysteria2', label: 'Hysteria v2' },
+  { protocol: 'tuic', label: 'TUIC' },
+  { protocol: 'naive', label: 'NaiveProxy' },
+  { protocol: 'juicity', label: 'Juicity' },
+  { protocol: 'mieru', label: 'Mieru' },
+  { protocol: 'shadowquic', label: 'ShadowQUIC' }
+]
+
+const CORE_LABELS: Record<string, string> = {
+  'clash-meta': 'Clash.Meta',
+  xray: 'Xray',
+  hysteria: 'Hysteria v1',
+  hysteria2: 'Hysteria v2',
+  singbox: 'Sing-Box',
+  naiveproxy: 'NaiveProxy',
+  juicity: 'Juicity',
+  mieru: 'Mieru',
+  shadowquic: 'ShadowQUIC'
 }
 
 export default function Settings(): JSX.Element {
@@ -23,19 +69,38 @@ export default function Settings(): JSX.Element {
   const [checking, setChecking] = useState(false)
   const [lastCheck, setLastCheck] = useState<string | null>(null)
   const [systemProxyEnabled, setSystemProxyEnabled] = useState(false)
+  const [coreOptions, setCoreOptions] = useState<Record<string, Array<{ label: string; value: string }>>>({})
 
   useEffect(() => {
     loadSettings()
     getAppVersion().then(setVersion).catch(() => setVersion('1.0.0'))
+    Promise.all(
+      PROTOCOL_LABELS.map(async ({ protocol }) => {
+        const cores = await getCompatibleCores(protocol)
+        return {
+          protocol,
+          options: cores.map((core) => ({ label: CORE_LABELS[core.id] || core.id, value: core.id }))
+        }
+      })
+    ).then((items) => {
+      setCoreOptions(Object.fromEntries(items.map((item) => [item.protocol, item.options])))
+    }).catch(() => {})
   }, [])
 
   const loadSettings = async (): Promise<void> => {
     try {
       const settings = await getSettings()
+      const mergedSettings = {
+        ...settings,
+        defaultCoreByProtocol: {
+          ...DEFAULT_CORE_BY_PROTOCOL,
+          ...(settings.defaultCoreByProtocol || {})
+        }
+      }
       setSystemProxyEnabled(settings.systemProxy)
       setLoaded(true)
       // Defer setFieldsValue until after Form mounts (loaded → re-render → Form exists)
-      setTimeout(() => form.setFieldsValue(settings), 0)
+      setTimeout(() => form.setFieldsValue(mergedSettings), 0)
     } catch {
       setLoaded(true)
       message.error('加载设置失败')
@@ -169,6 +234,8 @@ export default function Settings(): JSX.Element {
             <Input placeholder="https://example.com/updates" style={{ width: 320 }} onBlur={(e) => setSettings({ updateMirror: e.target.value }).catch(() => {})} />
           </Form.Item>
       </Card>
+
+      <CoreVersion />
 
       <Card title="关于" style={{ marginTop: 16 }}>
         <div style={{ marginBottom: 16 }}>

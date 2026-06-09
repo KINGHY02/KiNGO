@@ -1,6 +1,6 @@
 {
   "name": "kingo",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "description": "KiNGO - 网络代理管理桌面客户端",
   "main": "./out/main/index.js",
   "author": "KiNGO",

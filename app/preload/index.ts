@@ -36,6 +36,28 @@ const electronAPI = {
   installUpdate: () => ipcRenderer.invoke('updater:install'),
   getAppVersion: () => ipcRenderer.invoke('updater:get-version'),
   setUpdateFeedURL: (url: string) => ipcRenderer.invoke('updater:set-feed-url', url),
+  // Core version check
+  checkCoreVersions: () => ipcRenderer.invoke('core:check-versions'),
+  // Node management
+  importNodeUrl: (url: string) => ipcRenderer.invoke('node:import-url', url),
+  importNodeBatch: (urls: string[]) => ipcRenderer.invoke('node:import-batch', urls),
+  listNodes: () => ipcRenderer.invoke('node:list'),
+  updateNode: (id: string, fields: Record<string, unknown>) => ipcRenderer.invoke('node:update', id, fields),
+  deleteNodes: (ids: string[]) => ipcRenderer.invoke('node:delete', ids),
+  testNodeLatency: (ids: string[]) => ipcRenderer.invoke('node:test-latency', ids),
+  getCompatibleCores: (protocol: string) => ipcRenderer.invoke('node:compatible-cores', protocol),
+  connectNode: (nodeId: string, coreId: string) => ipcRenderer.invoke('node:connect', nodeId, coreId),
+  disconnectNode: (coreId: string) => ipcRenderer.invoke('node:disconnect', coreId),
+  getActiveConnection: () => ipcRenderer.invoke('node:get-active-connection'),
+  listAllNodes: () => ipcRenderer.invoke('node:list-all'),
+  deleteNodeOne: (nodeId: string, groupId: string) => ipcRenderer.invoke('node:delete-one', nodeId, groupId),
+  deleteNodeMany: (nodeIds: string[], groupId: string) => ipcRenderer.invoke('node:delete-many', nodeIds, groupId),
+  // Subscription management
+  listSubscriptions: () => ipcRenderer.invoke('sub:list'),
+  addSubscription: (name: string, url: string) => ipcRenderer.invoke('sub:add', name, url),
+  updateSubscription: (id: string) => ipcRenderer.invoke('sub:update', id),
+  deleteSubscription: (id: string) => ipcRenderer.invoke('sub:delete', id),
+  toggleAutoUpdate: (id: string, enabled: boolean) => ipcRenderer.invoke('sub:toggle-auto', id, enabled),
   // Events — each returns an unsubscribe function
   onStatusChanged: (callback: (status: unknown) => void) => {
     const handler = (_event: Electron.IpcRendererEvent, status: unknown) => callback(status)

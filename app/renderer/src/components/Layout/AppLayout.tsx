@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react'
-import { Layout, Menu, Typography, Button, Tooltip } from 'antd'
+import { Layout, Menu, Typography, Button, Tooltip, type MenuProps } from 'antd'
 import {
   DashboardOutlined,
   SettingOutlined,
@@ -19,9 +19,9 @@ import {
 } from '@ant-design/icons'
 import Dashboard from '../Dashboard/Dashboard'
 import ProxyDetail from '../ProxyDetail/ProxyDetail'
-import NodeManager from '../NodeManager/NodeManager'
 import Settings from '../Settings/Settings'
 import LogViewer from '../LogViewer/LogViewer'
+import MyNodes from '../MyNodes/MyNodes'
 import logo from '../../assets/KiNGO.png'
 import { minimizeWindow, maximizeWindow, closeWindow, isMaximized as getIsMaximized, getAppVersion } from '../../services/ipc-client'
 import { useTheme, useSetTheme } from '../../hooks/useTheme'
@@ -29,17 +29,12 @@ import { useTheme, useSetTheme } from '../../hooks/useTheme'
 const { Sider, Content } = Layout
 
 type PageKey = 'dashboard' | 'config' | 'nodes' | 'settings' | 'logs'
+type DragStyle = React.CSSProperties & { WebkitAppRegion?: 'drag' | 'no-drag' }
 
-interface MenuItem {
-  key: PageKey
-  icon: React.ReactNode
-  label: string
-}
-
-const menuItems: MenuItem[] = [
+const menuItems: MenuProps['items'] = [
   { key: 'dashboard', icon: <DashboardOutlined />, label: '仪表盘' },
   { key: 'config', icon: <ApartmentOutlined />, label: '节点配置' },
-  { key: 'nodes', icon: <NodeIndexOutlined />, label: '节点管理' },
+  { key: 'nodes', icon: <NodeIndexOutlined />, label: '我的节点' },
   { key: 'settings', icon: <SettingOutlined />, label: '设置' },
   { key: 'logs', icon: <FileTextOutlined />, label: '连接日志' }
 ]
@@ -47,7 +42,7 @@ const menuItems: MenuItem[] = [
 const pageComponents: Record<PageKey, React.ReactNode> = {
   dashboard: <Dashboard />,
   config: <ProxyDetail />,
-  nodes: <NodeManager />,
+  nodes: <MyNodes />,
   settings: <Settings />,
   logs: <LogViewer />
 }
@@ -69,24 +64,32 @@ export default function AppLayout(): JSX.Element {
     }
   }, [])
 
-  const titleBarBtn: React.CSSProperties = {
+  const titleBarBtn: DragStyle = {
     width: 42, height: 30, display: 'flex', alignItems: 'center', justifyContent: 'center',
     border: 'none', background: 'transparent', color: t.controlBtnColor,
     cursor: 'pointer', transition: 'all 0.15s', borderRadius: 0, padding: 0,
     WebkitAppRegion: 'no-drag'
   }
 
+  const titleBarStyle: DragStyle = {
+    height: 36, background: t.titleBar,
+    display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+    WebkitAppRegion: 'drag',
+    borderBottom: `1px solid ${t.border}`,
+    flexShrink: 0,
+    userSelect: 'none'
+  }
+
+  const windowControlsStyle: DragStyle = {
+    display: 'flex',
+    height: '100%',
+    WebkitAppRegion: 'no-drag'
+  }
+
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100vh', background: t.bg }}>
       {/* ====== Custom Title Bar ====== */}
-      <div style={{
-        height: 36, background: t.titleBar,
-        display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-        WebkitAppRegion: 'drag',
-        borderBottom: `1px solid ${t.border}`,
-        flexShrink: 0,
-        userSelect: 'none'
-      }}>
+      <div style={titleBarStyle}>
         {/* Left: logo + app name */}
         <div style={{ display: 'flex', alignItems: 'center', gap: 8, paddingLeft: 12 }}>
           <img src={logo} alt="KiNGO" style={{ width: 18, height: 18, flexShrink: 0, opacity: t.logoOpacity }} />
@@ -96,7 +99,7 @@ export default function AppLayout(): JSX.Element {
         </div>
 
         {/* Right: window controls */}
-        <div style={{ display: 'flex', height: '100%', WebkitAppRegion: 'no-drag' }}>
+        <div style={windowControlsStyle}>
           <button
             style={titleBarBtn}
             onClick={() => minimizeWindow()}

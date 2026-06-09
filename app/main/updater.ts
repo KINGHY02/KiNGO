@@ -19,12 +19,12 @@ export function initUpdater(mainWindow: BrowserWindow): void {
   autoUpdater.allowDowngrade = false
 
   autoUpdater.on('checking-for-update', () => {
-    sendToRenderer('updater:status', { status: 'checking' })
+    sendToRenderer?.('updater:status', { status: 'checking' })
   })
 
   autoUpdater.on('update-available', (info: UpdateInfo) => {
     _checking = false
-    sendToRenderer('updater:available', {
+    sendToRenderer?.('updater:available', {
       version: info.version,
       releaseDate: info.releaseDate
     })
@@ -32,11 +32,11 @@ export function initUpdater(mainWindow: BrowserWindow): void {
 
   autoUpdater.on('update-not-available', () => {
     _checking = false
-    sendToRenderer('updater:status', { status: 'not-available' })
+    sendToRenderer?.('updater:status', { status: 'not-available' })
   })
 
   autoUpdater.on('download-progress', (progress: ProgressInfo) => {
-    sendToRenderer('updater:progress', {
+    sendToRenderer?.('updater:progress', {
       percent: progress.percent,
       transferred: progress.transferred,
       total: progress.total,
@@ -45,14 +45,14 @@ export function initUpdater(mainWindow: BrowserWindow): void {
   })
 
   autoUpdater.on('update-downloaded', (info: UpdateInfo) => {
-    sendToRenderer('updater:downloaded', {
+    sendToRenderer?.('updater:downloaded', {
       version: info.version
     })
   })
 
   autoUpdater.on('error', (error: Error) => {
     _checking = false
-    sendToRenderer('updater:error', { message: error.message })
+    sendToRenderer?.('updater:error', { message: error.message })
   })
 }
 

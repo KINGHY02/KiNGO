@@ -114,6 +114,92 @@ export async function setUpdateFeedURL(url: string): Promise<void> {
   return api.setUpdateFeedURL(url)
 }
 
+export async function checkCoreVersions(): Promise<CoreVersionInfo[]> {
+  return api.checkCoreVersions()
+}
+
+// Node management (unified)
+export async function importNodeUrl(url: string): Promise<StoredNode | null> {
+  return api.importNodeUrl(url)
+}
+
+export async function importNodeBatch(urls: string[]): Promise<StoredNode[]> {
+  return api.importNodeBatch(urls)
+}
+
+export async function listAllNodes(): Promise<Array<{ node: StoredNode; groupId: string; groupName: string }>> {
+  return api.listAllNodes()
+}
+
+export async function deleteNodeOne(nodeId: string, groupId: string): Promise<void> {
+  return api.deleteNodeOne(nodeId, groupId)
+}
+
+export async function deleteNodeMany(nodeIds: string[], groupId: string): Promise<void> {
+  return api.deleteNodeMany(nodeIds, groupId)
+}
+
+export async function listNodes(): Promise<StoredNode[]> {
+  return api.listNodes()
+}
+
+export async function updateNode(id: string, fields: Partial<StoredNode>): Promise<StoredNode | null> {
+  return api.updateNode(id, fields)
+}
+
+export async function deleteNodes(ids: string[]): Promise<void> {
+  return api.deleteNodes(ids)
+}
+
+export async function testNodeLatency(ids: string[]): Promise<{ id: string; latency: number }[]> {
+  return api.testNodeLatency(ids)
+}
+
+export async function getCompatibleCores(protocol: string): Promise<CompatibleCore[]> {
+  return api.getCompatibleCores(protocol)
+}
+
+export async function connectNode(nodeId: string, coreId: string): Promise<{ success: boolean; pid?: number; error?: string }> {
+  return api.connectNode(nodeId, coreId)
+}
+
+export async function disconnectNode(coreId: string): Promise<{ success: boolean; error?: string }> {
+  return api.disconnectNode(coreId)
+}
+
+export async function getActiveConnection(): Promise<ActiveConnection | null> {
+  return api.getActiveConnection()
+}
+
+export async function getAllNodes(): Promise<Array<{ node: StoredNode; groupId: string; groupName: string }>> {
+  return api.listAllNodes()
+}
+
+export async function deleteMyNode(nodeId: string, groupId: string): Promise<void> {
+  return api.deleteNodeOne(nodeId, groupId)
+}
+
+// Subscription management
+export async function listSubscriptions(): Promise<SubInfo[]> {
+  return api.listSubscriptions()
+}
+
+export async function addSubscription(name: string, url: string): Promise<{ sub: SubInfo; diff: { added: number; removed: number; unchanged: number } | null; error?: string }> {
+  return api.addSubscription(name, url)
+}
+
+export async function updateSubscription(id: string): Promise<{ added: number; removed: number; unchanged: number } | null> {
+  return api.updateSubscription(id)
+}
+
+export async function deleteSubscription(id: string): Promise<void> {
+  return api.deleteSubscription(id)
+}
+
+export async function toggleAutoUpdate(id: string, enabled: boolean): Promise<void> {
+  return api.toggleAutoUpdate(id, enabled)
+}
+
 export function onStatusChanged(callback: (status: ProxyStatus) => void): () => void {
   return api.onStatusChanged(callback)
 }

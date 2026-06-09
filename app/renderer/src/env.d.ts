@@ -27,6 +27,7 @@ interface AppSettings {
   theme: 'light' | 'dark' | 'pink' | 'blue'
   autoCheckUpdates: boolean
   updateMirror: string
+  defaultCoreByProtocol: Record<string, string>
 }
 
 interface SlotInfo {
@@ -34,6 +35,53 @@ interface SlotInfo {
   description: string
   downloaded: boolean
   active: boolean
+}
+
+interface CoreVersionInfo {
+  proxyId: string
+  name: string
+  currentVersion: string | null
+  latestVersion: string | null
+  isOutdated: boolean
+  error?: string
+}
+
+interface StoredNode {
+  id: string
+  groupId?: string
+  name: string
+  protocol: string
+  host: string
+  port: number
+  rawUrl: string
+  details: Record<string, unknown>
+  latency: number | null
+  lastTested: number | null
+  createdAt: number
+}
+
+interface ActiveConnection {
+  nodeId: string
+  groupId: string
+  nodeName: string
+  coreId: string
+  pid: number | null
+  connectedAt: number
+}
+
+interface CompatibleCore {
+  id: string
+  recommended: boolean
+}
+
+interface SubInfo {
+  id: string
+  name: string
+  url: string
+  nodes: StoredNode[]
+  lastUpdated: number | null
+  autoUpdate: boolean
+  updateInterval: number
 }
 
 interface ElectronAPI {
@@ -67,6 +115,26 @@ interface ElectronAPI {
   installUpdate: () => void
   getAppVersion: () => Promise<string>
   setUpdateFeedURL: (url: string) => Promise<void>
+  checkCoreVersions: () => Promise<CoreVersionInfo[]>
+  importNodeUrl: (url: string) => Promise<StoredNode | null>
+  importNodeBatch: (urls: string[]) => Promise<StoredNode[]>
+  listAllNodes: () => Promise<Array<{ node: StoredNode; groupId: string; groupName: string }>>
+  deleteNodeOne: (nodeId: string, groupId: string) => Promise<void>
+  deleteNodeMany: (nodeIds: string[], groupId: string) => Promise<void>
+  listNodes: () => Promise<StoredNode[]>
+  updateNode: (id: string, fields: Record<string, unknown>) => Promise<StoredNode | null>
+  deleteNodes: (ids: string[]) => Promise<void>
+  testNodeLatency: (ids: string[]) => Promise<{ id: string; latency: number }[]>
+  getCompatibleCores: (protocol: string) => Promise<CompatibleCore[]>
+  connectNode: (nodeId: string, coreId: string) => Promise<{ success: boolean; pid?: number; error?: string }>
+  disconnectNode: (coreId: string) => Promise<{ success: boolean; error?: string }>
+  getActiveConnection: () => Promise<ActiveConnection | null>
+  listAllNodes: () => Promise<Array<{ node: StoredNode; groupId: string; groupName: string }>>
+  listSubscriptions: () => Promise<SubInfo[]>
+  addSubscription: (name: string, url: string) => Promise<{ sub: SubInfo; diff: { added: number; removed: number; unchanged: number } | null; error?: string }>
+  updateSubscription: (id: string) => Promise<{ added: number; removed: number; unchanged: number } | null>
+  deleteSubscription: (id: string) => Promise<void>
+  toggleAutoUpdate: (id: string, enabled: boolean) => Promise<void>
   onStatusChanged: (callback: (status: ProxyStatus) => void) => () => void
   onLog: (callback: (entry: LogEntry) => void) => () => void
   onProxyUpdateProgress: (callback: (progress: { proxyId: string; slot: number; percent: number }) => void) => () => void
