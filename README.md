@@ -1,240 +1,118 @@
 # KiNGO
 
 <p align="center">
-  <strong>Windows 网络代理管理桌面客户端</strong>
-</p>
-
-<p align="center">
-  集成 9 种主流代理核心，一键连接，系统级代理支持，便携式 Chrome 浏览器
+  <strong>Windows 代理管理工具 — 集成 9 种代理核心，导入节点即用，无需手动配置</strong>
 </p>
 
 ---
 
-## 功能特性
+## 简介
 
-### 核心功能
+KiNGO 是一款 Windows 桌面代理管理工具。你只需要**导入节点或订阅链接**，选择一个代理核心，点击连接，即可让整台电脑或浏览器通过代理访问网络。
 
-- **9 合 1 代理集成** — 内置 Clash.Meta、Xray、Hysteria v1/v2、Sing-Box、NaiveProxy、Juicity、Mieru、ShadowQUIC，无需手动安装
-- **仪表盘一键连接** — 仿快连风格 UI，大圆形连接按钮，线路卡片可视化切换
-- **系统级代理** — 支持 Windows 系统代理设置（全局模式 / 规则模式），所有浏览器均可使用
-- **规则模式** — 国内网站直连，国外网站走代理，基于 PAC 智能分流
-- **全局模式** — 整台电脑所有流量通过代理
-- **便携式 Chrome** — 内置 Chromium 浏览器，即开即用，不留历史记录
+无需手动安装代理软件，无需手写配置文件，无需记忆命令行参数 — 所有代理核心均已内置，配置自动生成。
 
-### 配置管理
+---
 
-- **Monaco 编辑器** — 集成 VS Code 同款代码编辑器，语法高亮、自动补全
-- **多线路 IP 更新** — 支持下载多个线路配置，一键切换、自动更新
-- **延迟测试** — 混合测速模式（TCP 握手 + 真实代理 HTTP 测速），UDP 代理智能识别
+## 主要功能
+
+### 一键连接
+
+在仪表盘或节点管理中点击"连接"按钮，软件会自动生成对应核心的配置文件，启动代理进程，并设置 Windows 系统代理。点击"断开"即可恢复直连。
+
+### 多核心支持
+
+不同节点使用的协议不同，KiNGO 内置 9 种代理核心，自动匹配最合适的核心：
+
+| 核心 | 适用场景 |
+|------|---------|
+| **Clash.Meta** | 全能型，支持几乎所有协议，自带规则引擎 |
+| **Xray** | VLESS / VMess / Trojan 节点首选 |
+| **Hysteria v1 / v2** | 基于 QUIC 的高速节点 |
+| **Sing-Box** | 新兴通用核心，支持多协议 |
+| **NaiveProxy** | 伪装 HTTPS 流量的节点 |
+| **Juicity** | QUIC 协议节点 |
+| **Mieru** | TCP 协议节点 |
+| **ShadowQUIC** | QUIC 协议节点 |
+
+### 节点管理
+
+- **手动导入**：粘贴 `vmess://`、`vless://`、`trojan://` 等分享链接，批量导入
+- **订阅管理**：添加订阅链接，自动拉取并更新节点列表，支持 Clash YAML 和 Base64 编码格式
+- **延迟测试**：一键测试所有节点延迟，绿色（<100ms）/ 橙色（<300ms）/ 红色（>300ms）
+- **分组管理**：手动节点与订阅节点分开展示，支持批量删除
+
+### 系统代理
+
+- **全局模式**：电脑所有流量走代理
+- **规则模式**：国内网站直连，国外网站走代理（基于 PAC 智能分流）
+- 支持 Chrome、Edge 等主流浏览器
+
+### 配置编辑
+
+内置 Monaco 编辑器（VS Code 同款），可以直接查看和修改各代理核心的配置文件。修改后重启代理即可生效。
+
+### 便携浏览器
+
+内置 Chromium 浏览器，点击即可在代理环境下打开，不留下浏览历史。适合在他人电脑上临时使用。
 
 ### 其他特性
 
-- **亮色 / 暗色主题** — 全局切换，35 个颜色变量自适应
-- **系统托盘** — 最小化到托盘，右键菜单快捷操作
-- **开机自启** — 支持 Windows 开机自动启动
-- **自动更新** — 基于 electron-updater，GitHub Releases 自动推送
-- **日志查看器** — 实时日志，支持按代理核心筛选
-- **无边框窗口** — 自定义标题栏，现代化视觉效果
+- 亮色 / 暗色 / 粉色 / 蓝色主题切换
+- 最小化到系统托盘，右键快捷操作
+- 开机自动启动
+- 自动检测更新
 
 ---
 
-## 支持的代理核心
+## 安装
 
-| 核心 | 协议 | 传输层 | 本地端口 |
-|------|------|--------|----------|
-| **Clash.Meta** | 多协议（HTTP/SOCKS5） | TCP/UDP | 7890 |
-| **Xray** | VLESS/VMess/Trojan | TCP | 1080 |
-| **Hysteria v1** | 自研 QUIC | UDP/QUIC | 1080 |
-| **Hysteria v2** | 自研 QUIC v2 | UDP/QUIC | 1080 |
-| **Sing-Box** | TUIC/Hysteria2 | UDP/QUIC | 1080 |
-| **NaiveProxy** | HTTPS/HTTP2 | TCP | 1080 |
-| **Juicity** | 自研 QUIC | UDP/QUIC | 1080 |
-| **Mieru** | 自研 TCP | TCP | 1080 |
-| **ShadowQUIC** | 自研 QUIC | UDP/QUIC | 1080 |
+从 [Releases](https://github.com/KINGHY02/KiNGO/releases) 页面下载最新版 `KiNGO Setup x.x.x.exe`，双击安装即可。
+
+> 系统要求：Windows 10 / 11 x64
 
 ---
 
-## 技术栈
+## 使用指南
 
-| 层 | 技术 |
-|----|------|
-| **桌面框架** | Electron 28 |
-| **前端** | React 18 + TypeScript |
-| **UI 组件库** | Ant Design 5 |
-| **构建工具** | electron-vite |
-| **代码编辑器** | Monaco Editor |
-| **配置解析** | js-yaml |
-| **持久化存储** | electron-store |
-| **自动更新** | electron-updater |
-| **打包分发** | electron-builder (NSIS) |
+### 1. 导入节点
 
----
+打开软件，左侧导航点击「**我的节点**」，在文本框中粘贴节点分享链接（支持 `vmess://`、`vless://`、`trojan://`、`ss://`、`ssr://`、`hysteria://` 等格式），支持批量粘贴，点击「导入」。
 
-## 项目结构
+### 2. 添加订阅
 
-```
-KiNGO/
-├── app/                          # Electron 应用
-│   ├── main/                     # 主进程
-│   │   ├── index.ts              # 入口，窗口管理，IPC 注册
-│   │   ├── proxy-manager.ts      # 代理核心生命周期管理
-│   │   ├── config-service.ts     # 配置文件读写与解析
-│   │   ├── latency-tester.ts     # 延迟测试（TCP + HTTP 代理）
-│   │   ├── system-proxy.ts       # Windows 系统代理（注册表操作）
-│   │   ├── pac-server.ts         # PAC 文件 HTTP 服务器
-│   │   ├── ip-updater.ts         # 线路 IP 更新与槽位管理
-│   │   ├── ipc-handlers.ts       # IPC 通信处理
-│   │   ├── settings-store.ts     # 用户设置持久化
-│   │   ├── log-service.ts        # 日志收集
-│   │   ├── tray-manager.ts       # 系统托盘
-│   │   ├── chrome-launcher.ts    # 便携浏览器启动
-│   │   └── updater.ts            # 自动更新
-│   ├── preload/                  # 预加载脚本（contextBridge）
-│   └── renderer/src/             # 渲染进程
-│       ├── components/
-│       │   ├── Dashboard/        # 仪表盘（连接、线路、代理模式切换）
-│       │   ├── Settings/         # 设置页
-│       │   ├── NodeManager/      # 节点管理（IP 更新 + 测速）
-│       │   ├── ConfigEditor/     # 配置编辑器（Monaco）
-│       │   ├── LogViewer/        # 日志查看器
-│       │   ├── Layout/           # 侧边栏布局 + 自定义标题栏
-│       │   └── UpdateNotification/ # 更新通知
-│       ├── hooks/                # 自定义 Hook
-│       └── services/             # IPC 客户端封装
-├── clash.meta/                   # Clash.Meta 代理核心
-├── Xray/                         # Xray 代理核心
-├── hysteria/                     # Hysteria v1 代理核心
-├── hysteria2/                    # Hysteria v2 代理核心
-├── singbox/                      # Sing-Box 代理核心
-├── naiveproxy/                   # NaiveProxy 代理核心
-├── juicity/                      # Juicity 代理核心
-├── mieru/                        # Mieru 代理核心
-├── shadowquic/                   # ShadowQUIC 代理核心
-├── Browser/                      # 便携式 Chrome
-└── .github/workflows/            # CI/CD 自动发布
-```
+左侧导航点击「**订阅管理**」，点击「添加订阅」，输入名称和订阅链接即可。订阅节点会自动出现在节点列表中，点击「更新」可手动刷新。
+
+### 3. 连接代理
+
+- **仪表盘**：选择一个代理核心，点击中间的圆形按钮连接
+- **节点管理**：点击节点的「连接」按钮，选择要使用的代理核心
+- 连接成功后，右上角显示"已连接"状态
+- 点击「断开」即可停止代理
+
+### 4. 测试延迟
+
+在节点管理中点击节点旁边的闪电图标，可测试该节点的延迟。
+
+### 5. 切换代理模式
+
+在仪表盘右侧面板切换「全局模式」或「规则模式」。规则模式会自动分流国内和国外流量。
 
 ---
 
-## 开发指南
+## 常见问题
 
-### 环境要求
+**Q: 连接后浏览器无法访问外网？**
+A: 先确认节点本身可用（测试延迟），再检查是否开启了其他代理软件（VPN、Clash 等），冲突的代理设置会导致无法访问。
 
-- **Node.js** >= 20
-- **npm** >= 10
-- **Windows** 10/11 x64
-- **Git**
+**Q: 为什么测试延迟显示"不可达"？**
+A: 可能是节点已失效、网络防火墙阻止了连接，或节点需要特定网络环境才能访问。
 
-### 克隆仓库
+**Q: 某些软件不走代理怎么办？**
+A: 系统代理只对使用 Windows 代理设置的软件生效（Chrome、Edge 等）。命令行工具（git、npm）和 Firefox 需要单独配置代理。
 
-```bash
-git clone https://github.com/KINGHY02/KiNGO.git
-cd KiNGO
-```
-
-### 安装依赖
-
-```bash
-cd app
-npm install
-```
-
-### 开发模式
-
-```bash
-npm run dev
-```
-
-Electron 窗口会自动打开，渲染进程支持热重载，主进程修改需手动刷新。
-
-### 构建安装包
-
-```bash
-npm run dist
-```
-
-输出在 `app/dist/` 目录，生成 NSIS 安装包（`.exe`）。
-
----
-
-## 代理配置
-
-每个代理核心目录下都有一个配置文件，可以在应用内通过配置编辑器直接修改：
-
-| 代理 | 配置文件 | 格式 |
-|------|----------|------|
-| Clash.Meta | `clash.meta/config.yaml` | YAML |
-| Xray | `Xray/config.json` | JSON |
-| Hysteria v1 | `hysteria/config.json` | JSON |
-| Hysteria v2 | `hysteria2/config.yaml` | YAML |
-| Sing-Box | `singbox/config.json` | JSON |
-| NaiveProxy | `naiveproxy/config.json` | JSON |
-| Juicity | `juicity/config.json` | JSON |
-| Mieru | `mieru/config.json` | JSON |
-| ShadowQUIC | `shadowquic/config.json` | JSON |
-
-也可以通过**节点管理**页面的 IP 更新功能，从远程下载新配置。
-
----
-
-## 自动更新
-
-软件基于 `electron-updater` 自动检测 GitHub Releases 中的新版本：
-
-- 启动时自动检查更新（可在设置中关闭）
-- 发现新版本后弹出通知，用户手动点击下载
-- 下载完成后提示安装，点击即退出并运行安装程序
-- 支持自定义更新镜像地址（设置页可配置）
-
-### 发版流程
-
-```bash
-cd app
-npm version patch          # 或 minor / major
-git push origin master --tags
-```
-
-推送 tag 后，GitHub Actions 会自动：
-1. 下载代理核心二进制包
-2. 安装依赖
-3. 构建完整 NSIS 安装包
-4. 创建 Release 并上传 `.exe` 安装包和 `latest.yml`
-
-用户下次启动软件时会收到更新通知。
-
----
-
-## 系统代理原理
-
-### Clash.Meta（HTTP 代理）
-
-Clash.Meta 内置 HTTP 代理（端口 `7890`），可直接写入 Windows 系统代理注册表：
-
-```
-HKCU\Software\Microsoft\Windows\CurrentVersion\Internet Settings
-  ProxyEnable = 1
-  ProxyServer = 127.0.0.1:7890
-```
-
-规则模式由 Clash.Meta 内部规则引擎处理分流；全局模式将所有流量转发至代理出口。
-
-### SOCKS5 代理（Xray、Hysteria 等）
-
-Windows 系统代理原生不支持 SOCKS5，需通过 PAC（Proxy Auto-Config）桥接：
-
-1. 软件启动本地 PAC HTTP 服务器
-2. 系统代理设置为 PAC URL：`http://127.0.0.1:{port}/proxy.pac`
-3. 浏览器请求 PAC 文件，根据模式决定路由：
-   - **规则模式**：国内域名（百度、淘宝、京东等）直连，其余走 SOCKS5
-   - **全局模式**：所有请求走 SOCKS5 代理
-
-> **注意**：Windows 注册表代理设置影响 Chrome、Edge 等 WinINET 浏览器，不影响 Firefox（需单独配置）和命令行工具（curl、git 等）。
-
----
-
-## 贡献
-
-本项目采用 **MIT License** 发布，欢迎提交 Issue 和 Pull Request。
+**Q: 如何手动编辑配置文件？**
+A: 左侧导航点击「配置编辑」，选择对应的代理核心，直接编辑配置文件。修改后需要重新连接才能生效。
 
 ---
 
@@ -242,7 +120,7 @@ Windows 系统代理原生不支持 SOCKS5，需通过 PAC（Proxy Auto-Config�
 
 1. 本软件仅供学习、研究及个人合法使用，严禁用于任何违法违规活动
 2. 使用者应遵守所在国家/地区的法律法规，因违规使用产生的任何法律责任由使用者自行承担
-3. 本软件不提供任何代理服务，所有代理节点均需用户自行配置
+3. 本软件不提供任何代理服务，所有代理节点均需用户自行获取和配置
 4. 作者不对因使用本软件造成的任何直接或间接损失承担责任
 
 ---
