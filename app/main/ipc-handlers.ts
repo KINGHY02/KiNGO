@@ -11,14 +11,17 @@ import { checkForUpdates, downloadUpdate, installUpdate, getAppVersion, setUpdat
 import { checkAllVersions } from './core-version'
 import { parseNodeUrl, parseNodeUrls, StoredNode } from './protocol-parser'
 import { generateConfig, compatibleCores } from './config-generator'
-import { listNodes, addNode, addNodes, updateNode, deleteNodes, deleteSubscriptionNode, deleteSubscriptionNodes, updateNodeLatency, findNodeById, getAllNodes, getActiveConnection, setActiveConnection, listSubscriptions } from './nodes-store'
-import { createSubscription, updateSubscriptionNodes, updateSubscription, deleteSubscription } from './subscription-service'
+import { listNodes, addNode, addNodes, updateNode, deleteNodes, deleteSubscriptionNode, deleteSubscriptionNodes, updateNodeLatency, findNodeById, getAllNodes, getActiveConnection, setActiveConnection, listSubscriptions, cloneNode } from './nodes-store'
+import { saveSubscription, updateSubscriptionNodes, updateSubscription, deleteSubscription, getSubscription } from './subscription-service'
+import { setDelay, setSortOrder, deleteProfileEx, getProfileEx, listAll as listAllProfileEx } from './profile-ex-store'
+import { PublicRouteService } from './public-route-service'
 
 export function registerIpcHandlers(
   proxyManager: ProxyManager,
   configService: ConfigService,
   logService: LogService,
-  baseDir: string
+  baseDir: string,
+  publicRouteService: PublicRouteService
 ): void {
   const mainWindow = (): BrowserWindow => BrowserWindow.getAllWindows()[0]
   const publishSettings = (): void => {
@@ -40,14 +43,24 @@ export function registerIpcHandlers(
     const result = await proxyManager.start(proxyId)
     if (result.success) {
       enableSystemProxySetting()
-      syncSystemProxy(proxyManager, true)
+      const proxyResult = await syncSystemProxy(proxyManager, true)
+      if (!proxyResult.success) {
+        await proxyManager.stop(proxyId).catch(() => undefined)
+        setSettings({ systemProxy: false })
+        publishSettings()
+        return { success: false, error: proxyResult.error || 'Windows 系统代理设置失败' }
+      }
     }
     return result
   })
 
   ipcMain.handle('proxy:stop', async (_e, proxyId: string) => {
     const result = await proxyManager.stop(proxyId)
-    syncSystemProxy(proxyManager, true)
+    if (!proxyManager.getStatus().some((status) => status.running)) {
+      setSettings({ systemProxy: false })
+      publishSettings()
+    }
+    await syncSystemProxy(proxyManager, true)
     return result
   })
 
@@ -100,7 +113,7 @@ export function registerIpcHandlers(
   // IP update
   ipcMain.handle('proxy:update-ip', async (_e, proxyId: string, slot: number) => {
     const def = PROXY_DEFINITIONS.find((d) => d.id === proxyId)
-    if (!def) return { success: false, error: '未知代理' }
+    if (!def) return { success: false, error: 'δ֪����' }
     return updateConfig(baseDir, def.dir, def.configFile, slot)
   })
 
@@ -118,9 +131,26 @@ export function registerIpcHandlers(
 
   ipcMain.handle('proxy:switch-slot', async (_e, proxyId: string, slot: number) => {
     const def = PROXY_DEFINITIONS.find((d) => d.id === proxyId)
-    if (!def) return { success: false, error: '未知代理' }
+    if (!def) return { success: false, error: 'δ֪����' }
     return switchSlot(baseDir, def.dir, def.configFile, slot)
   })
+
+  ipcMain.handle('public-route:list', () => publicRouteService.listRoutes())
+  ipcMain.handle('public-route:state', () => publicRouteService.getState())
+  ipcMain.handle('public-route:select', (_e, routeId: string) => {
+    const result = publicRouteService.selectRoute(routeId)
+    if (result.success) publishSettings()
+    return result
+  })
+  ipcMain.handle('public-route:connect', async (_e, routeId?: string) => {
+    const result = await publicRouteService.connect(routeId)
+    publishSettings()
+    return result
+  })
+  ipcMain.handle('public-route:disconnect', () => publicRouteService.disconnect())
+  ipcMain.handle('public-route:repair', () => publicRouteService.repairNetwork())
+  ipcMain.handle('public-route:update', (_e, routeId: string) => publicRouteService.updateRoute(routeId))
+  ipcMain.handle('public-route:update-all', () => publicRouteService.updateAll())
 
   // Chrome launch
   ipcMain.handle('chrome:launch', async () => {
@@ -230,8 +260,17 @@ export function registerIpcHandlers(
     return listNodes()
   })
 
+  ipcMain.handle('node:get', (_e, id: string) => {
+    const found = findNodeById(id)
+    return found ? { ...found.node, groupId: found.groupId } : null
+  })
+
   ipcMain.handle('node:update', (_e, id: string, fields: Partial<StoredNode>) => {
     return updateNode(id, fields)
+  })
+
+  ipcMain.handle('node:clone', (_e, id: string) => {
+    return cloneNode(id)
   })
 
   ipcMain.handle('node:delete', (_e, ids: string[]) => {
@@ -248,6 +287,7 @@ export function registerIpcHandlers(
     } else {
       deleteSubscriptionNode(groupId, nodeId)
     }
+    deleteProfileEx([nodeId])
   })
 
   ipcMain.handle('node:delete-many', (_e, nodeIds: string[], groupId: string) => {
@@ -256,26 +296,26 @@ export function registerIpcHandlers(
     } else {
       deleteSubscriptionNodes(groupId, nodeIds)
     }
+    deleteProfileEx(nodeIds)
   })
 
   ipcMain.handle('node:test-latency', async (_e, nodeIds: string[]) => {
-    const nodes: StoredNode[] = []
+    const results: { id: string; latency: number }[] = []
     for (const id of nodeIds) {
-      const result = findNodeById(id)
-      if (result) nodes.push(result.node)
+      const found = findNodeById(id)
+      if (!found) continue
+      const n = found.node
+      try {
+        const res = await testProxyNodes([{ host: n.host, port: n.port }], false)
+        const latency = res[0]?.latency ?? -1
+        updateNodeLatency(n.id, latency)
+        setDelay(n.id, latency)
+        results.push({ id: n.id, latency })
+      } catch {
+        setDelay(n.id, -1)
+        results.push({ id: n.id, latency: -1 })
+      }
     }
-    const results = await Promise.all(
-      nodes.map(async (n) => {
-        try {
-          const result = await testProxyNodes([{ host: n.host, port: n.port }], false)
-          const latency = result[0]?.latency ?? -1
-          updateNodeLatency(n.id, latency)
-          return { id: n.id, latency }
-        } catch {
-          return { id: n.id, latency: -1 }
-        }
-      })
-    )
     return results
   })
 
@@ -283,9 +323,21 @@ export function registerIpcHandlers(
     return compatibleCores(protocol)
   })
 
-  ipcMain.handle('node:connect', async (_e, nodeId: string, coreId: string) => {
+  ipcMain.handle('node:export-client-config', (_e, nodeId: string, coreId: string) => {
     const found = findNodeById(nodeId)
     if (!found) return { success: false, error: '节点不存在' }
+    try {
+      const config = generateConfig(found.node, coreId)
+      return { success: true, ...config }
+    } catch (err) {
+      const error = err instanceof Error ? err.message : String(err)
+      return { success: false, error }
+    }
+  })
+
+  ipcMain.handle('node:connect', async (_e, nodeId: string, coreId: string) => {
+    const found = findNodeById(nodeId)
+    if (!found) return { success: false, error: '�ڵ㲻����' }
 
     const { node, groupId } = found
 
@@ -302,14 +354,24 @@ export function registerIpcHandlers(
         connectedAt: Date.now(),
       })
       enableSystemProxySetting()
-      // Set system proxy — use syncSystemProxy for proper PAC/SOCKS5 bridging
-      syncSystemProxy(proxyManager, true)
+      // Set system proxy �� use syncSystemProxy for proper PAC/SOCKS5 bridging
+      const proxyResult = await syncSystemProxy(proxyManager, true)
+      if (!proxyResult.success) {
+        setActiveConnection(null)
+        setSettings({ systemProxy: false })
+        publishSettings()
+        await proxyManager.stop(coreId).catch(() => undefined)
+        clearSystemProxy()
+        return { success: false, error: proxyResult.error || 'Windows 系统代理设置失败' }
+      }
     }
     return result
   })
 
   ipcMain.handle('node:disconnect', async (_e, coreId: string) => {
     setActiveConnection(null)
+    setSettings({ systemProxy: false })
+    publishSettings()
     clearSystemProxy()
     return proxyManager.stop(coreId)
   })
@@ -324,14 +386,44 @@ export function registerIpcHandlers(
     return listSubscriptions()
   })
 
+  ipcMain.handle('sub:get', (_e, id: string) => {
+    return getSubscription(id) ?? null
+  })
+
   ipcMain.handle('sub:add', async (_e, name: string, url: string) => {
-    const sub = createSubscription(name, url)
+    const sub = await saveSubscription({ name, url, refresh: false })
     try {
       const diff = await updateSubscriptionNodes(sub.id)
-      return { sub, diff }
+      return { sub: getSubscription(sub.id) ?? sub, diff }
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err)
       return { sub, diff: null, error: msg }
+    }
+  })
+
+  ipcMain.handle('sub:save', async (_e, input: {
+    id?: string
+    name: string
+    url: string
+    autoUpdate?: boolean
+    updateInterval?: number
+    enabled?: boolean
+    moreUrl?: string
+    userAgent?: string
+    filter?: string
+    convertTarget?: string
+    memo?: string
+    refresh?: boolean
+  }) => {
+    const sub = await saveSubscription({ ...input, refresh: false })
+    try {
+      if (input.refresh ?? true) {
+        await updateSubscriptionNodes(sub.id)
+      }
+      return { sub: getSubscription(sub.id) ?? sub, error: null }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err)
+      return { sub, error: msg }
     }
   })
 
@@ -345,5 +437,101 @@ export function registerIpcHandlers(
 
   ipcMain.handle('sub:toggle-auto', (_e, id: string, enabled: boolean) => {
     updateSubscription(id, { autoUpdate: enabled })
+  })
+  ipcMain.handle('sub:toggle-enabled', (_e, id: string, enabled: boolean) => {
+    updateSubscription(id, { enabled })
+  })
+  // ---- ProfileEx (V2rayN-style sort & metadata) ----
+
+  ipcMain.handle('profile:sort', (_e, colName: string, asc: boolean, groupId: string) => {
+    const allNodes = getAllNodes()
+    const filtered = groupId ? allNodes.filter((n) => n.groupId === groupId) : allNodes
+    const items = listAllProfileEx()
+    const exMap = new Map(items.map((i: any) => [i.nodeId, i]))
+
+    const sorted = [...filtered].sort((a, b) => {
+      const exA = exMap.get(a.node.id) || { delay: 0, sort: 0 }
+      const exB = exMap.get(b.node.id) || { delay: 0, sort: 0 }
+      let cmp = 0
+      switch (colName) {
+        case 'configType':
+          cmp = (a.node.protocol || '').localeCompare(b.node.protocol || '')
+          break
+        case 'remarks':
+          cmp = (a.node.name || '').localeCompare(b.node.name || '', 'zh-CN')
+          break
+        case 'address':
+          cmp = (a.node.host || '').localeCompare(b.node.host || '')
+          break
+        case 'delayVal': {
+          const da = exA.delay ?? 0
+          const db = exB.delay ?? 0
+          // ���ɴ�(-1)�������
+          if (da < 0 && db >= 0) { cmp = 1 }
+          else if (db < 0 && da >= 0) { cmp = -1 }
+          else { cmp = da - db }
+          break
+        }
+        default:
+          cmp = (a.node.name || '').localeCompare(b.node.name || '')
+      }
+      return asc ? cmp : -cmp
+    })
+    // Update sort order in ProfileEx
+    setSortOrder(sorted.map((n) => n.node.id))
+    return sorted
+  })
+
+  ipcMain.handle('profile:get-ex', (_e, nodeId: string) => {
+    return getProfileEx(nodeId) || null
+  })
+
+  ipcMain.handle('profile:list-ex', () => {
+    return listAllProfileEx()
+  })
+
+  ipcMain.handle('profile:set-delay', (_e, nodeId: string, delay: number) => {
+    setDelay(nodeId, delay)
+    return { success: true }
+  })
+
+  ipcMain.handle('profile:move', (_e, groupId: string, nodeIds: string[], direction: 'top' | 'up' | 'down' | 'bottom') => {
+    const ordered = getAllNodes()
+      .filter((item) => item.groupId === groupId)
+      .sort((a, b) => {
+        const sa = getProfileEx(a.node.id)?.sort ?? Number.MAX_SAFE_INTEGER
+        const sb = getProfileEx(b.node.id)?.sort ?? Number.MAX_SAFE_INTEGER
+        return sa - sb
+      })
+
+    if (ordered.length === 0 || nodeIds.length === 0) return ordered
+
+    const selectedSet = new Set(nodeIds)
+    const mutable = [...ordered]
+
+    if (direction === 'top' || direction === 'bottom') {
+      const selected = mutable.filter((item) => selectedSet.has(item.node.id))
+      const rest = mutable.filter((item) => !selectedSet.has(item.node.id))
+      const next = direction === 'top' ? [...selected, ...rest] : [...rest, ...selected]
+      setSortOrder(next.map((item) => item.node.id))
+      return next
+    }
+
+    if (direction === 'up') {
+      for (let i = 1; i < mutable.length; i += 1) {
+        if (selectedSet.has(mutable[i].node.id) && !selectedSet.has(mutable[i - 1].node.id)) {
+          ;[mutable[i - 1], mutable[i]] = [mutable[i], mutable[i - 1]]
+        }
+      }
+    } else {
+      for (let i = mutable.length - 2; i >= 0; i -= 1) {
+        if (selectedSet.has(mutable[i].node.id) && !selectedSet.has(mutable[i + 1].node.id)) {
+          ;[mutable[i + 1], mutable[i]] = [mutable[i], mutable[i + 1]]
+        }
+      }
+    }
+
+    setSortOrder(mutable.map((item) => item.node.id))
+    return mutable
   })
 }

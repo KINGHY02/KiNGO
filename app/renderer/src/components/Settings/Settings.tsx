@@ -1,5 +1,5 @@
-import { useState, useEffect } from 'react'
-import { Card, Form, Switch, Input, Button, Typography, Divider, message, Select, Space } from 'antd'
+﻿import { useState, useEffect } from 'react'
+import { Card, Form, Switch, Input, Button, Typography, Divider, message, Select, Space, Row, Col } from 'antd'
 import { CloudDownloadOutlined, GithubOutlined, LinkOutlined, CopyrightCircleOutlined, WarningOutlined } from '@ant-design/icons'
 import { getSettings, setSettings, getAppVersion, checkForUpdates, getCompatibleCores } from '../../services/ipc-client'
 import CoreVersion from '../CoreVersion/CoreVersion'
@@ -34,7 +34,7 @@ const DEFAULT_CORE_BY_PROTOCOL: Record<string, string> = {
   shadowquic: 'shadowquic'
 }
 
-const PROTOCOL_LABELS: Array<{ protocol: string; label: string }> = [
+const PROTOCOL_ITEMS: Array<{ protocol: string; label: string }> = [
   { protocol: 'vmess', label: 'VMess' },
   { protocol: 'vless', label: 'VLESS' },
   { protocol: 'trojan', label: 'Trojan' },
@@ -75,7 +75,7 @@ export default function Settings(): JSX.Element {
     loadSettings()
     getAppVersion().then(setVersion).catch(() => setVersion('1.0.0'))
     Promise.all(
-      PROTOCOL_LABELS.map(async ({ protocol }) => {
+      PROTOCOL_ITEMS.map(async ({ protocol }) => {
         const cores = await getCompatibleCores(protocol)
         return {
           protocol,
@@ -99,7 +99,6 @@ export default function Settings(): JSX.Element {
       }
       setSystemProxyEnabled(settings.systemProxy)
       setLoaded(true)
-      // Defer setFieldsValue until after Form mounts (loaded → re-render → Form exists)
       setTimeout(() => form.setFieldsValue(mergedSettings), 0)
     } catch {
       setLoaded(true)
@@ -122,6 +121,12 @@ export default function Settings(): JSX.Element {
     }
   }
 
+  const saveDefaultCoreByProtocol = async (protocol: string, core: string): Promise<void> => {
+    const current = form.getFieldsValue()
+    const merged = { ...DEFAULT_CORE_BY_PROTOCOL, ...(current.defaultCoreByProtocol || {}), [protocol]: core }
+    await setSettings({ defaultCoreByProtocol: merged }).catch(() => {})
+  }
+
   if (!loaded) return <Typography.Text>加载中...</Typography.Text>
 
   return (
@@ -131,8 +136,8 @@ export default function Settings(): JSX.Element {
       initialValues={INITIAL_VALUES}
       onValuesChange={(changed) => {
         if ('systemProxy' in changed) setSystemProxyEnabled(changed.systemProxy)
+        if ('defaultCoreByProtocol' in changed) return // handled per-protocol onChange
         const [key] = Object.keys(changed)
-        // Instant save for Switch/Select fields (not Input fields which use onBlur)
         if (key !== 'browserPath' && key !== 'updateMirror') {
           setSettings({ [key]: changed[key] as never }).catch(() => {})
         }
@@ -195,6 +200,29 @@ export default function Settings(): JSX.Element {
           </Form.Item>
 
         </Card>
+
+      <Card title="按协议默认核心" style={{ marginTop: 16 }}>
+        <Typography.Text type="secondary" style={{ display: 'block', marginBottom: 12, fontSize: 12 }}>
+          当连接节点时，根据协议自动选择默认使用的代理核心，可在设置中按需修改。
+        </Typography.Text>
+        <Row gutter={[8, 8]}>
+          {PROTOCOL_ITEMS.map(({ protocol, label }) => (
+            <Col xs={24} sm={12} md={8} key={protocol}>
+              <Form.Item
+                label={<Text style={{ fontSize: 12 }}>{label}</Text>}
+                name={['defaultCoreByProtocol', protocol]}
+              >
+                <Select
+                  size="small"
+                  style={{ width: '100%' }}
+                  options={coreOptions[protocol] || []}
+                  onChange={(val) => saveDefaultCoreByProtocol(protocol, val)}
+                />
+              </Form.Item>
+            </Col>
+          ))}
+        </Row>
+      </Card>
 
       <Card title="更新" style={{ marginTop: 16 }}>
           <div style={{ marginBottom: 16, display: 'flex', alignItems: 'center', gap: 12 }}>

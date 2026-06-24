@@ -1,496 +1,314 @@
-import { useState, useEffect, useRef, useCallback } from 'react'
-import { Button, Tag, Typography, Select, message, Spin, Switch } from 'antd'
-import { ChromeOutlined, StopOutlined, LoadingOutlined, ThunderboltOutlined, PauseCircleOutlined, DashboardOutlined } from '@ant-design/icons'
-import { useProxyStatus } from '../../hooks/useProxyStatus'
+import { useCallback, useEffect, useMemo, useState } from 'react'
+import { Alert, Button, Card, Collapse, Modal, Space, Tag, Typography, message } from 'antd'
+import {
+  ChromeOutlined,
+  CloudSyncOutlined,
+  DisconnectOutlined,
+  LoadingOutlined,
+  PoweroffOutlined,
+  RightOutlined,
+  SafetyCertificateOutlined,
+  ToolOutlined,
+} from '@ant-design/icons'
 import { useTheme } from '../../hooks/useTheme'
-import { startProxy, stopProxy, launchChrome, getCurrentSlot, getSlots, switchSlot, updateIP, testRealLatency, getSettings, setSettings } from '../../services/ipc-client'
+import {
+  connectPublicRoute,
+  disconnectPublicRoute,
+  getPublicConnectionState,
+  getSettings,
+  getSystemProxyStatus,
+  launchChrome,
+  listPublicRoutes,
+  onPublicRoutesChanged,
+  onPublicRouteStateChanged,
+  repairPublicNetwork,
+  selectPublicRoute,
+  updatePublicRoute,
+} from '../../services/ipc-client'
+import PublicRouteDrawer from './PublicRouteDrawer'
 
-const PROXY_OPTIONS = [
-  { value: 'clash-meta', label: 'Clash.Meta' },
-  { value: 'xray', label: 'Xray' },
-  { value: 'hysteria', label: 'Hysteria v1' },
-  { value: 'hysteria2', label: 'Hysteria v2' },
-  { value: 'singbox', label: 'Sing-Box' },
-  { value: 'naiveproxy', label: 'NaiveProxy' },
-  { value: 'juicity', label: 'Juicity' },
-  { value: 'mieru', label: 'Mieru' },
-  { value: 'shadowquic', label: 'ShadowQUIC' }
-]
-
-const ANIM_STYLES = `
-@keyframes kngo-pulse {
-  0% { box-shadow: 0 0 0 0 rgba(99, 130, 255, 0.5); }
-  70% { box-shadow: 0 0 0 28px rgba(99, 130, 255, 0); }
-  100% { box-shadow: 0 0 0 0 rgba(99, 130, 255, 0); }
-}
-@keyframes kngo-spin-ring {
-  from { transform: rotate(0deg); }
-  to { transform: rotate(360deg); }
-}
-@keyframes kngo-fadein {
-  from { opacity: 0; transform: translateY(10px); }
-  to { opacity: 1; transform: translateY(0); }
-}
-`
+const BUSY_STATES: PublicRouteConnectionState[] = ['preparing', 'connecting', 'disconnecting']
 
 export default function Dashboard(): JSX.Element {
   const t = useTheme()
-  const { statuses, refresh } = useProxyStatus()
-  const statusesRef = useRef(statuses)
-  statusesRef.current = statuses
-
-  const [selectedId, setSelectedId] = useState<string>('clash-meta')
-  const [loading, setLoading] = useState(false)
-  const [slots, setSlots] = useState<SlotInfo[]>([])
-  const [slotsLoading, setSlotsLoading] = useState(false)
-  const [activeSlot, setActiveSlot] = useState<number | null>(null)
-  const [switchingSlot, setSwitchingSlot] = useState(false)
-  const [autoUpdating, setAutoUpdating] = useState(false)
-  const [latency, setLatency] = useState<number | null>(null)
-  const [testingLatency, setTestingLatency] = useState(false)
-  const [proxyMode, setProxyMode] = useState<'global' | 'rule'>('rule')
+  const [routes, setRoutes] = useState<PublicRoute[]>([])
+  const [selectedRouteId, setSelectedRouteId] = useState<string | null>(null)
+  const [connection, setConnection] = useState<PublicConnectionState>({
+    routeId: null,
+    state: 'idle',
+    stage: '等待连接',
+    error: null,
+    errorCode: null,
+  })
   const [systemProxyEnabled, setSystemProxyEnabled] = useState(false)
+  const [drawerOpen, setDrawerOpen] = useState(false)
+  const [refreshing, setRefreshing] = useState(false)
 
-  const selectedProxy = statuses.find((s) => s.id === selectedId)
-  const running = selectedProxy?.running ?? false
-
-  // Sync latency from proxy status
-  useEffect(() => {
-    if (selectedProxy?.latency !== undefined && selectedProxy.latency !== null) {
-      setLatency(selectedProxy.latency)
-    }
-    if (!running) setLatency(null)
-  }, [selectedProxy?.latency, running])
-
-  // Load settings for proxy mode controls
-  useEffect(() => {
-    getSettings().then((s) => {
-      setProxyMode(s.proxyMode || 'rule')
-      setSystemProxyEnabled(s.systemProxy || false)
-    }).catch(() => {})
-    const unsubscribe = window.electronAPI.onSettingsChanged((s) => {
-      setProxyMode(s.proxyMode || 'rule')
-      setSystemProxyEnabled(s.systemProxy || false)
-    })
-    return () => { unsubscribe() }
+  const load = useCallback(async (): Promise<void> => {
+    const [routeList, state, settings, systemProxy] = await Promise.all([
+      listPublicRoutes(),
+      getPublicConnectionState(),
+      getSettings(),
+      getSystemProxyStatus(),
+    ])
+    setRoutes(routeList)
+    setConnection(state)
+    setSelectedRouteId(
+      settings.selectedPublicRouteId
+      || settings.lastSuccessfulRouteId
+      || routeList[0]?.id
+      || null,
+    )
+    setSystemProxyEnabled(state.state === 'connected' && (systemProxy.enabled || !!systemProxy.pacUrl))
   }, [])
 
-  const loadSlots = useCallback(async (proxyId: string) => {
-    setSlotsLoading(true)
-    try {
-      const [slotList, current] = await Promise.all([
-        getSlots(proxyId),
-        getCurrentSlot(proxyId)
-      ])
-      setSlots(slotList)
-      setActiveSlot(current?.slot ?? null)
-      return slotList
-    } catch {
-      setSlots([])
-      return []
-    } finally {
-      setSlotsLoading(false)
-    }
-  }, [])
-
-  const autoDownloadSlots = useCallback(async (proxyId: string, slotList: SlotInfo[]) => {
-    const undownloaded = slotList.filter((s) => !s.downloaded)
-    if (undownloaded.length === 0) return
-    setAutoUpdating(true)
-    for (const s of undownloaded) {
-      try { await updateIP(proxyId, s.slot) } catch { /* continue */ }
-    }
-    await loadSlots(proxyId)
-    setAutoUpdating(false)
-  }, [loadSlots])
-
   useEffect(() => {
-    loadSlots(selectedId).then((list) => {
-      if (list.length > 0) autoDownloadSlots(selectedId, list)
+    void load()
+    const unsubscribeState = onPublicRouteStateChanged((state) => {
+      setConnection(state)
+      void getSystemProxyStatus().then((status) => {
+        setSystemProxyEnabled(state.state === 'connected' && (status.enabled || !!status.pacUrl))
+      })
     })
-  }, [selectedId]) // eslint-disable-line react-hooks/exhaustive-deps
+    const unsubscribeRoutes = onPublicRoutesChanged(setRoutes)
+    const unsubscribeSettings = window.electronAPI.onSettingsChanged((settings) => {
+      setSelectedRouteId(settings.selectedPublicRouteId || settings.lastSuccessfulRouteId)
+    })
+    return () => {
+      unsubscribeState()
+      unsubscribeRoutes()
+      unsubscribeSettings()
+    }
+  }, [load])
 
-  useEffect(() => {
-    const timer = setInterval(() => { loadSlots(selectedId) }, 30_000)
-    return () => clearInterval(timer)
-  }, [selectedId, loadSlots])
+  const selectedRoute = useMemo(
+    () => routes.find((route) => route.id === selectedRouteId) || routes[0] || null,
+    [routes, selectedRouteId],
+  )
+  const connected = connection.state === 'connected'
+  const busy = BUSY_STATES.includes(connection.state)
 
-  const handleToggle = async () => {
-    setLoading(true)
-    try {
-      if (running) {
-        const result = await stopProxy(selectedId)
-        if (result.success) { message.success('代理已停止'); refresh() }
-        else { message.error(`停止失败: ${result.error}`) }
-      } else {
-        const result = await startProxy(selectedId)
-        if (result.success) { message.success(`代理启动成功，PID: ${result.pid}`); refresh() }
-        else { message.error(`启动失败: ${result.error}`) }
+  const statusCopy = useMemo(() => {
+    if (connection.state === 'connected') return { title: '已连接', subtitle: '网络连接已建立', color: '#22b573' }
+    if (connection.state === 'failed') {
+      const friendlyErrors: Partial<Record<PublicRouteErrorCode, string>> = {
+        DOWNLOAD_FAILED: '线路配置暂时无法下载',
+        CONFIG_SWITCH_FAILED: '线路配置无法启用',
+        CONFIG_INVALID: '线路配置已经失效',
+        PORT_CONFLICT: '检测到其他代理软件正在占用端口',
+        CORE_START_FAILED: '线路运行组件启动失败',
+        PORT_NOT_READY: '线路启动超时',
+        SYSTEM_PROXY_FAILED: 'Windows 系统代理设置失败',
+        CORE_EXITED: '线路连接已中断',
       }
-    } catch (err) {
-      message.error(`操作出错: ${String(err)}`)
+      return {
+        title: '连接失败',
+        subtitle: (connection.errorCode && friendlyErrors[connection.errorCode]) || '请重试或更换线路',
+        color: '#ef5350',
+      }
+    }
+    if (connection.state === 'disconnecting') return { title: '正在断开', subtitle: connection.stage, color: '#8a94a6' }
+    if (connection.state === 'preparing' || connection.state === 'connecting') {
+      return { title: connection.stage, subtitle: '请稍候，不要重复操作', color: t.accent }
+    }
+    return { title: '准备就绪', subtitle: '点击按钮开始连接', color: '#8a94a6' }
+  }, [connection, t.accent])
+
+  const handleToggle = async (): Promise<void> => {
+    if (busy) return
+    if (connected) {
+      const result = await disconnectPublicRoute()
+      if (result.success) message.success('连接已断开')
+      return
+    }
+    if (!selectedRoute) {
+      message.warning('暂无可用的公共线路')
+      setDrawerOpen(true)
+      return
+    }
+    const result = await connectPublicRoute(selectedRoute.id)
+    if (result.success) message.success(`已连接 ${selectedRoute.name}`)
+    else message.error(result.error || '公共线路连接失败')
+  }
+
+  const handleRouteSelect = async (route: PublicRoute): Promise<void> => {
+    setSelectedRouteId(route.id)
+    if (connected) {
+      const result = await connectPublicRoute(route.id)
+      if (result.success) {
+        message.success(`已切换到 ${route.name}`)
+        setDrawerOpen(false)
+      } else message.error(result.error || '线路切换失败')
+      return
+    }
+    const result = await selectPublicRoute(route.id)
+    if (result.success) setDrawerOpen(false)
+  }
+
+  const handleRefreshSelected = async (): Promise<void> => {
+    if (!selectedRoute) return
+    setRefreshing(true)
+    try {
+      const result = await updatePublicRoute(selectedRoute.id)
+      if (result.success) message.success(`${selectedRoute.name} 配置已更新`)
+      else message.error(result.error || '线路配置更新失败')
+      await load()
     } finally {
-      setLoading(false)
+      setRefreshing(false)
     }
   }
 
-  const handleStopAll = async () => {
-    for (const s of statuses.filter((x) => x.running)) {
-      await stopProxy(s.id)
-    }
-    message.success('已停止所有代理')
-    refresh()
-  }
-
-  const handleLaunchChrome = async () => {
+  const handleLaunchChrome = async (): Promise<void> => {
     const result = await launchChrome()
-    if (result.success) { message.success('浏览器已启动') }
-    else { message.warning(result.error || '浏览器启动失败') }
+    if (!result.success) message.warning(result.error || '请先建立连接')
   }
 
-  const handleTestLatency = async () => {
-    if (!running) return
-    setTestingLatency(true)
-    try {
-      const result = await testRealLatency(selectedId)
-      setLatency(result.latency >= 0 ? result.latency : null)
-      if (result.latency >= 0) message.success(`延迟: ${result.latency}ms`)
-      else message.warning('测速失败，请检查代理是否正常运行')
-    } catch {
-      message.error('测速出错')
-    } finally {
-      setTestingLatency(false)
-    }
+  const handleRepairNetwork = (): void => {
+    Modal.confirm({
+      title: '恢复系统网络设置',
+      content: '这会停止 KiNGO 的连接并清理其写入的本地系统代理，不会修改其他网络设置。',
+      okText: '立即恢复',
+      cancelText: '取消',
+      onOk: async () => {
+        const result = await repairPublicNetwork()
+        if (result.success) {
+          setSystemProxyEnabled(false)
+          message.success('系统网络设置已恢复')
+          await load()
+        } else {
+          message.error(result.error || '网络设置恢复失败')
+        }
+      },
+    })
   }
 
-  const handleSystemProxyToggle = async (checked: boolean) => {
-    setSystemProxyEnabled(checked)
-    try {
-      await setSettings({ systemProxy: checked, proxyMode })
-    } catch { message.error('设置失败') }
-  }
-
-  const handleProxyModeToggle = async (checked: boolean) => {
-    const mode = checked ? 'global' : 'rule'
-    setProxyMode(mode)
-    try {
-      await setSettings({ proxyMode: mode, systemProxy: systemProxyEnabled || true })
-      if (!systemProxyEnabled) setSystemProxyEnabled(true)
-    } catch { message.error('设置失败') }
-  }
-
-  const handleSlotClick = async (slot: number) => {
-    if (slot === activeSlot || switchingSlot) return
-    setSwitchingSlot(true)
-    try {
-      const result = await switchSlot(selectedId, slot)
-      if (result.success) { setActiveSlot(slot); message.success(`已切换到 IP${slot}`) }
-      else { message.error(`切换失败: ${result.error}`) }
-    } catch { message.error('切换出错') }
-    finally { setSwitchingSlot(false) }
-  }
-
-  const shortDesc = (desc: string): string => {
-    const cleaned = desc.replace(/^ip\d+/i, '').replace(/更新|配置文件|clash|meta/gi, '').trim()
-    return cleaned || desc
-  }
-
-  const isUpdating = loading || autoUpdating || switchingSlot
-
-  // Dynamic color values based on theme
-  const bgOrb1 = t.mode === 'dark' ? 'rgba(99,130,255,0.07)' : 'rgba(99,130,255,0.05)'
-  const bgOrb2 = t.mode === 'dark' ? 'rgba(139,92,246,0.05)' : 'rgba(139,92,246,0.04)'
-  const ringBorder = t.mode === 'dark' ? 'rgba(255,255,255,0.06)' : 'rgba(0,0,0,0.08)'
-  const btnStartShadow = '0 8px 50px rgba(75, 108, 247, 0.45)'
-  const btnStopShadow = '0 0 50px rgba(75, 108, 247, 0.2)'
-  const statusDimColor = t.mode === 'dark' ? 'rgba(255,255,255,0.35)' : 'rgba(0,0,0,0.35)'
-  const connectTextColor = t.mode === 'dark' ? 'rgba(255,255,255,0.35)' : 'rgba(0,0,0,0.3)'
-  const labelColor = t.mode === 'dark' ? 'rgba(255,255,255,0.25)' : 'rgba(0,0,0,0.3)'
-  const noSlotColor = t.mode === 'dark' ? 'rgba(255,255,255,0.2)' : 'rgba(0,0,0,0.25)'
+  const buttonBackground = connected
+    ? 'linear-gradient(145deg, #25c281, #17a86d)'
+    : connection.state === 'failed'
+      ? 'linear-gradient(145deg, #ff6b6b, #e94d4d)'
+      : 'linear-gradient(145deg, #617cff, #7357e8)'
 
   return (
-    <>
-      <style>{ANIM_STYLES}</style>
-      <div style={{
-        height: '100%',
-        background: t.dashGradient,
-        display: 'flex', flexDirection: 'column', alignItems: 'center',
-        padding: '24px 24px 20px',
-        position: 'relative', overflow: 'hidden', userSelect: 'none'
-      }}>
-        {/* Background orbs */}
-        <div style={{
-          position: 'absolute', top: '10%', left: '-80px',
-          width: 200, height: 200, borderRadius: '50%',
-          background: `radial-gradient(circle, ${bgOrb1} 0%, transparent 70%)`,
-          pointerEvents: 'none'
-        }} />
-        <div style={{
-          position: 'absolute', bottom: '20%', right: '-60px',
-          width: 220, height: 220, borderRadius: '50%',
-          background: `radial-gradient(circle, ${bgOrb2} 0%, transparent 70%)`,
-          pointerEvents: 'none'
-        }} />
+    <div className="public-home" style={{ background: t.dashGradient }}>
+      <div className="public-home__orb public-home__orb--one" />
+      <div className="public-home__orb public-home__orb--two" />
 
-        {/* Proxy selector */}
-        <div style={{ width: '100%', maxWidth: 360, marginBottom: 8, marginTop: 4 }}>
-          <Typography.Text style={{ fontSize: 11, color: labelColor, marginBottom: 4, display: 'block' }}>
-            选择核心
-          </Typography.Text>
-          <Select
-            value={selectedId}
-            onChange={setSelectedId}
-            options={PROXY_OPTIONS}
-            size="large"
-            popupMatchSelectWidth={false}
-            style={{ width: '100%' }}
-          />
+      <div className="public-home__header">
+        <div>
+          <Typography.Title level={3} style={{ margin: 0, color: t.text }}>KiNGO 电脑加速器</Typography.Title>
+          <Typography.Text style={{ color: t.textSecondary }}>简单连接，轻松使用</Typography.Text>
         </div>
+        <Tag
+          icon={<SafetyCertificateOutlined />}
+          color={systemProxyEnabled ? 'success' : 'default'}
+          style={{ borderRadius: 999, padding: '5px 11px', margin: 0 }}
+        >
+          系统代理：{systemProxyEnabled ? '已开启' : '未开启'}
+        </Tag>
+      </div>
 
-        <div style={{ flex: 1, minHeight: 16 }} />
+      <div className="public-home__content">
+        <section className="public-home__connect">
+          <div className="public-home__status-dot" style={{ background: statusCopy.color }} />
+          <Typography.Title level={2} style={{ margin: '10px 0 2px', color: t.text }}>
+            {statusCopy.title}
+          </Typography.Title>
+          <Typography.Text style={{ color: t.textSecondary }}>{statusCopy.subtitle}</Typography.Text>
 
-        {/* Big connect button */}
-        <div style={{ position: 'relative' }}>
-          <div style={{
-            width: 210, height: 210, borderRadius: '50%',
-            border: `2px solid ${ringBorder}`,
-            position: 'absolute', top: -15, left: -15,
-            animation: isUpdating && !running ? 'kngo-spin-ring 3s linear infinite' : 'none',
-            pointerEvents: 'none'
-          }} />
-          {running && (
-            <div style={{
-              width: 210, height: 210, borderRadius: '50%',
-              position: 'absolute', top: -15, left: -15,
-              animation: 'kngo-pulse 2.5s infinite', pointerEvents: 'none'
-            }} />
-          )}
-          <div
-            onClick={loading ? undefined : handleToggle}
+          <button
+            className={`public-home__power ${busy ? 'is-busy' : ''}`}
+            aria-label={connected ? '断开连接' : '开始连接'}
+            disabled={busy}
+            onClick={() => void handleToggle()}
             style={{
-              width: 180, height: 180, borderRadius: '50%',
-              background: running ? t.dashBtnStopBg : t.dashBtnStartBg,
-              display: 'flex', alignItems: 'center', justifyContent: 'center',
-              cursor: loading ? 'not-allowed' : 'pointer',
-              boxShadow: running ? btnStopShadow : btnStartShadow,
-              transition: 'all 0.5s cubic-bezier(0.4, 0, 0.2, 1), transform 0.2s ease',
-              opacity: loading ? 0.7 : 1,
-              position: 'relative', zIndex: 1,
-              transform: 'scale(1)', border: 'none'
+              background: buttonBackground,
+              boxShadow: connected
+                ? '0 20px 55px rgba(34,181,115,.28)'
+                : '0 20px 55px rgba(88,101,242,.32)',
             }}
-            onMouseEnter={(e) => { if (!loading) e.currentTarget.style.transform = 'scale(1.05)' }}
-            onMouseLeave={(e) => { e.currentTarget.style.transform = 'scale(1)' }}
           >
-            <div style={{
-              position: 'absolute', width: 158, height: 158, borderRadius: '50%',
-              border: '2px solid rgba(255,255,255,0.05)', pointerEvents: 'none'
-            }} />
-            {loading ? (
-              <LoadingOutlined style={{ fontSize: 56, color: '#fff' }} spin />
-            ) : running ? (
-              <PauseCircleOutlined style={{ fontSize: 60, color: 'rgba(255,255,255,0.8)' }} />
-            ) : (
-              <ThunderboltOutlined style={{ fontSize: 54, color: t.dashBtnText }} />
-            )}
-          </div>
-        </div>
-
-        {/* Status */}
-        <Typography.Text style={{
-          fontSize: 22, fontWeight: 700, marginTop: 24,
-          color: running ? t.dashStatusColor : connectTextColor,
-          letterSpacing: 3, transition: 'color 0.4s'
-        }}>
-          {running ? '已连接' : '点击连接'}
-        </Typography.Text>
-        {running && selectedProxy && (
-          <>
-            <Typography.Text style={{ fontSize: 13, color: statusDimColor, marginTop: 4 }}>
-              {selectedProxy.localAddress} · PID {selectedProxy.pid}
-            </Typography.Text>
-            {latency !== null && (
-              <Typography.Text style={{ fontSize: 13, marginTop: 4 }}>
-                <Tag color={latency < 150 ? 'green' : latency < 350 ? 'orange' : 'red'} style={{ marginRight: 0 }}>
-                  延迟: {latency}ms
-                </Tag>
-              </Typography.Text>
-            )}
-            {running && latency === null && !testingLatency && (
-              <Typography.Text style={{ fontSize: 12, color: statusDimColor, marginTop: 2 }}>
-                等待测速...
-              </Typography.Text>
-            )}
-            {testingLatency && (
-              <Typography.Text style={{ fontSize: 12, color: statusDimColor, marginTop: 4 }}>
-                <LoadingOutlined style={{ marginRight: 4 }} spin />
-                正在测速...
-              </Typography.Text>
-            )}
-          </>
-        )}
-        {autoUpdating && (
-          <Typography.Text style={{ fontSize: 12, color: statusDimColor, marginTop: 4 }}>
-            <LoadingOutlined style={{ marginRight: 4 }} spin />
-            正在更新线路配置...
+            <span className="public-home__power-ring" />
+            {busy
+              ? <LoadingOutlined spin />
+              : connected
+                ? <DisconnectOutlined />
+                : <PoweroffOutlined />}
+          </button>
+          <Typography.Text strong style={{ color: t.text, fontSize: 15 }}>
+            {busy ? connection.stage : connected ? '点击断开' : '开始连接'}
           </Typography.Text>
-        )}
+        </section>
 
-        {/* Proxy mode controls */}
-        <div style={{
-          display: 'flex', alignItems: 'center', justifyContent: 'center',
-          gap: 24, marginTop: 16, width: '100%', maxWidth: 380
-        }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-            <Typography.Text style={{ fontSize: 13, color: statusDimColor }}>系统代理</Typography.Text>
-            <Switch
-              size="small"
-              checked={systemProxyEnabled}
-              onChange={handleSystemProxyToggle}
-            />
-          </div>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-            <Typography.Text style={{ fontSize: 13, color: statusDimColor }}>代理模式</Typography.Text>
-            <Switch
-              size="small"
-              checked={proxyMode === 'global'}
-              onChange={handleProxyModeToggle}
-              checkedChildren="全局"
-              unCheckedChildren="规则"
-            />
-          </div>
-        </div>
-
-        <div style={{ flex: 1, minHeight: 12 }} />
-
-        {/* Slot cards */}
-        <div style={{ width: '100%', maxWidth: 380 }}>
-          <Typography.Text style={{
-            fontSize: 12, color: labelColor, marginBottom: 8, display: 'block', paddingLeft: 4
-          }}>
-            选择线路
-          </Typography.Text>
-          {slotsLoading && slots.length === 0 ? (
-            <div style={{ textAlign: 'center', padding: 20 }}><Spin size="small" /></div>
-          ) : slots.length === 0 ? (
-            <Typography.Text style={{ fontSize: 13, color: noSlotColor }}>暂无可用线路</Typography.Text>
-          ) : (
-            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, animation: 'kngo-fadein 0.5s ease' }}>
-              {slots.map((s, i) => {
-                const isActive = s.slot === activeSlot
-                return (
-                  <div
-                    key={s.slot}
-                    onClick={() => { if (!isActive && !switchingSlot) handleSlotClick(s.slot) }}
-                    style={{
-                      flex: '1 1 calc(33.33% - 8px)', minWidth: 100, maxWidth: 'calc(50% - 4px)',
-                      padding: '10px 10px', borderRadius: 10,
-                      background: isActive ? t.dashSlotActiveBg : t.dashSlotBg,
-                      border: isActive ? `1px solid ${t.dashSlotActiveBorder}` : `1px solid ${t.dashSlotBorder}`,
-                      cursor: !isActive && !switchingSlot ? 'pointer' : 'default',
-                      transition: 'all 0.25s ease, transform 0.15s ease',
-                      textAlign: 'center',
-                      opacity: isActive ? 1 : 0.6,
-                      animation: `kngo-fadein 0.4s ease ${i * 0.05}s both`
-                    }}
-                    onMouseEnter={(e) => {
-                      if (!isActive && !switchingSlot) {
-                        e.currentTarget.style.background = t.hover
-                        e.currentTarget.style.transform = 'translateY(-2px)'
-                        e.currentTarget.style.opacity = '0.85'
-                      }
-                    }}
-                    onMouseLeave={(e) => {
-                      if (!isActive) {
-                        e.currentTarget.style.background = t.dashSlotBg
-                        e.currentTarget.style.transform = 'translateY(0)'
-                        e.currentTarget.style.opacity = '0.6'
-                      }
-                    }}
-                  >
-                    <div style={{
-                      display: 'flex', gap: 2, marginBottom: 6,
-                      alignItems: 'flex-end', height: 14, justifyContent: 'center'
-                    }}>
-                      {[0, 1, 2, 3].map((j) => (
-                        <div key={j} style={{
-                          width: 3, height: 3 + j * 3.5, borderRadius: 1,
-                          background: isActive ? 'rgba(100, 255, 150, 0.85)' : t.textSecondary,
-                          transition: 'all 0.3s'
-                        }} />
-                      ))}
-                    </div>
-                    <Typography.Text style={{
-                      fontSize: 12, lineHeight: 1.3, display: 'block',
-                      color: isActive ? t.text : t.dashSlotText,
-                      fontWeight: isActive ? 500 : 400,
-                      overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap'
-                    }}>
-                      {shortDesc(s.description)}
-                    </Typography.Text>
-                    {isActive && (
-                      <Tag color="blue" style={{
-                        margin: '4px 0 0', fontSize: 10, lineHeight: '14px',
-                        padding: '0 4px', border: 'none'
-                      }}>当前</Tag>
-                    )}
-                  </div>
-                )
-              })}
+        <Card
+          className="public-home__route-card"
+          styles={{ body: { padding: 0 } }}
+          style={{ background: t.sidebar, borderColor: t.border }}
+          onClick={() => setDrawerOpen(true)}
+        >
+          <div className="public-home__route-row">
+            <div>
+              <Typography.Text style={{ color: t.textSecondary, fontSize: 12 }}>当前线路</Typography.Text>
+              <Space size={8} style={{ display: 'flex', marginTop: 5 }}>
+                <Typography.Text strong style={{ color: t.text, fontSize: 16 }}>
+                  {selectedRoute?.name || '暂无公共线路'}
+                </Typography.Text>
+                {selectedRoute && <Tag color="blue" bordered={false}>{selectedRoute.protocolLabel}</Tag>}
+              </Space>
             </div>
-          )}
-        </div>
+            <Space>
+              <Typography.Text style={{ color: t.textSecondary }}>更换</Typography.Text>
+              <RightOutlined style={{ color: t.textSecondary, fontSize: 12 }} />
+            </Space>
+          </div>
+        </Card>
 
-        {/* Action buttons */}
-        <div style={{ display: 'flex', gap: 12, width: '100%', maxWidth: 380, marginTop: 14 }}>
-          <Button
-            type="primary"
-            icon={<ChromeOutlined />}
-            onClick={handleLaunchChrome}
-            size="large"
-            style={{
-              flex: 1, height: 44, borderRadius: 10,
-              background: t.dashActionBtnBg, border: `1px solid ${t.dashActionBtnBorder}`,
-              color: t.dashActionBtnColor, fontWeight: 500, transition: 'all 0.2s ease'
-            }}
-            onMouseEnter={(e) => { e.currentTarget.style.background = t.mode === 'dark' ? 'rgba(255,255,255,0.14)' : '#f0f0f0'; e.currentTarget.style.color = t.text }}
-            onMouseLeave={(e) => { e.currentTarget.style.background = t.dashActionBtnBg; e.currentTarget.style.color = t.dashActionBtnColor }}
-          >
+        <div className="public-home__actions">
+          <Button icon={<ChromeOutlined />} onClick={() => void handleLaunchChrome()} disabled={!connected}>
             启动浏览器
           </Button>
-          <Button
-            type="primary"
-            icon={<DashboardOutlined />}
-            onClick={handleTestLatency}
-            loading={testingLatency}
-            disabled={!running}
-            size="large"
-            style={{
-              height: 44, borderRadius: 10, minWidth: 44,
-              background: t.dashActionBtnBg, border: `1px solid ${t.dashActionBtnBorder}`,
-              color: t.dashActionBtnColor, fontWeight: 500, transition: 'all 0.2s ease'
-            }}
-            onMouseEnter={(e) => { if (running) { e.currentTarget.style.background = t.mode === 'dark' ? 'rgba(255,255,255,0.14)' : '#f0f0f0'; e.currentTarget.style.color = t.text } }}
-            onMouseLeave={(e) => { e.currentTarget.style.background = t.dashActionBtnBg; e.currentTarget.style.color = t.dashActionBtnColor }}
-          >
-            测速
+          <Button icon={<CloudSyncOutlined />} loading={refreshing} onClick={() => void handleRefreshSelected()} disabled={!selectedRoute}>
+            刷新线路配置
           </Button>
-          <Button
-            danger
-            icon={<StopOutlined />}
-            onClick={handleStopAll}
-            size="large"
-            style={{
-              height: 44, borderRadius: 10,
-              background: t.dashStopBtnBg, border: `1px solid ${t.dashStopBtnBorder}`,
-              color: t.dashStopBtnColor, fontWeight: 500, transition: 'all 0.2s ease'
-            }}
-            onMouseEnter={(e) => { e.currentTarget.style.background = 'rgba(255,77,79,0.2)' }}
-            onMouseLeave={(e) => { e.currentTarget.style.background = t.dashStopBtnBg }}
-          >
-            全部停止
+          <Button icon={<ToolOutlined />} onClick={handleRepairNetwork}>
+            恢复网络
           </Button>
         </div>
+
+        {connection.state === 'failed' && (
+          <Alert
+            type="error"
+            showIcon
+            message="这条线路暂时无法连接"
+            description={
+              <Collapse
+                ghost
+                size="small"
+                items={[{ key: 'reason', label: '查看原因', children: connection.error }]}
+              />
+            }
+            action={
+              <Space direction="vertical" size={6}>
+                <Button size="small" type="primary" onClick={() => void handleToggle()}>重新连接</Button>
+                <Button size="small" onClick={() => setDrawerOpen(true)}>更换线路</Button>
+              </Space>
+            }
+          />
+        )}
+
+        <Typography.Text className="public-home__notice" style={{ color: t.textSecondary }}>
+          KiNGO 是网络连接客户端，不运营或提供代理线路。公共线路来自第三方公开项目，其可用性和稳定性不受 KiNGO 控制。
+        </Typography.Text>
       </div>
-    </>
+
+      <PublicRouteDrawer
+        open={drawerOpen}
+        routes={routes}
+        selectedRouteId={selectedRouteId}
+        connectionState={connection}
+        onClose={() => setDrawerOpen(false)}
+        onSelect={handleRouteSelect}
+        onReload={load}
+      />
+    </div>
   )
 }

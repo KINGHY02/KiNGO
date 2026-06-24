@@ -564,8 +564,10 @@ export function generateMieruConfig(node: StoredNode): string {
       mtu: 1400,
     }],
     activeProfile: 'manual',
-    socks5ListenPort: 1080,
+    socks5Port: 3080,
     socks5ListenLAN: false,
+    rpcPort: 8964,
+    loggingLevel: 'INFO',
   }
   return JSON.stringify(config, null, 2)
 }

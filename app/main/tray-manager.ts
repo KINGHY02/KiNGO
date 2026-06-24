@@ -2,10 +2,10 @@ import { Tray, Menu, nativeImage, BrowserWindow, app, NativeImage } from 'electr
 import { join } from 'path'
 import { existsSync } from 'fs'
 import { ProxyManager } from './proxy-manager'
+import { PublicRouteService } from './public-route-service'
 import { launchChrome } from './chrome-launcher'
 
 function findTrayIcon(baseDir: string): NativeImage {
-  // Prefer dedicated tray .ico, then main icon, then PNG fallbacks
   const candidates = [
     join(baseDir, 'icons', 'tray.ico'),
     join(baseDir, 'icons', 'tray-32.ico'),
@@ -16,81 +16,82 @@ function findTrayIcon(baseDir: string): NativeImage {
     join(baseDir, 'icons', 'tray-32.png'),
     join(baseDir, 'icons', 'tray-16.png'),
   ]
-
-  for (const p of candidates) {
-    if (existsSync(p)) {
-      const img = nativeImage.createFromPath(p)
-      if (!img.isEmpty()) return img
-    }
+  for (const path of candidates) {
+    if (!existsSync(path)) continue
+    const image = nativeImage.createFromPath(path)
+    if (!image.isEmpty()) return image
   }
-
   return nativeImage.createEmpty()
 }
 
 export class TrayManager {
   private tray: Tray | null = null
-  private proxyManager: ProxyManager
-  private baseDir: string
-  private mainWindow: BrowserWindow
 
-  constructor(proxyManager: ProxyManager, baseDir: string, mainWindow: BrowserWindow) {
-    this.proxyManager = proxyManager
-    this.baseDir = baseDir
-    this.mainWindow = mainWindow
-  }
+  constructor(
+    private proxyManager: ProxyManager,
+    private publicRouteService: PublicRouteService,
+    private baseDir: string,
+    private mainWindow: BrowserWindow,
+  ) {}
 
   create(): void {
-    const trayIcon = findTrayIcon(this.baseDir)
-
-    this.tray = new Tray(trayIcon.resize({ width: 16, height: 16 }))
-    this.tray.setToolTip('KiNGO')
-
+    this.tray = new Tray(findTrayIcon(this.baseDir).resize({ width: 16, height: 16 }))
+    this.tray.setToolTip('KiNGO 电脑加速器')
     this.tray.on('double-click', () => {
       this.mainWindow.show()
       this.mainWindow.focus()
     })
-
     this.updateMenu()
   }
 
   updateMenu(): void {
     if (!this.tray) return
+    const connection = this.publicRouteService.getState()
+    const selectedRoute = this.publicRouteService.getSelectedRoute()
+    const hasRunningCore = this.proxyManager.getStatus().some((status) => status.running)
 
-    const statuses = this.proxyManager.getStatus()
-    const runningProxies = statuses.filter((s) => s.running)
-
-    const contextMenu = Menu.buildFromTemplate([
+    this.tray.setContextMenu(Menu.buildFromTemplate([
       {
         label: this.mainWindow.isVisible() ? '隐藏主窗口' : '显示主窗口',
         click: () => {
-          if (this.mainWindow.isVisible()) {
-            this.mainWindow.hide()
-          } else {
+          if (this.mainWindow.isVisible()) this.mainWindow.hide()
+          else {
             this.mainWindow.show()
             this.mainWindow.focus()
           }
-        }
+        },
+      },
+      {
+        label: selectedRoute
+          ? `${connection.state === 'connected' ? '已连接' : '当前线路'}：${selectedRoute.name}`
+          : '暂无公共线路',
+        enabled: false,
+      },
+      {
+        label: connection.state === 'connected' ? '断开公共线路' : '连接公共线路',
+        enabled: !!selectedRoute && !['preparing', 'connecting', 'disconnecting'].includes(connection.state),
+        click: () => {
+          if (connection.state === 'connected') void this.publicRouteService.disconnect()
+          else void this.publicRouteService.connect()
+        },
       },
       {
         label: '启动浏览器',
-        click: () => {
-          launchChrome(this.baseDir, this.proxyManager)
-        }
+        enabled: hasRunningCore,
+        click: () => { launchChrome(this.baseDir, this.proxyManager) },
       },
       { type: 'separator' },
-      ...(runningProxies.length > 0
-        ? [
-            ...runningProxies.map((p) => ({
-              label: `停止 ${p.name}`,
-              click: () => this.proxyManager.stop(p.id)
-            })),
-            { type: 'separator' as const }
-          ]
-        : []),
+      {
+        label: '打开 KiNGO',
+        click: () => {
+          this.mainWindow.show()
+          this.mainWindow.focus()
+        },
+      },
       {
         label: '全部停止',
-        enabled: runningProxies.length > 0,
-        click: () => this.proxyManager.stopAll()
+        enabled: hasRunningCore,
+        click: () => { void this.publicRouteService.disconnect() },
       },
       { type: 'separator' },
       {
@@ -98,17 +99,13 @@ export class TrayManager {
         click: () => {
           this.proxyManager.stopAll()
           app.quit()
-        }
-      }
-    ])
-
-    this.tray.setContextMenu(contextMenu)
+        },
+      },
+    ]))
   }
 
   destroy(): void {
-    if (this.tray) {
-      this.tray.destroy()
-      this.tray = null
-    }
+    this.tray?.destroy()
+    this.tray = null
   }
 }

@@ -16,6 +16,8 @@ interface SubInfo {
   lastUpdated: number | null
   autoUpdate: boolean
   updateInterval: number
+  enabled?: boolean
+  lastUpdateError?: string | null
 }
 
 const CORE_LABELS: Record<string, string> = {
@@ -46,7 +48,15 @@ export default function SubscriptionPage(): JSX.Element {
     try { setSubs(await api.listSubscriptions()) } catch { /* ignore */ }
   }, [])
 
-  useEffect(() => { loadSubs() }, [loadSubs])
+  useEffect(() => {
+    void loadSubs()
+    const unsubscribe = api.onSubscriptionAutoUpdated((result) => {
+      void loadSubs()
+      if (result.success) message.success(`${result.name} 已自动更新`)
+      else message.warning(`${result.name} 自动更新失败`)
+    })
+    return unsubscribe
+  }, [loadSubs])
 
   const handleAdd = async (): Promise<void> => {
     if (!addName.trim() || !addUrl.trim()) return
@@ -79,6 +89,10 @@ export default function SubscriptionPage(): JSX.Element {
 
   const handleToggleAuto = async (id: string, enabled: boolean): Promise<void> => {
     try { await api.toggleAutoUpdate(id, enabled); await loadSubs() } catch { /* ignore */ }
+  }
+
+  const handleToggleEnabled = async (id: string, enabled: boolean): Promise<void> => {
+    try { await api.toggleSubscriptionEnabled(id, enabled); await loadSubs() } catch { /* ignore */ }
   }
 
   const handleTestNode = async (node: StoredNode): Promise<void> => {
@@ -173,19 +187,28 @@ export default function SubscriptionPage(): JSX.Element {
             </Typography.Text>
             <Tag>{sub.nodes.length} 个节点</Tag>
             <Space size={4}>
+              <Typography.Text style={{ fontSize: 12 }}>启用:</Typography.Text>
+              <Switch size="small" checked={sub.enabled !== false} onChange={(value) => handleToggleEnabled(sub.id, value)} />
+            </Space>
+            <Space size={4}>
               <Typography.Text style={{ fontSize: 12 }}>自动更新:</Typography.Text>
               <Switch size="small" checked={sub.autoUpdate} onChange={(v) => handleToggleAuto(sub.id, v)} />
             </Space>
           </Space>
+          {sub.lastUpdateError && (
+            <Typography.Text type="danger" style={{ display: 'block', fontSize: 12, marginBottom: 8 }}>
+              上次更新失败：{sub.lastUpdateError}
+            </Typography.Text>
+          )}
 
           {sub.nodes.length > 0 && (
             <Table
               columns={[
-                { title: '名称', dataIndex: 'name', key: 'name', ellipsis: true },
+{ title: '名称', dataIndex: 'name', key: 'name', ellipsis: true, sorter: (a: StoredNode, b: StoredNode) => a.name.localeCompare(b.name, 'zh-CN'), },
                 { title: '协议', dataIndex: 'protocol', key: 'protocol', width: 80, render: (p: string) => <Tag>{p}</Tag> },
                 { title: '地址', key: 'addr', width: 160, render: (_: unknown, r: StoredNode) => `${r.host}:${r.port}` },
                 {
-                  title: '延迟', dataIndex: 'latency', key: 'latency', width: 80,
+title: '延迟', dataIndex: 'latency', key: 'latency', width: 80, sorter: (a: StoredNode, b: StoredNode) => { const la = a.latency ?? -1; const lb = b.latency ?? -1; if (la < 0 && lb >= 0) return 1; if (lb < 0 && la >= 0) return -1; return la - lb; },
                   render: (ms: number | null) => ms !== null ? <Tag color={latencyColor(ms)}>{latencyText(ms)}</Tag> : '-',
                 },
                 {

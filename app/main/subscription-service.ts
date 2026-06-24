@@ -11,7 +11,7 @@ function generateId(): string {
   return `sub_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`
 }
 
-function httpGet(url: string, redirectCount = 0): Promise<string> {
+function httpGet(url: string, userAgent: string, redirectCount = 0): Promise<string> {
   return new Promise((resolve, reject) => {
     if (redirectCount > 5) {
       reject(new Error('too many redirects'))
@@ -33,12 +33,12 @@ function httpGet(url: string, redirectCount = 0): Promise<string> {
     }
 
     const req = get(url, {
-      headers: { 'User-Agent': 'KiNGO/1.0' },
+      headers: { 'User-Agent': userAgent || 'KiNGO/1.0' },
       timeout: 30000,
     }, (res) => {
       if ([301, 302, 307, 308].includes(res.statusCode || 0) && res.headers.location) {
         const redirected = new URL(res.headers.location, url).toString()
-        httpGet(redirected, redirectCount + 1).then(resolve).catch(reject)
+        httpGet(redirected, userAgent, redirectCount + 1).then(resolve).catch(reject)
         return
       }
       if (!res.statusCode || res.statusCode < 200 || res.statusCode >= 300) {
@@ -65,16 +65,47 @@ function isClashYaml(s: string): boolean {
 
 export interface SubDiff { added: number; removed: number; unchanged: number }
 
-export async function updateSubscriptionNodes(id: string): Promise<SubDiff | null> {
-  const sub = getSubscription(id)
-  if (!sub) return null
+export interface SaveSubscriptionInput {
+  id?: string
+  name: string
+  url: string
+  autoUpdate?: boolean
+  updateInterval?: number
+  enabled?: boolean
+  moreUrl?: string
+  userAgent?: string
+  filter?: string
+  convertTarget?: string
+  memo?: string
+  refresh?: boolean
+}
 
-  const body = await httpGet(sub.url.trim())
+function applyFilter(nodes: StoredNode[], filter: string): StoredNode[] {
+  const pattern = filter.trim()
+  if (!pattern) return nodes
+  try {
+    const regex = new RegExp(pattern, 'i')
+    return nodes.filter((node) => regex.test(node.name))
+  } catch {
+    return nodes
+  }
+}
+
+async function downloadSubscriptionSources(sub: StoredSubscription): Promise<string[]> {
+  const userAgent = sub.userAgent || 'KiNGO/1.0'
+  const sources = [sub.url.trim(), ...sub.moreUrl.split(',').map((item) => item.trim()).filter(Boolean)]
+  const contents: string[] = []
+  for (const source of sources) {
+    contents.push(await httpGet(source, userAgent))
+  }
+  return contents
+}
+
+function parseSubscriptionBody(body: string): { nodes: StoredNode[]; rawConfig: string | null } {
   const newNodes: StoredNode[] = []
   let rawConfig: string | null = null
 
   if (isClashYaml(body)) {
-    // Clash YAML — keep raw for clash-meta direct use
     rawConfig = body
     try {
       const parsed = yaml.load(body) as { proxies?: Array<Record<string, unknown>> } | undefined
@@ -84,7 +115,9 @@ export async function updateSubscriptionNodes(id: string): Promise<SubDiff | nul
           if (node) newNodes.push(node)
         }
       }
-    } catch { /* keep going */ }
+    } catch {
+      // keep parsing fallback below
+    }
   }
 
   if (newNodes.length === 0) {
@@ -100,32 +133,76 @@ export async function updateSubscriptionNodes(id: string): Promise<SubDiff | nul
     }
   }
 
+  return { nodes: newNodes, rawConfig }
+}
+
+export async function updateSubscriptionNodes(id: string): Promise<SubDiff | null> {
+  const sub = getSubscription(id)
+  if (!sub) return null
+  updateSubscription(id, { lastUpdateAttemptAt: Date.now() })
+
+  try {
+    return await performSubscriptionUpdate(sub)
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    updateSubscription(id, { lastUpdateError: message })
+    throw error
+  }
+}
+
+async function performSubscriptionUpdate(sub: StoredSubscription): Promise<SubDiff> {
+  const bodies = await downloadSubscriptionSources(sub)
+  const collectedNodes: StoredNode[] = []
+  let rawConfig: string | null = null
+  for (const body of bodies) {
+    const parsed = parseSubscriptionBody(body)
+    if (!rawConfig && parsed.rawConfig) rawConfig = parsed.rawConfig
+    collectedNodes.push(...parsed.nodes)
+  }
+  const filteredNodes = applyFilter(collectedNodes, sub.filter)
+  const newNodes = Array.from(new Map(filteredNodes.map((node) => [nodeIdentityKey(node), node])).values())
+
   if (newNodes.length === 0) {
     throw new Error('no valid nodes found in subscription')
   }
 
   // Diff
-  const nodeKey = (n: StoredNode): string => `${n.protocol}:${n.host}:${n.port}`
-  const newNameSet = new Set(newNodes.map(nodeKey))
-  const oldNameSet = new Set(sub.nodes.map(nodeKey))
-  const oldNodeByKey = new Map(sub.nodes.map((n) => [nodeKey(n), n]))
-  const added = newNodes.filter((n) => !oldNameSet.has(nodeKey(n))).length
-  const removed = sub.nodes.filter((n) => !newNameSet.has(nodeKey(n))).length
+  const newNameSet = new Set(newNodes.map(nodeIdentityKey))
+  const oldNameSet = new Set(sub.nodes.map(nodeIdentityKey))
+  const oldNodeByKey = new Map(sub.nodes.map((n) => [nodeIdentityKey(n), n]))
+  const added = newNodes.filter((n) => !oldNameSet.has(nodeIdentityKey(n))).length
+  const removed = sub.nodes.filter((n) => !newNameSet.has(nodeIdentityKey(n))).length
   const unchanged = newNodes.length - added
   const mergedNodes = newNodes.map((node) => {
-    const oldNode = oldNodeByKey.get(nodeKey(node))
+    const oldNode = oldNodeByKey.get(nodeIdentityKey(node))
     return oldNode
       ? { ...node, id: oldNode.id, latency: oldNode.latency, lastTested: oldNode.lastTested }
       : node
   })
 
-  updateSubscription(id, {
+  updateSubscription(sub.id, {
     nodes: mergedNodes,
     rawConfig,
     lastUpdated: Date.now(),
+    lastUpdateError: null,
   })
 
   return { added, removed, unchanged }
+}
+
+function nodeIdentityKey(node: StoredNode): string {
+  return `${node.protocol}|${node.host.toLowerCase()}|${node.port}|${stableStringify(node.details)}`
+}
+
+function stableStringify(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(stableStringify).join(',')}]`
+  if (value && typeof value === 'object') {
+    const entries = Object.entries(value as Record<string, unknown>)
+      .filter(([key]) => !['name', 'remarks'].includes(key))
+      .sort(([a], [b]) => a.localeCompare(b))
+    return `{${entries.map(([key, item]) => `${JSON.stringify(key)}:${stableStringify(item)}`).join(',')}}`
+  }
+  return JSON.stringify(value)
 }
 
 function normalizeBase64(s: string): string {
@@ -236,10 +313,61 @@ export function createSubscription(name: string, url: string): StoredSubscriptio
   const sub: StoredSubscription = {
     id: generateId(), name: name.trim(), url: url.trim(),
     nodes: [], rawConfig: null,
-    lastUpdated: null, autoUpdate: false, updateInterval: 12,
+    lastUpdated: null, lastUpdateAttemptAt: null, lastUpdateError: null, autoUpdate: false, updateInterval: 12,
+    enabled: true, moreUrl: '', userAgent: 'KiNGO/1.0',
+    filter: '', convertTarget: '', memo: '', sort: 0,
   }
   addSubscription(sub)
   return sub
+}
+
+export async function saveSubscription(input: SaveSubscriptionInput): Promise<StoredSubscription> {
+  const existing = input.id ? getSubscription(input.id) : undefined
+  const base: StoredSubscription = existing ?? {
+    id: generateId(),
+    name: '',
+    url: '',
+    nodes: [],
+    rawConfig: null,
+    lastUpdated: null,
+    lastUpdateAttemptAt: null,
+    lastUpdateError: null,
+    autoUpdate: false,
+    updateInterval: 12,
+    enabled: true,
+    moreUrl: '',
+    userAgent: 'KiNGO/1.0',
+    filter: '',
+    convertTarget: '',
+    memo: '',
+    sort: 0,
+  }
+
+  const next: StoredSubscription = {
+    ...base,
+    name: input.name.trim(),
+    url: input.url.trim(),
+    autoUpdate: input.autoUpdate ?? base.autoUpdate,
+    updateInterval: input.updateInterval ?? base.updateInterval,
+    enabled: input.enabled ?? base.enabled,
+    moreUrl: input.moreUrl?.trim() ?? base.moreUrl,
+    userAgent: input.userAgent?.trim() || base.userAgent || 'KiNGO/1.0',
+    filter: input.filter?.trim() ?? base.filter,
+    convertTarget: input.convertTarget?.trim() ?? base.convertTarget,
+    memo: input.memo?.trim() ?? base.memo,
+  }
+
+  if (existing) {
+    updateSubscription(existing.id, next)
+  } else {
+    addSubscription(next)
+  }
+
+  if (input.refresh ?? true) {
+    await updateSubscriptionNodes(next.id)
+  }
+
+  return getSubscription(next.id) ?? next
 }
 
 export function getSubscriptionRawConfig(id: string): string | null {

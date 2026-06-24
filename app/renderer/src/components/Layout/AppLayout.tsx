@@ -22,27 +22,30 @@ import ProxyDetail from '../ProxyDetail/ProxyDetail'
 import Settings from '../Settings/Settings'
 import LogViewer from '../LogViewer/LogViewer'
 import MyNodes from '../MyNodes/MyNodes'
+import SubscriptionPage from '../Subscription/SubscriptionPage'
 import logo from '../../assets/KiNGO.png'
 import { minimizeWindow, maximizeWindow, closeWindow, isMaximized as getIsMaximized, getAppVersion } from '../../services/ipc-client'
 import { useTheme, useSetTheme } from '../../hooks/useTheme'
 
 const { Sider, Content } = Layout
 
-type PageKey = 'dashboard' | 'config' | 'nodes' | 'settings' | 'logs'
+type PageKey = 'dashboard' | 'nodes' | 'subscriptions' | 'config' | 'settings' | 'logs'
 type DragStyle = React.CSSProperties & { WebkitAppRegion?: 'drag' | 'no-drag' }
 
 const menuItems: MenuProps['items'] = [
-  { key: 'dashboard', icon: <DashboardOutlined />, label: '仪表盘' },
-  { key: 'config', icon: <ApartmentOutlined />, label: '节点配置' },
+  { key: 'dashboard', icon: <DashboardOutlined />, label: '首页' },
   { key: 'nodes', icon: <NodeIndexOutlined />, label: '我的节点' },
+  { key: 'subscriptions', icon: <ApartmentOutlined />, label: '订阅管理' },
+  { key: 'config', icon: <ApartmentOutlined />, label: '核心与配置' },
   { key: 'settings', icon: <SettingOutlined />, label: '设置' },
   { key: 'logs', icon: <FileTextOutlined />, label: '连接日志' }
 ]
 
 const pageComponents: Record<PageKey, React.ReactNode> = {
   dashboard: <Dashboard />,
-  config: <ProxyDetail />,
   nodes: <MyNodes />,
+  subscriptions: <SubscriptionPage />,
+  config: <ProxyDetail />,
   settings: <Settings />,
   logs: <LogViewer />
 }

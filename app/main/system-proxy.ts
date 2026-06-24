@@ -55,6 +55,33 @@ export function clearSystemProxy(): boolean {
   }
 }
 
+const KINGO_LOCAL_PORTS = new Set([7890, 1080, 3080, 4080])
+
+export function isKingoManagedSystemProxy(status = getSystemProxyStatus()): boolean {
+  if (status.pacUrl) {
+    try {
+      const url = new URL(status.pacUrl)
+      if ((url.hostname === '127.0.0.1' || url.hostname === 'localhost') && url.pathname === '/proxy.pac') {
+        return true
+      }
+    } catch { /* invalid PAC URL */ }
+  }
+
+  if (!status.server) return false
+  const values = status.server.split(';').map((item) => item.trim()).filter(Boolean)
+  return values.some((value) => {
+    const address = value.includes('=') ? value.slice(value.indexOf('=') + 1) : value
+    const match = address.match(/^(?:127\.0\.0\.1|localhost):(\d+)$/i)
+    return !!match && KINGO_LOCAL_PORTS.has(Number(match[1]))
+  })
+}
+
+export function clearKingoSystemProxy(): boolean {
+  stopPacServer()
+  if (!isKingoManagedSystemProxy()) return true
+  return clearSystemProxy()
+}
+
 export function getSystemProxyStatus(): { enabled: boolean; server: string | null; pacUrl: string | null } {
   try {
     const proxyEnable = execSync(`reg query "${REG_PATH}" /v ProxyEnable`, { encoding: 'utf-8' })
@@ -95,12 +122,15 @@ function notifySystem(): void {
   } catch { /* ignore */ }
 }
 
-export async function syncSystemProxy(proxyManager: ProxyManager, force = false): Promise<void> {
+export async function syncSystemProxy(
+  proxyManager: ProxyManager,
+  force = false
+): Promise<{ success: boolean; error?: string }> {
   const settings = getSettings()
   if (!force && !settings.systemProxy) {
     clearSystemProxy()
     stopPacServer()
-    return
+    return { success: true }
   }
 
   const allStatus = proxyManager.getStatus()
@@ -109,15 +139,15 @@ export async function syncSystemProxy(proxyManager: ProxyManager, force = false)
   if (runningProxies.length === 0) {
     clearSystemProxy()
     stopPacServer()
-    return
+    return { success: true }
   }
 
   // Clash.Meta is the only HTTP proxy — use it directly when running
   const clashStatus = runningProxies.find((s) => s.id === 'clash-meta')
   if (clashStatus) {
     stopPacServer()
-    setSystemProxy(true, '127.0.0.1:7890')
-    return
+    const success = setSystemProxy(true, '127.0.0.1:7890')
+    return success ? { success: true } : { success: false, error: 'Windows 系统代理设置失败' }
   }
 
   // For SOCKS5 proxies, use PAC server to bridge to system proxy
@@ -129,9 +159,12 @@ export async function syncSystemProxy(proxyManager: ProxyManager, force = false)
       const port = await startPacServer('127.0.0.1', def.port, def.protocol, settings.proxyMode)
       const pacUrl = `http://127.0.0.1:${port}/proxy.pac`
       console.log(`[system-proxy] PAC server started, setting AutoConfigURL: ${pacUrl}`)
-      setSystemProxyWithPAC(pacUrl)
+      const success = setSystemProxyWithPAC(pacUrl)
+      return success ? { success: true } : { success: false, error: 'Windows PAC 代理设置失败' }
     } catch (err) {
       console.error('[system-proxy] Failed to start PAC server:', err)
+      return { success: false, error: `本地 PAC 服务启动失败：${err instanceof Error ? err.message : String(err)}` }
     }
   }
+  return { success: false, error: '没有可用于系统代理的运行组件' }
 }

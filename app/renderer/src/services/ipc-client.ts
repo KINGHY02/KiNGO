@@ -54,6 +54,46 @@ export async function switchSlot(proxyId: string, slot: number): Promise<{ succe
   return api.switchSlot(proxyId, slot)
 }
 
+export async function listPublicRoutes(): Promise<PublicRoute[]> {
+  return api.listPublicRoutes()
+}
+
+export async function getPublicConnectionState(): Promise<PublicConnectionState> {
+  return api.getPublicConnectionState()
+}
+
+export async function selectPublicRoute(routeId: string): Promise<PublicRouteResult> {
+  return api.selectPublicRoute(routeId)
+}
+
+export async function connectPublicRoute(routeId?: string): Promise<PublicRouteResult> {
+  return api.connectPublicRoute(routeId)
+}
+
+export async function disconnectPublicRoute(): Promise<PublicRouteResult> {
+  return api.disconnectPublicRoute()
+}
+
+export async function repairPublicNetwork(): Promise<PublicRouteResult> {
+  return api.repairPublicNetwork()
+}
+
+export async function updatePublicRoute(routeId: string): Promise<PublicRouteResult> {
+  return api.updatePublicRoute(routeId)
+}
+
+export async function updateAllPublicRoutes(): Promise<{ success: boolean; updated: number; failed: number }> {
+  return api.updateAllPublicRoutes()
+}
+
+export function onPublicRouteStateChanged(callback: (state: PublicConnectionState) => void): () => void {
+  return api.onPublicRouteStateChanged(callback)
+}
+
+export function onPublicRoutesChanged(callback: (routes: PublicRoute[]) => void): () => void {
+  return api.onPublicRoutesChanged(callback)
+}
+
 export async function launchChrome(): Promise<{ success: boolean; error?: string }> {
   return api.launchChrome()
 }
@@ -143,8 +183,16 @@ export async function listNodes(): Promise<StoredNode[]> {
   return api.listNodes()
 }
 
+export async function getNode(id: string): Promise<(StoredNode & { groupId: string }) | null> {
+  return api.getNode(id)
+}
+
 export async function updateNode(id: string, fields: Partial<StoredNode>): Promise<StoredNode | null> {
   return api.updateNode(id, fields)
+}
+
+export async function cloneNode(id: string): Promise<{ node: StoredNode; groupId: string } | null> {
+  return api.cloneNode(id)
 }
 
 export async function deleteNodes(ids: string[]): Promise<void> {
@@ -157,6 +205,10 @@ export async function testNodeLatency(ids: string[]): Promise<{ id: string; late
 
 export async function getCompatibleCores(protocol: string): Promise<CompatibleCore[]> {
   return api.getCompatibleCores(protocol)
+}
+
+export async function exportNodeClientConfig(nodeId: string, coreId: string): Promise<{ success: boolean; content?: string; format?: 'yaml' | 'json'; error?: string }> {
+  return api.exportNodeClientConfig(nodeId, coreId)
 }
 
 export async function connectNode(nodeId: string, coreId: string): Promise<{ success: boolean; pid?: number; error?: string }> {
@@ -184,8 +236,29 @@ export async function listSubscriptions(): Promise<SubInfo[]> {
   return api.listSubscriptions()
 }
 
+export async function getSubscription(id: string): Promise<SubInfo | null> {
+  return api.getSubscription(id)
+}
+
 export async function addSubscription(name: string, url: string): Promise<{ sub: SubInfo; diff: { added: number; removed: number; unchanged: number } | null; error?: string }> {
   return api.addSubscription(name, url)
+}
+
+export async function saveSubscription(input: {
+  id?: string
+  name: string
+  url: string
+  autoUpdate?: boolean
+  updateInterval?: number
+  enabled?: boolean
+  moreUrl?: string
+  userAgent?: string
+  filter?: string
+  convertTarget?: string
+  memo?: string
+  refresh?: boolean
+}): Promise<{ sub: SubInfo; error: string | null }> {
+  return api.saveSubscription(input)
 }
 
 export async function updateSubscription(id: string): Promise<{ added: number; removed: number; unchanged: number } | null> {
@@ -200,6 +273,10 @@ export async function toggleAutoUpdate(id: string, enabled: boolean): Promise<vo
   return api.toggleAutoUpdate(id, enabled)
 }
 
+export async function toggleSubscriptionEnabled(id: string, enabled: boolean): Promise<void> {
+  return api.toggleSubscriptionEnabled(id, enabled)
+}
+
 export function onStatusChanged(callback: (status: ProxyStatus) => void): () => void {
   return api.onStatusChanged(callback)
 }
@@ -210,4 +287,24 @@ export function onLog(callback: (entry: LogEntry) => void): () => void {
 
 export function onProxyUpdateProgress(callback: (progress: { proxyId: string; slot: number; percent: number }) => void): () => void {
   return api.onProxyUpdateProgress(callback)
+}
+// ProfileEx / Sort (V2rayN-style)
+export async function profileSort(colName: string, asc: boolean, groupId: string): Promise<Array<{ node: StoredNode; groupId: string; groupName: string }>> {
+  return api.profileSort(colName, asc, groupId)
+}
+
+export async function profileGetEx(nodeId: string): Promise<{ nodeId: string; delay: number; sort: number; lastTested: number | null } | null> {
+  return api.profileGetEx(nodeId)
+}
+
+export async function profileListEx(): Promise<Array<{ nodeId: string; delay: number; sort: number; lastTested: number | null }>> {
+  return api.profileListEx()
+}
+
+export async function profileSetDelay(nodeId: string, delay: number): Promise<{ success: boolean }> {
+  return api.profileSetDelay(nodeId, delay)
+}
+
+export async function profileMove(groupId: string, nodeIds: string[], direction: 'top' | 'up' | 'down' | 'bottom'): Promise<Array<{ node: StoredNode; groupId: string; groupName: string }>> {
+  return api.profileMove(groupId, nodeIds, direction)
 }

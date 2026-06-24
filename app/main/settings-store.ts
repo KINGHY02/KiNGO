@@ -6,10 +6,12 @@ export interface AppSettings {
   autoStart: boolean
   browserPath: string
   minimizeToTray: boolean
-  theme: 'light' | 'dark'
+  theme: 'light' | 'dark' | 'pink' | 'blue'
   autoCheckUpdates: boolean
   updateMirror: string
   defaultCoreByProtocol: Record<string, string>
+  lastSuccessfulRouteId: string | null
+  selectedPublicRouteId: string | null
 }
 
 const defaults: AppSettings = {
@@ -21,6 +23,8 @@ const defaults: AppSettings = {
   theme: 'light',
   autoCheckUpdates: true,
   updateMirror: '',
+  lastSuccessfulRouteId: null,
+  selectedPublicRouteId: null,
   defaultCoreByProtocol: {
     vmess: 'xray',
     vless: 'xray',
@@ -50,6 +54,8 @@ const store = new Store<AppSettings>({
     theme: { type: 'string', enum: ['light', 'dark', 'pink', 'blue'] },
     autoCheckUpdates: { type: 'boolean' },
     updateMirror: { type: 'string' },
+    lastSuccessfulRouteId: { type: ['string', 'null'] },
+    selectedPublicRouteId: { type: ['string', 'null'] },
     defaultCoreByProtocol: {
       type: 'object',
       additionalProperties: { type: 'string' }

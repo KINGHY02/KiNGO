@@ -2,6 +2,7 @@ import { join } from 'path'
 import { existsSync, readdirSync, readFileSync, writeFileSync, copyFileSync } from 'fs'
 import https from 'https'
 import { EventEmitter } from 'events'
+import * as yaml from 'js-yaml'
 
 // URL path mapping from proxy directory -> GitLab directory name
 const URL_DIR_MAP: Record<string, string> = {
@@ -163,6 +164,13 @@ export async function updateConfig(
 
   if (!content) {
     return { success: false, error: '下载内容为空' }
+  }
+
+  try {
+    if (configFileName.endsWith('.json')) JSON.parse(content)
+    else yaml.load(content)
+  } catch (err) {
+    return { success: false, error: `下载的线路配置格式无效: ${err instanceof Error ? err.message : String(err)}` }
   }
 
   emitter?.emit('progress', { percent: 70 })

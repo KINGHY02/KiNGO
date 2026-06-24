@@ -2,7 +2,7 @@ import { ChildProcess, spawn } from 'child_process'
 import { join } from 'path'
 import { writeFileSync, copyFileSync, existsSync, unlinkSync } from 'fs'
 import { EventEmitter } from 'events'
-import { app } from 'electron'
+import * as net from 'net'
 import { testRealLatency } from './latency-tester'
 
 export interface ProxyDefinition {
@@ -108,9 +108,6 @@ export class ProxyManager extends EventEmitter {
         latency: null
       })
     }
-    // cleanup on exit
-    app.on('before-quit', () => this.stopAll())
-    process.on('exit', () => this.stopAll())
   }
 
   getDef(proxyId: string): ProxyDefinition | undefined {
@@ -148,6 +145,13 @@ export class ProxyManager extends EventEmitter {
       const otherDef = this.getDef(id)
       if (otherDef && otherDef.port === def.port) {
         await this.stop(id)
+      }
+    }
+
+    if (await isPortListening(def.port)) {
+      return {
+        success: false,
+        error: `本地端口 ${def.port} 已被其他程序占用，请关闭冲突的软件后重试`
       }
     }
 
@@ -336,6 +340,7 @@ export class ProxyManager extends EventEmitter {
   }
 
   async stop(proxyId: string): Promise<{ success: boolean; error?: string }> {
+    const def = this.getDef(proxyId)
     const proc = this.processes.get(proxyId)
     if (!proc || !proc.pid) {
       return { success: false, error: '代理未运行' }
@@ -345,23 +350,21 @@ export class ProxyManager extends EventEmitter {
       const timeout = setTimeout(() => {
         try { proc.kill('SIGKILL') } catch { /* ignore */ }
         this.cleanup(proxyId)
-        resolve({ success: true })
+        void waitForPortRelease(def?.port).then(() => resolve({ success: true }))
       }, 5000)
 
       proc.once('close', () => {
         clearTimeout(timeout)
         this.cleanup(proxyId)
-        resolve({ success: true })
+        void waitForPortRelease(def?.port).then(() => resolve({ success: true }))
       })
 
       try { proc.kill('SIGTERM') } catch { /* ignore */ }
     })
   }
 
-  stopAll(): void {
-    for (const [id] of this.processes) {
-      void this.stop(id)
-    }
+  async stopAll(): Promise<void> {
+    await Promise.all(Array.from(this.processes.keys()).map((id) => this.stop(id).catch(() => undefined)))
   }
 
   private async runLatencyTest(proxyId: string): Promise<void> {
@@ -417,5 +420,31 @@ export class ProxyManager extends EventEmitter {
       Object.assign(current, partial)
       this.emit('status-changed', current)
     }
+  }
+}
+
+function isPortListening(port: number, timeout = 350): Promise<boolean> {
+  return new Promise((resolve) => {
+    const socket = net.createConnection({ host: '127.0.0.1', port })
+    let settled = false
+    const finish = (listening: boolean): void => {
+      if (settled) return
+      settled = true
+      socket.destroy()
+      resolve(listening)
+    }
+    socket.setTimeout(timeout)
+    socket.once('connect', () => finish(true))
+    socket.once('error', () => finish(false))
+    socket.once('timeout', () => finish(false))
+  })
+}
+
+async function waitForPortRelease(port?: number, timeout = 3000): Promise<void> {
+  if (!port) return
+  const deadline = Date.now() + timeout
+  while (Date.now() < deadline) {
+    if (!(await isPortListening(port))) return
+    await new Promise((resolve) => setTimeout(resolve, 150))
   }
 }
