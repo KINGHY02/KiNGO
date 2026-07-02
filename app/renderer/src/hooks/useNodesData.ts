@@ -2,7 +2,7 @@
 // Module-level cache ensures data survives component remounts.
 import { useState, useEffect, useCallback, useRef } from 'react'
 import {
-  getAllNodes, getActiveConnection, getSettings,
+  getAllNodes, getActiveConnection, getSettings, listNodeGroups,
 } from '../services/ipc-client'
 
 const api = window.electronAPI
@@ -11,17 +11,20 @@ const api = window.electronAPI
 let _ready = false
 let _allCache: FlatNode[] = []
 let _subsCache: SubInfo[] = []
+let _groupsCache: NodeGroupInfo[] = []
 let _connCache: ActiveConnection | null = null
 let _settingsCache: AppSettings | null = null
 
 async function fetchAll(): Promise<void> {
-  const [nodes, conn, subList, stg] = await Promise.all([
+  const [nodes, conn, nodeGroups, subList, stg] = await Promise.all([
     getAllNodes(),
     getActiveConnection(),
+    listNodeGroups(),
     api.listSubscriptions() as Promise<SubInfo[]>,
     getSettings().catch(() => null) as Promise<AppSettings | null>,
   ])
   _connCache = conn
+  _groupsCache = (nodeGroups || []).slice().sort((a, b) => (a.sort || 0) - (b.sort || 0))
   _subsCache = (subList || []).slice().sort((a, b) => (a.sort || 0) - (b.sort || 0))
   _settingsCache = stg
 
@@ -29,7 +32,8 @@ async function fetchAll(): Promise<void> {
   const exMap = new Map(rawEx.map((e) => [e.nodeId, e]))
   const groupOrder = new Map<string, number>([
     ['manual', 0] as [string, number],
-    ..._subsCache.map((sub, index): [string, number] => [sub.id, index + 1]),
+    ..._groupsCache.map((group, index): [string, number] => [group.id, index + 1]),
+    ..._subsCache.map((sub, index): [string, number] => [sub.id, index + _groupsCache.length + 1]),
   ])
 
   _allCache = nodes.map((n: { node: StoredNode; groupId: string; groupName: string }) => {
@@ -69,6 +73,7 @@ export interface FlatNode {
 export function useNodesData() {
   const [all, setAll] = useState<FlatNode[]>(_allCache)
   const [subs, setSubs] = useState<SubInfo[]>(_subsCache)
+  const [nodeGroups, setNodeGroups] = useState<NodeGroupInfo[]>(_groupsCache)
   const [loading, setLoading] = useState(!_ready)
   const [conn, setConn] = useState<ActiveConnection | null>(_connCache)
   const [settings, setSettings] = useState<AppSettings | null>(_settingsCache)
@@ -77,7 +82,7 @@ export function useNodesData() {
 
   const load = useCallback(async () => {
     if (_ready) {
-      setAll(_allCache); setSubs(_subsCache); setConn(_connCache); setSettings(_settingsCache)
+      setAll(_allCache); setSubs(_subsCache); setNodeGroups(_groupsCache); setConn(_connCache); setSettings(_settingsCache)
       setLoading(false)
       return
     }
@@ -86,7 +91,7 @@ export function useNodesData() {
     setLoading(true)
     try {
       await fetchAll()
-      setAll(_allCache); setSubs(_subsCache); setConn(_connCache); setSettings(_settingsCache)
+      setAll(_allCache); setSubs(_subsCache); setNodeGroups(_groupsCache); setConn(_connCache); setSettings(_settingsCache)
     } finally {
       setLoading(false); fetching.current = false
     }
@@ -98,9 +103,9 @@ export function useNodesData() {
     _ready = false
     setLoading(true)
     await fetchAll()
-    setAll(_allCache); setSubs(_subsCache); setConn(_connCache); setSettings(_settingsCache)
+    setAll(_allCache); setSubs(_subsCache); setNodeGroups(_groupsCache); setConn(_connCache); setSettings(_settingsCache)
     setLoading(false)
   }, [])
 
-  return { all, subs, loading, conn, settings, reload }
+  return { all, subs, nodeGroups, loading, conn, settings, reload }
 }

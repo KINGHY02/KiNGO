@@ -5,7 +5,7 @@ import { LinkOutlined } from '@ant-design/icons'
 import { getCompatibleCores, connectNode } from '../../services/ipc-client'
 
 const CORE_LABELS: Record<string, string> = {
-  'clash-meta': 'Clash.Meta', xray: 'Xray', hysteria: 'Hysteria v1',
+  'clash-meta': 'mihomo / Clash', xray: 'Xray', hysteria: 'Hysteria v1',
   hysteria2: 'Hysteria v2', singbox: 'Sing-Box', naiveproxy: 'NaiveProxy',
   juicity: 'Juicity', mieru: 'Mieru', shadowquic: 'ShadowQUIC',
 }

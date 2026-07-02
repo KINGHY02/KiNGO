@@ -15,6 +15,14 @@ export async function getProxyStatus(): Promise<ProxyStatus[]> {
   return api.getProxyStatus()
 }
 
+export async function getAppConnectionState(): Promise<AppConnectionState> {
+  return api.getAppConnectionState()
+}
+
+export async function disconnectAllConnections(): Promise<{ success: boolean; error?: string }> {
+  return api.disconnectAllConnections()
+}
+
 export async function getConfig(proxyId: string): Promise<{ content: string; format: string; backupExists: boolean }> {
   return api.getConfig(proxyId)
 }
@@ -76,6 +84,10 @@ export async function disconnectPublicRoute(): Promise<PublicRouteResult> {
 
 export async function repairPublicNetwork(): Promise<PublicRouteResult> {
   return api.repairPublicNetwork()
+}
+
+export async function diagnosePublicRoute(routeId?: string): Promise<PublicRouteDiagnosticReport> {
+  return api.diagnosePublicRoute(routeId)
 }
 
 export async function updatePublicRoute(routeId: string): Promise<PublicRouteResult> {
@@ -156,6 +168,78 @@ export async function setUpdateFeedURL(url: string): Promise<void> {
 
 export async function checkCoreVersions(): Promise<CoreVersionInfo[]> {
   return api.checkCoreVersions()
+}
+
+export async function listCoreProfiles(): Promise<CoreProfile[]> {
+  return api.listCoreProfiles()
+}
+
+export async function startClashProfile(profileId = 'default'): Promise<{ success: boolean; pid?: number; error?: string }> {
+  return api.startClashProfile(profileId)
+}
+
+export async function stopClash(): Promise<{ success: boolean; error?: string }> {
+  return api.stopClash()
+}
+
+export async function getClashGroups(): Promise<ClashGroup[]> {
+  return api.getClashGroups()
+}
+
+export async function getClashConfig(): Promise<{ mode: 'rule' | 'global' | 'direct' }> {
+  return api.getClashConfig()
+}
+
+export async function setClashMode(mode: 'rule' | 'global' | 'direct'): Promise<{ success: boolean; error?: string }> {
+  return api.setClashMode(mode)
+}
+
+export async function getClashRuntimeOptions(): Promise<{ tunEnabled: boolean }> {
+  return api.getClashRuntimeOptions()
+}
+
+export async function updateClashRuntimeOptions(options: { tunEnabled?: boolean }): Promise<{ success: boolean; error?: string }> {
+  return api.updateClashRuntimeOptions(options)
+}
+
+export async function diagnoseClashTun(): Promise<TunDiagnosticReport> {
+  return api.diagnoseClashTun()
+}
+
+export async function listClashProfiles(): Promise<ClashProfile[]> {
+  return api.listClashProfiles()
+}
+
+export async function saveClashProfile(input: { id?: string; name: string; content: string }): Promise<{ success: boolean; error?: string; profile?: ClashProfile }> {
+  return api.saveClashProfile(input)
+}
+
+export async function saveClashProfileFromUrl(input: { id?: string; name: string; url: string; autoUpdate?: boolean; updateInterval?: number }): Promise<{ success: boolean; error?: string; profile?: ClashProfile }> {
+  return api.saveClashProfileFromUrl(input)
+}
+
+export async function updateClashProfile(profileId: string): Promise<{ success: boolean; error?: string; profile?: ClashProfile }> {
+  return api.updateClashProfile(profileId)
+}
+
+export async function updateClashProfileOptions(profileId: string, options: { autoUpdate?: boolean; updateInterval?: number }): Promise<{ success: boolean; error?: string }> {
+  return api.updateClashProfileOptions(profileId, options)
+}
+
+export async function deleteClashProfile(profileId: string): Promise<{ success: boolean; error?: string }> {
+  return api.deleteClashProfile(profileId)
+}
+
+export async function selectClashGroupProxy(groupName: string, proxyName: string): Promise<{ success: boolean; error?: string }> {
+  return api.selectClashGroupProxy(groupName, proxyName)
+}
+
+export async function testClashProxyDelay(proxyName: string): Promise<{ success: boolean; delay: number; error?: string }> {
+  return api.testClashProxyDelay(proxyName)
+}
+
+export async function getClashConnections(): Promise<ClashConnection[]> {
+  return api.getClashConnections()
 }
 
 // Node management (unified)
@@ -277,8 +361,36 @@ export async function toggleSubscriptionEnabled(id: string, enabled: boolean): P
   return api.toggleSubscriptionEnabled(id, enabled)
 }
 
+export async function listNodeGroups(): Promise<NodeGroupInfo[]> {
+  return api.listNodeGroups()
+}
+
+export async function createEmptyGroup(name: string): Promise<{ success: boolean; error?: string; group?: NodeGroupInfo }> {
+  return api.createEmptyGroup(name)
+}
+
+export async function renameGroup(id: string, name: string): Promise<{ success: boolean; error?: string }> {
+  return api.renameGroup(id, name)
+}
+
+export async function deleteEmptyGroup(id: string): Promise<{ success: boolean; error?: string }> {
+  return api.deleteEmptyGroup(id)
+}
+
+export async function moveNodeGroup(id: string, direction: 'up' | 'down'): Promise<{ success: boolean; error?: string }> {
+  return api.moveNodeGroup(id, direction)
+}
+
+export async function moveNodesToGroup(nodeIds: string[], targetGroupId: string): Promise<{ success: boolean; error?: string; moved?: number; copied?: number }> {
+  return api.moveNodesToGroup(nodeIds, targetGroupId)
+}
+
 export function onStatusChanged(callback: (status: ProxyStatus) => void): () => void {
   return api.onStatusChanged(callback)
+}
+
+export function onAppConnectionStateChanged(callback: (state: AppConnectionState) => void): () => void {
+  return api.onAppConnectionStateChanged(callback)
 }
 
 export function onLog(callback: (entry: LogEntry) => void): () => void {

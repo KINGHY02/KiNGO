@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog } from 'electron'
+import { app, BrowserWindow, dialog, shell } from 'electron'
 import { join } from 'path'
 import { ProxyManager } from './proxy-manager'
 import { ConfigService } from './config-service'
@@ -12,6 +12,9 @@ import { stopPacServer } from './pac-server'
 import { PublicRouteService } from './public-route-service'
 import { getActiveConnection, setActiveConnection } from './nodes-store'
 import { SubscriptionScheduler } from './subscription-scheduler'
+import { MihomoService } from './mihomo-service'
+import { ClashProfileScheduler } from './clash-profile-scheduler'
+import { getAppConnectionState } from './app-connection-state'
 
 
 // Catch unhandled errors so the user sees something instead of silent crash
@@ -32,6 +35,8 @@ let configService: ConfigService
 let logService: LogService
 let publicRouteService: PublicRouteService
 let subscriptionScheduler: SubscriptionScheduler
+let mihomoService: MihomoService
+let clashProfileScheduler: ClashProfileScheduler
 let BASE_DIR: string
 let forceQuitting = false
 let shutdownComplete = false
@@ -67,11 +72,19 @@ function createWindow(): void {
     }
   })
 
+  const publishAppConnectionState = (): void => {
+    const state = getAppConnectionState(proxyManager, publicRouteService)
+    if (!mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('app:connection-state-changed', state)
+    }
+    trayManager?.updateMenu()
+  }
+
   proxyManager.on('status-changed', (status) => {
     if (!mainWindow.isDestroyed()) {
       mainWindow.webContents.send('proxy:status-changed', status)
     }
-    trayManager?.updateMenu()
+    publishAppConnectionState()
     const wasRunning = coreRunningState.get(status.id) ?? false
     coreRunningState.set(status.id, status.running)
     if (wasRunning && !status.running) {
@@ -111,6 +124,22 @@ function createWindow(): void {
     mainWindow.webContents.send('window:maximize-changed', false)
   })
 
+  mainWindow.webContents.setWindowOpenHandler(({ url }) => {
+    if (url.startsWith('http://') || url.startsWith('https://')) {
+      void shell.openExternal(url)
+      return { action: 'deny' }
+    }
+    return { action: 'deny' }
+  })
+
+  mainWindow.webContents.on('will-navigate', (event, url) => {
+    const currentUrl = mainWindow.webContents.getURL()
+    if (url !== currentUrl && (url.startsWith('http://') || url.startsWith('https://'))) {
+      event.preventDefault()
+      void shell.openExternal(url)
+    }
+  })
+
   if (!app.isPackaged && process.env['ELECTRON_RENDERER_URL']) {
     mainWindow.loadURL(process.env['ELECTRON_RENDERER_URL'])
   } else {
@@ -119,13 +148,17 @@ function createWindow(): void {
 
   publicRouteService.on('state-changed', (state) => {
     if (!mainWindow.isDestroyed()) mainWindow.webContents.send('public-route:state-changed', state)
-    trayManager?.updateMenu()
+    publishAppConnectionState()
   })
   publicRouteService.on('routes-changed', (routes) => {
     if (!mainWindow.isDestroyed()) mainWindow.webContents.send('public-route:routes-changed', routes)
+    publishAppConnectionState()
   })
   subscriptionScheduler.on('updated', (result) => {
     if (!mainWindow.isDestroyed()) mainWindow.webContents.send('subscription:auto-updated', result)
+  })
+  clashProfileScheduler.on('updated', (result) => {
+    if (!mainWindow.isDestroyed()) mainWindow.webContents.send('clash-profile:auto-updated', result)
   })
 
   trayManager = new TrayManager(proxyManager, publicRouteService, BASE_DIR, mainWindow)
@@ -158,7 +191,9 @@ app.whenReady().then(() => {
     proxyManager = new ProxyManager(BASE_DIR)
     configService = new ConfigService(BASE_DIR)
     publicRouteService = new PublicRouteService(BASE_DIR, proxyManager, configService)
+    mihomoService = new MihomoService(BASE_DIR, proxyManager)
     subscriptionScheduler = new SubscriptionScheduler()
+    clashProfileScheduler = new ClashProfileScheduler(mihomoService)
 
     // A new app session never assumes an old local proxy process is still alive.
     // Only clear proxy values that point to KiNGO's own localhost ports/PAC.
@@ -166,9 +201,24 @@ app.whenReady().then(() => {
     setSettings({ systemProxy: false })
     setActiveConnection(null)
 
-    registerIpcHandlers(proxyManager, configService, logService, BASE_DIR, publicRouteService)
+    registerIpcHandlers(
+      proxyManager,
+      configService,
+      logService,
+      BASE_DIR,
+      publicRouteService,
+      mihomoService,
+      () => {
+        const win = BrowserWindow.getAllWindows()[0]
+        if (win && !win.isDestroyed()) {
+          win.webContents.send('app:connection-state-changed', getAppConnectionState(proxyManager, publicRouteService))
+        }
+        trayManager?.updateMenu()
+      },
+    )
     createWindow()
     subscriptionScheduler.start()
+    clashProfileScheduler.start()
 
     app.on('activate', () => {
       if (BrowserWindow.getAllWindows().length === 0) createWindow()
@@ -189,6 +239,7 @@ app.on('before-quit', (event) => {
   void (async () => {
     await proxyManager?.stopAll()
     subscriptionScheduler?.stop()
+    clashProfileScheduler?.stop()
     trayManager?.destroy()
     clearKingoSystemProxy()
     stopPacServer()

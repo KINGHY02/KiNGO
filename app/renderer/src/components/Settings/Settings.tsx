@@ -26,7 +26,7 @@ const DEFAULT_CORE_BY_PROTOCOL: Record<string, string> = {
   ss2022: 'singbox',
   ssr: 'singbox',
   hysteria: 'hysteria',
-  hysteria2: 'hysteria2',
+  hysteria2: 'singbox',
   tuic: 'singbox',
   naive: 'naiveproxy',
   juicity: 'juicity',
@@ -51,7 +51,7 @@ const PROTOCOL_ITEMS: Array<{ protocol: string; label: string }> = [
 ]
 
 const CORE_LABELS: Record<string, string> = {
-  'clash-meta': 'Clash.Meta',
+  'clash-meta': 'mihomo / Clash',
   xray: 'Xray',
   hysteria: 'Hysteria v1',
   hysteria2: 'Hysteria v2',

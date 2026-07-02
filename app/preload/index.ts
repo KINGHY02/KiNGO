@@ -5,6 +5,8 @@ const electronAPI = {
   startProxy: (proxyId: string) => ipcRenderer.invoke('proxy:start', proxyId),
   stopProxy: (proxyId: string) => ipcRenderer.invoke('proxy:stop', proxyId),
   getProxyStatus: () => ipcRenderer.invoke('proxy:status'),
+  getAppConnectionState: () => ipcRenderer.invoke('app:connection-state'),
+  disconnectAllConnections: () => ipcRenderer.invoke('app:disconnect-all'),
   // Config
   getConfig: (proxyId: string) => ipcRenderer.invoke('proxy:get-config', proxyId),
   saveConfig: (proxyId: string, content: string) => ipcRenderer.invoke('proxy:save-config', proxyId, content),
@@ -23,6 +25,7 @@ const electronAPI = {
   connectPublicRoute: (routeId?: string) => ipcRenderer.invoke('public-route:connect', routeId),
   disconnectPublicRoute: () => ipcRenderer.invoke('public-route:disconnect'),
   repairPublicNetwork: () => ipcRenderer.invoke('public-route:repair'),
+  diagnosePublicRoute: (routeId?: string) => ipcRenderer.invoke('public-route:diagnose', routeId),
   updatePublicRoute: (routeId: string) => ipcRenderer.invoke('public-route:update', routeId),
   updateAllPublicRoutes: () => ipcRenderer.invoke('public-route:update-all'),
   // Chrome
@@ -47,6 +50,25 @@ const electronAPI = {
   setUpdateFeedURL: (url: string) => ipcRenderer.invoke('updater:set-feed-url', url),
   // Core version check
   checkCoreVersions: () => ipcRenderer.invoke('core:check-versions'),
+  listCoreProfiles: () => ipcRenderer.invoke('core:list-profiles'),
+  // Clash / mihomo mode
+  startClashProfile: (profileId: string) => ipcRenderer.invoke('clash:start-profile', profileId),
+  stopClash: () => ipcRenderer.invoke('clash:stop'),
+  getClashGroups: () => ipcRenderer.invoke('clash:groups'),
+  getClashConfig: () => ipcRenderer.invoke('clash:config'),
+  setClashMode: (mode: 'rule' | 'global' | 'direct') => ipcRenderer.invoke('clash:set-mode', mode),
+  getClashRuntimeOptions: () => ipcRenderer.invoke('clash:runtime-options'),
+  updateClashRuntimeOptions: (options: { tunEnabled?: boolean }) => ipcRenderer.invoke('clash:update-runtime-options', options),
+  diagnoseClashTun: () => ipcRenderer.invoke('clash:diagnose-tun'),
+  listClashProfiles: () => ipcRenderer.invoke('clash:list-profiles'),
+  saveClashProfile: (input: { id?: string; name: string; content: string }) => ipcRenderer.invoke('clash:save-profile', input),
+  saveClashProfileFromUrl: (input: { id?: string; name: string; url: string; autoUpdate?: boolean; updateInterval?: number }) => ipcRenderer.invoke('clash:save-profile-url', input),
+  updateClashProfile: (profileId: string) => ipcRenderer.invoke('clash:update-profile', profileId),
+  updateClashProfileOptions: (profileId: string, options: { autoUpdate?: boolean; updateInterval?: number }) => ipcRenderer.invoke('clash:update-profile-options', profileId, options),
+  deleteClashProfile: (profileId: string) => ipcRenderer.invoke('clash:delete-profile', profileId),
+  selectClashGroupProxy: (groupName: string, proxyName: string) => ipcRenderer.invoke('clash:select-proxy', groupName, proxyName),
+  testClashProxyDelay: (proxyName: string) => ipcRenderer.invoke('clash:test-delay', proxyName),
+  getClashConnections: () => ipcRenderer.invoke('clash:connections'),
   // Node management
   importNodeUrl: (url: string) => ipcRenderer.invoke('node:import-url', url),
   importNodeBatch: (urls: string[]) => ipcRenderer.invoke('node:import-batch', urls),
@@ -73,11 +95,22 @@ const electronAPI = {
   deleteSubscription: (id: string) => ipcRenderer.invoke('sub:delete', id),
   toggleAutoUpdate: (id: string, enabled: boolean) => ipcRenderer.invoke('sub:toggle-auto', id, enabled),
   toggleSubscriptionEnabled: (id: string, enabled: boolean) => ipcRenderer.invoke('sub:toggle-enabled', id, enabled),
+  listNodeGroups: () => ipcRenderer.invoke('group:list'),
+  createEmptyGroup: (name: string) => ipcRenderer.invoke('group:create-empty', name),
+  renameGroup: (id: string, name: string) => ipcRenderer.invoke('group:rename', id, name),
+  deleteEmptyGroup: (id: string) => ipcRenderer.invoke('group:delete-empty', id),
+  moveNodeGroup: (id: string, direction: 'up' | 'down') => ipcRenderer.invoke('group:move', id, direction),
+  moveNodesToGroup: (nodeIds: string[], targetGroupId: string) => ipcRenderer.invoke('group:move-nodes', nodeIds, targetGroupId),
   // Events �?each returns an unsubscribe function
   onStatusChanged: (callback: (status: unknown) => void) => {
     const handler = (_event: Electron.IpcRendererEvent, status: unknown) => callback(status)
     ipcRenderer.on('proxy:status-changed', handler)
     return () => { ipcRenderer.removeListener('proxy:status-changed', handler) }
+  },
+  onAppConnectionStateChanged: (callback: (state: unknown) => void) => {
+    const handler = (_event: Electron.IpcRendererEvent, state: unknown) => callback(state)
+    ipcRenderer.on('app:connection-state-changed', handler)
+    return () => { ipcRenderer.removeListener('app:connection-state-changed', handler) }
   },
   onLog: (callback: (entry: unknown) => void) => {
     const handler = (_event: Electron.IpcRendererEvent, entry: unknown) => callback(entry)
@@ -103,6 +136,11 @@ const electronAPI = {
     const handler = (_event: Electron.IpcRendererEvent, result: unknown) => callback(result)
     ipcRenderer.on('subscription:auto-updated', handler)
     return () => { ipcRenderer.removeListener('subscription:auto-updated', handler) }
+  },
+  onClashProfileAutoUpdated: (callback: (result: unknown) => void) => {
+    const handler = (_event: Electron.IpcRendererEvent, result: unknown) => callback(result)
+    ipcRenderer.on('clash-profile:auto-updated', handler)
+    return () => { ipcRenderer.removeListener('clash-profile:auto-updated', handler) }
   },
   onMaximizeChanged: (callback: (maximized: boolean) => void) => {
     const handler = (_event: Electron.IpcRendererEvent, maximized: boolean) => callback(maximized)

@@ -142,7 +142,7 @@ export async function syncSystemProxy(
     return { success: true }
   }
 
-  // Clash.Meta is the only HTTP proxy — use it directly when running
+  // mihomo / Clash is the HTTP mixed proxy — use it directly when running
   const clashStatus = runningProxies.find((s) => s.id === 'clash-meta')
   if (clashStatus) {
     stopPacServer()

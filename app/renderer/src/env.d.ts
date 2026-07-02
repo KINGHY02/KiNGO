@@ -18,6 +18,20 @@ interface LogEntry {
   message: string
 }
 
+type AppConnectionMode = 'none' | 'public-route' | 'clash' | 'v2rayn'
+
+interface AppConnectionState {
+  mode: AppConnectionMode
+  connected: boolean
+  busy: boolean
+  coreId: string | null
+  displayName: string | null
+  detail: string | null
+  latency: number | null
+  stage: string
+  error: string | null
+}
+
 interface AppSettings {
   systemProxy: boolean
   proxyMode: 'global' | 'rule'
@@ -84,6 +98,26 @@ interface PublicRouteResult {
   errorCode?: PublicRouteErrorCode
 }
 
+type PublicRouteDiagnosticStatus = 'pass' | 'warn' | 'fail'
+
+interface PublicRouteDiagnosticCheck {
+  key: string
+  label: string
+  status: PublicRouteDiagnosticStatus
+  message: string
+  detail?: string
+}
+
+interface PublicRouteDiagnosticReport {
+  routeId: string | null
+  routeName: string | null
+  protocolLabel: string | null
+  connected: boolean
+  latency: number | null
+  summary: string
+  checks: PublicRouteDiagnosticCheck[]
+}
+
 interface CoreVersionInfo {
   proxyId: string
   name: string
@@ -121,6 +155,71 @@ interface CompatibleCore {
   recommended: boolean
 }
 
+type CoreFamily = 'mihomo' | 'xray' | 'sing-box' | 'legacy'
+
+interface CoreProfile {
+  id: string
+  name: string
+  family: CoreFamily
+  executable: string
+  dir: string
+  configFile: string
+  configFormat: 'yaml' | 'json'
+  defaultHttpPort?: number
+  defaultSocksPort?: number
+  controllerPort?: number
+  supportsTun: boolean
+  supportsSubscriptions: boolean
+  supportsExternalController: boolean
+  runtimeProxyId: string
+  installed: boolean
+}
+
+interface ClashGroup {
+  name: string
+  type: string
+  now: string | null
+  all: string[]
+}
+
+interface ClashProfile {
+  id: string
+  name: string
+  updatedAt: number
+  source: 'default' | 'imported' | 'url'
+  active: boolean
+  url?: string
+  lastUpdateAttemptAt?: number | null
+  lastUpdateError?: string | null
+  autoUpdate?: boolean
+  updateInterval?: number
+}
+
+interface ClashConnection {
+  id: string
+  metadata?: Record<string, unknown>
+  upload?: number
+  download?: number
+  chains?: string[]
+  rule?: string
+  rulePayload?: string
+  start?: string
+}
+
+interface TunDiagnosticCheck {
+  key: string
+  label: string
+  status: 'pass' | 'warn' | 'fail'
+  message: string
+  detail?: string
+}
+
+interface TunDiagnosticReport {
+  ready: boolean
+  summary: string
+  checks: TunDiagnosticCheck[]
+}
+
 interface SubInfo {
   id: string
   name: string
@@ -141,10 +240,21 @@ interface SubInfo {
   sort?: number
 }
 
+interface NodeGroupInfo {
+  id: string
+  name: string
+  nodes: StoredNode[]
+  sort: number
+  createdAt: number
+  updatedAt: number
+}
+
 interface ElectronAPI {
   startProxy: (proxyId: string) => Promise<{ success: boolean; pid?: number; error?: string }>
   stopProxy: (proxyId: string) => Promise<{ success: boolean; error?: string }>
   getProxyStatus: () => Promise<ProxyStatus[]>
+  getAppConnectionState: () => Promise<AppConnectionState>
+  disconnectAllConnections: () => Promise<{ success: boolean; error?: string }>
   getConfig: (proxyId: string) => Promise<{ content: string; format: string; backupExists: boolean }>
   saveConfig: (proxyId: string, content: string) => Promise<{ success: boolean; error?: string }>
   restoreBackup: (proxyId: string) => Promise<{ success: boolean }>
@@ -164,6 +274,7 @@ interface ElectronAPI {
   connectPublicRoute: (routeId?: string) => Promise<PublicRouteResult>
   disconnectPublicRoute: () => Promise<PublicRouteResult>
   repairPublicNetwork: () => Promise<PublicRouteResult>
+  diagnosePublicRoute: (routeId?: string) => Promise<PublicRouteDiagnosticReport>
   updatePublicRoute: (routeId: string) => Promise<PublicRouteResult>
   updateAllPublicRoutes: () => Promise<{ success: boolean; updated: number; failed: number }>
   launchChrome: () => Promise<{ success: boolean; error?: string }>
@@ -181,6 +292,24 @@ interface ElectronAPI {
   getAppVersion: () => Promise<string>
   setUpdateFeedURL: (url: string) => Promise<void>
   checkCoreVersions: () => Promise<CoreVersionInfo[]>
+  listCoreProfiles: () => Promise<CoreProfile[]>
+  startClashProfile: (profileId: string) => Promise<{ success: boolean; pid?: number; error?: string }>
+  stopClash: () => Promise<{ success: boolean; error?: string }>
+  getClashGroups: () => Promise<ClashGroup[]>
+  getClashConfig: () => Promise<{ mode: 'rule' | 'global' | 'direct' }>
+  setClashMode: (mode: 'rule' | 'global' | 'direct') => Promise<{ success: boolean; error?: string }>
+  getClashRuntimeOptions: () => Promise<{ tunEnabled: boolean }>
+  updateClashRuntimeOptions: (options: { tunEnabled?: boolean }) => Promise<{ success: boolean; error?: string }>
+  diagnoseClashTun: () => Promise<TunDiagnosticReport>
+  listClashProfiles: () => Promise<ClashProfile[]>
+  saveClashProfile: (input: { id?: string; name: string; content: string }) => Promise<{ success: boolean; error?: string; profile?: ClashProfile }>
+  saveClashProfileFromUrl: (input: { id?: string; name: string; url: string; autoUpdate?: boolean; updateInterval?: number }) => Promise<{ success: boolean; error?: string; profile?: ClashProfile }>
+  updateClashProfile: (profileId: string) => Promise<{ success: boolean; error?: string; profile?: ClashProfile }>
+  updateClashProfileOptions: (profileId: string, options: { autoUpdate?: boolean; updateInterval?: number }) => Promise<{ success: boolean; error?: string }>
+  deleteClashProfile: (profileId: string) => Promise<{ success: boolean; error?: string }>
+  selectClashGroupProxy: (groupName: string, proxyName: string) => Promise<{ success: boolean; error?: string }>
+  testClashProxyDelay: (proxyName: string) => Promise<{ success: boolean; delay: number; error?: string }>
+  getClashConnections: () => Promise<ClashConnection[]>
   importNodeUrl: (url: string) => Promise<StoredNode | null>
   importNodeBatch: (urls: string[]) => Promise<StoredNode[]>
   listAllNodes: () => Promise<Array<{ node: StoredNode; groupId: string; groupName: string }>>
@@ -219,7 +348,14 @@ interface ElectronAPI {
   deleteSubscription: (id: string) => Promise<void>
   toggleAutoUpdate: (id: string, enabled: boolean) => Promise<void>
   toggleSubscriptionEnabled: (id: string, enabled: boolean) => Promise<void>
+  listNodeGroups: () => Promise<NodeGroupInfo[]>
+  createEmptyGroup: (name: string) => Promise<{ success: boolean; error?: string; group?: NodeGroupInfo }>
+  renameGroup: (id: string, name: string) => Promise<{ success: boolean; error?: string }>
+  deleteEmptyGroup: (id: string) => Promise<{ success: boolean; error?: string }>
+  moveNodeGroup: (id: string, direction: 'up' | 'down') => Promise<{ success: boolean; error?: string }>
+  moveNodesToGroup: (nodeIds: string[], targetGroupId: string) => Promise<{ success: boolean; error?: string; moved?: number; copied?: number }>
   onStatusChanged: (callback: (status: ProxyStatus) => void) => () => void
+  onAppConnectionStateChanged: (callback: (state: AppConnectionState) => void) => () => void
   onLog: (callback: (entry: LogEntry) => void) => () => void
   onProxyUpdateProgress: (callback: (progress: { proxyId: string; slot: number; percent: number }) => void) => () => void
   onPublicRouteStateChanged: (callback: (state: PublicConnectionState) => void) => () => void
@@ -229,6 +365,12 @@ interface ElectronAPI {
     name: string
     success: boolean
     diff?: { added: number; removed: number; unchanged: number } | null
+    error?: string
+  }) => void) => () => void
+  onClashProfileAutoUpdated: (callback: (result: {
+    id: string
+    name: string
+    success: boolean
     error?: string
   }) => void) => () => void
   onMaximizeChanged: (callback: (maximized: boolean) => void) => () => void

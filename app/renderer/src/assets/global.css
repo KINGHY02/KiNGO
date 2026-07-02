@@ -183,6 +183,11 @@ body {
   gap: 10px;
 }
 
+.public-home__actions--secondary {
+  grid-template-columns: 1fr;
+  margin-top: -6px;
+}
+
 .public-home__actions .ant-btn {
   height: 42px;
   border-radius: 11px;

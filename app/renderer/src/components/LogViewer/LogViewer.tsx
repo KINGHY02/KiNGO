@@ -5,7 +5,7 @@ import { getLogs, clearLogs, onLog } from '../../services/ipc-client'
 
 const PROXY_OPTIONS = [
   { value: 'all', label: '全部代理' },
-  { value: 'clash-meta', label: 'Clash.Meta' },
+  { value: 'clash-meta', label: 'mihomo / Clash' },
   { value: 'xray', label: 'Xray' },
   { value: 'hysteria', label: 'Hysteria v1' },
   { value: 'hysteria2', label: 'Hysteria v2' },

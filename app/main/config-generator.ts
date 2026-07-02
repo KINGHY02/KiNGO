@@ -155,7 +155,12 @@ function clashProxyLines(node: StoredNode): string[] {
 }
 
 export function generateClashMetaConfig(node: StoredNode): string {
-  const proxyName = escapeYaml(node.name)
+  return generateClashMetaConfigFromNodes([node])
+}
+
+export function generateClashMetaConfigFromNodes(nodes: StoredNode[]): string {
+  const safeNodes = nodes.length > 0 ? nodes : []
+  const proxyNames = safeNodes.map((node) => escapeYaml(node.name))
   const lines: string[] = [
     'mixed-port: 7890',
     'allow-lan: false',
@@ -170,12 +175,16 @@ export function generateClashMetaConfig(node: StoredNode): string {
     '    - 8.8.8.8',
     'proxies:',
   ]
-  lines.push(...clashProxyLines(node))
+  for (const node of safeNodes) {
+    lines.push(...clashProxyLines(node))
+  }
   lines.push('proxy-groups:')
   lines.push(`  - name: "\u{1F680} 手动选择"`)
   lines.push('    type: select')
   lines.push('    proxies:')
-  lines.push(`      - ${proxyName}`)
+  for (const name of proxyNames) {
+    lines.push(`      - ${name}`)
+  }
   lines.push('      - DIRECT')
   lines.push('rules:')
   lines.push('  - MATCH,\u{1F680} 手动选择')
@@ -633,8 +642,8 @@ export function compatibleCores(protocol: string): Array<{ id: string; recommend
     ss2022: ['singbox', 'clash-meta'],
     ssr: ['singbox', 'clash-meta'],
     hysteria: ['hysteria', 'clash-meta', 'singbox'],
-    hysteria2: ['hysteria2', 'clash-meta', 'singbox'],
-    tuic: ['clash-meta', 'singbox'],
+    hysteria2: ['singbox', 'hysteria2', 'clash-meta'],
+    tuic: ['singbox', 'clash-meta'],
     naive: ['naiveproxy', 'singbox'],
     juicity: ['juicity', 'singbox'],
     mieru: ['mieru'],

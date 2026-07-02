@@ -26,6 +26,15 @@ wget.exe
 .vscode/
 .idea/
 
+# Temporary downloads and local screenshots
+.wget-hsts
+*.zip
+*.7z
+*.7z.exe
+git-installer.exe
+screenshot*.png
+app/dev-output.txt
+
 # Windows compatibility (large binaries)
 win7-win8/
 KiNGO-GUI-实施计划.md

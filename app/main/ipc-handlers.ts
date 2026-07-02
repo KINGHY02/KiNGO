@@ -11,17 +11,23 @@ import { checkForUpdates, downloadUpdate, installUpdate, getAppVersion, setUpdat
 import { checkAllVersions } from './core-version'
 import { parseNodeUrl, parseNodeUrls, StoredNode } from './protocol-parser'
 import { generateConfig, compatibleCores } from './config-generator'
-import { listNodes, addNode, addNodes, updateNode, deleteNodes, deleteSubscriptionNode, deleteSubscriptionNodes, updateNodeLatency, findNodeById, getAllNodes, getActiveConnection, setActiveConnection, listSubscriptions, cloneNode } from './nodes-store'
+import { listNodes, addNode, addNodes, updateNode, deleteNodes, deleteSubscriptionNode, deleteSubscriptionNodes, updateNodeLatency, findNodeById, getAllNodes, getActiveConnection, setActiveConnection, listSubscriptions, cloneNode, moveNodesToGroup, listNodeGroups, createNodeGroup, renameNodeGroup, deleteNodeGroup, moveNodeGroup } from './nodes-store'
 import { saveSubscription, updateSubscriptionNodes, updateSubscription, deleteSubscription, getSubscription } from './subscription-service'
 import { setDelay, setSortOrder, deleteProfileEx, getProfileEx, listAll as listAllProfileEx } from './profile-ex-store'
 import { PublicRouteService } from './public-route-service'
+import { MihomoService } from './mihomo-service'
+import { listCoreProfiles } from './core-profiles'
+import { getAppConnectionState } from './app-connection-state'
+import { disconnectAllConnections } from './app-connection-control'
 
 export function registerIpcHandlers(
   proxyManager: ProxyManager,
   configService: ConfigService,
   logService: LogService,
   baseDir: string,
-  publicRouteService: PublicRouteService
+  publicRouteService: PublicRouteService,
+  mihomoService: MihomoService,
+  notifyAppConnectionState: () => void = () => undefined,
 ): void {
   const mainWindow = (): BrowserWindow => BrowserWindow.getAllWindows()[0]
   const publishSettings = (): void => {
@@ -48,9 +54,11 @@ export function registerIpcHandlers(
         await proxyManager.stop(proxyId).catch(() => undefined)
         setSettings({ systemProxy: false })
         publishSettings()
+        notifyAppConnectionState()
         return { success: false, error: proxyResult.error || 'Windows 系统代理设置失败' }
       }
     }
+    notifyAppConnectionState()
     return result
   })
 
@@ -61,11 +69,23 @@ export function registerIpcHandlers(
       publishSettings()
     }
     await syncSystemProxy(proxyManager, true)
+    notifyAppConnectionState()
     return result
   })
 
   ipcMain.handle('proxy:status', () => {
     return proxyManager.getStatus()
+  })
+
+  ipcMain.handle('app:connection-state', () => {
+    return getAppConnectionState(proxyManager, publicRouteService)
+  })
+
+  ipcMain.handle('app:disconnect-all', async () => {
+    const result = await disconnectAllConnections(proxyManager, publicRouteService)
+    publishSettings()
+    notifyAppConnectionState()
+    return result
   })
 
   // Config
@@ -104,9 +124,10 @@ export function registerIpcHandlers(
   ipcMain.handle('proxy:test-real-latency', async (_e, proxyId: string) => {
     const def = PROXY_DEFINITIONS.find((d) => d.id === proxyId)
     if (!def) return { latency: -1 }
-    const latency = await testRealLatency(def.port)
+    const latency = await testRealLatency(def.port, def.protocol)
     // Also update the proxy status so dashboard picks it up
     proxyManager.updateStatus(proxyId, { latency: latency >= 0 ? latency : null })
+    notifyAppConnectionState()
     return { latency }
   })
 
@@ -140,15 +161,22 @@ export function registerIpcHandlers(
   ipcMain.handle('public-route:select', (_e, routeId: string) => {
     const result = publicRouteService.selectRoute(routeId)
     if (result.success) publishSettings()
+    notifyAppConnectionState()
     return result
   })
   ipcMain.handle('public-route:connect', async (_e, routeId?: string) => {
     const result = await publicRouteService.connect(routeId)
     publishSettings()
+    notifyAppConnectionState()
     return result
   })
-  ipcMain.handle('public-route:disconnect', () => publicRouteService.disconnect())
+  ipcMain.handle('public-route:disconnect', async () => {
+    const result = await publicRouteService.disconnect()
+    notifyAppConnectionState()
+    return result
+  })
   ipcMain.handle('public-route:repair', () => publicRouteService.repairNetwork())
+  ipcMain.handle('public-route:diagnose', (_e, routeId?: string) => publicRouteService.diagnose(routeId))
   ipcMain.handle('public-route:update', (_e, routeId: string) => publicRouteService.updateRoute(routeId))
   ipcMain.handle('public-route:update-all', () => publicRouteService.updateAll())
 
@@ -237,6 +265,119 @@ export function registerIpcHandlers(
   // Core version check
   ipcMain.handle('core:check-versions', async () => {
     return checkAllVersions(baseDir)
+  })
+
+  ipcMain.handle('core:list-profiles', () => {
+    return listCoreProfiles(baseDir)
+  })
+
+  ipcMain.handle('clash:start-profile', async (_e, profileId: string) => {
+    try {
+      if (publicRouteService.getState().state === 'connected') {
+        await publicRouteService.disconnect()
+      }
+      const result = await mihomoService.startProfile(profileId)
+      notifyAppConnectionState()
+      return result
+    } catch (err) {
+      notifyAppConnectionState()
+      return { success: false, error: err instanceof Error ? err.message : String(err) }
+    }
+  })
+
+  ipcMain.handle('clash:stop', async () => {
+    try {
+      const result = await mihomoService.stop()
+      notifyAppConnectionState()
+      return result
+    } catch (err) {
+      notifyAppConnectionState()
+      return { success: false, error: err instanceof Error ? err.message : String(err) }
+    }
+  })
+
+  ipcMain.handle('clash:groups', async () => {
+    try {
+      return await mihomoService.getGroups()
+    } catch {
+      return []
+    }
+  })
+
+  ipcMain.handle('clash:config', async () => {
+    try {
+      return await mihomoService.getConfig()
+    } catch {
+      return { mode: 'rule' }
+    }
+  })
+
+  ipcMain.handle('clash:set-mode', async (_e, mode: 'rule' | 'global' | 'direct') => {
+    try {
+      return await mihomoService.setMode(mode)
+    } catch (err) {
+      return { success: false, error: err instanceof Error ? err.message : String(err) }
+    }
+  })
+
+  ipcMain.handle('clash:runtime-options', () => {
+    return mihomoService.getRuntimeOptions()
+  })
+
+  ipcMain.handle('clash:update-runtime-options', (_e, options: { tunEnabled?: boolean }) => {
+    return mihomoService.updateRuntimeOptions(options)
+  })
+
+  ipcMain.handle('clash:diagnose-tun', () => {
+    return mihomoService.diagnoseTun()
+  })
+
+  ipcMain.handle('clash:list-profiles', () => {
+    return mihomoService.listProfiles()
+  })
+
+  ipcMain.handle('clash:save-profile', (_e, input: { id?: string; name: string; content: string }) => {
+    return mihomoService.saveProfile(input)
+  })
+
+  ipcMain.handle('clash:save-profile-url', async (_e, input: { id?: string; name: string; url: string; autoUpdate?: boolean; updateInterval?: number }) => {
+    return mihomoService.saveProfileFromUrl(input)
+  })
+
+  ipcMain.handle('clash:update-profile', async (_e, profileId: string) => {
+    return mihomoService.updateProfile(profileId)
+  })
+
+  ipcMain.handle('clash:update-profile-options', (_e, profileId: string, options: { autoUpdate?: boolean; updateInterval?: number }) => {
+    return mihomoService.updateProfileOptions(profileId, options)
+  })
+
+  ipcMain.handle('clash:delete-profile', (_e, profileId: string) => {
+    return mihomoService.deleteProfile(profileId)
+  })
+
+  ipcMain.handle('clash:select-proxy', async (_e, groupName: string, proxyName: string) => {
+    try {
+      return await mihomoService.selectGroupProxy(groupName, proxyName)
+    } catch (err) {
+      return { success: false, error: err instanceof Error ? err.message : String(err) }
+    }
+  })
+
+  ipcMain.handle('clash:test-delay', async (_e, proxyName: string) => {
+    try {
+      return await mihomoService.testProxyDelay(proxyName)
+    } catch (err) {
+      return { success: false, delay: -1, error: err instanceof Error ? err.message : String(err) }
+    }
+  })
+
+  ipcMain.handle('clash:connections', async () => {
+    try {
+      return await mihomoService.getConnections()
+    } catch {
+      return []
+    }
   })
 
   // ---- Node management (unified) ----
@@ -362,9 +503,11 @@ export function registerIpcHandlers(
         publishSettings()
         await proxyManager.stop(coreId).catch(() => undefined)
         clearSystemProxy()
+        notifyAppConnectionState()
         return { success: false, error: proxyResult.error || 'Windows 系统代理设置失败' }
       }
     }
+    notifyAppConnectionState()
     return result
   })
 
@@ -373,7 +516,9 @@ export function registerIpcHandlers(
     setSettings({ systemProxy: false })
     publishSettings()
     clearSystemProxy()
-    return proxyManager.stop(coreId)
+    const result = await proxyManager.stop(coreId)
+    notifyAppConnectionState()
+    return result
   })
 
   ipcMain.handle('node:get-active-connection', () => {
@@ -384,6 +529,10 @@ export function registerIpcHandlers(
 
   ipcMain.handle('sub:list', () => {
     return listSubscriptions()
+  })
+
+  ipcMain.handle('group:list', () => {
+    return listNodeGroups()
   })
 
   ipcMain.handle('sub:get', (_e, id: string) => {
@@ -440,6 +589,46 @@ export function registerIpcHandlers(
   })
   ipcMain.handle('sub:toggle-enabled', (_e, id: string, enabled: boolean) => {
     updateSubscription(id, { enabled })
+  })
+
+  ipcMain.handle('group:create-empty', async (_e, name: string) => {
+    const safeName = String(name || '').trim()
+    if (!safeName) return { success: false, error: '请输入分组名称' }
+    const group = createNodeGroup(safeName)
+    return { success: true, group }
+  })
+
+  ipcMain.handle('group:rename', (_e, id: string, name: string) => {
+    const safeName = String(name || '').trim()
+    if (!safeName) return { success: false, error: '请输入分组名称' }
+    if (!renameNodeGroup(id, safeName)) {
+      updateSubscription(id, { name: safeName })
+    }
+    return { success: true }
+  })
+
+  ipcMain.handle('group:delete-empty', (_e, id: string) => {
+    const group = listNodeGroups().find((item) => item.id === id)
+    if (group) {
+      return { success: deleteNodeGroup(id, true) }
+    }
+    const sub = getSubscription(id)
+    if (!sub) return { success: false, error: '分组不存在' }
+    deleteSubscription(id)
+    return { success: true }
+  })
+
+  ipcMain.handle('group:move', (_e, id: string, direction: 'up' | 'down') => {
+    return { success: moveNodeGroup(id, direction) }
+  })
+
+  ipcMain.handle('group:move-nodes', (_e, nodeIds: string[], targetGroupId: string) => {
+    try {
+      const result = moveNodesToGroup(nodeIds, targetGroupId)
+      return { success: true, ...result }
+    } catch (err) {
+      return { success: false, error: err instanceof Error ? err.message : String(err) }
+    }
   })
   // ---- ProfileEx (V2rayN-style sort & metadata) ----
 

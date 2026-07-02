@@ -3,16 +3,14 @@
 
 import { useState, useCallback, useMemo } from 'react'
 import {
-  Card, Button, Input, Space, Tag, message, Dropdown, Modal,
+  Card, Button, Input, Space, Tag, message, Dropdown, Modal, Typography,
 } from 'antd'
 import {
-  PlusOutlined, ThunderboltOutlined, StopOutlined, ImportOutlined,
-  SearchOutlined, ColumnWidthOutlined, SettingOutlined, GlobalOutlined,
+  PlusOutlined, ThunderboltOutlined, ImportOutlined,
+  SearchOutlined, ColumnWidthOutlined, SettingOutlined, GlobalOutlined, EditOutlined, DeleteOutlined, ArrowUpOutlined, ArrowDownOutlined,
 } from '@ant-design/icons'
 import type { MenuProps } from 'antd'
 
-import GroupFilter from './GroupFilter'
-import type { GroupInfo } from './GroupFilter'
 import NodeTable from './NodeTable'
 import NodeContextMenu from './NodeContextMenu'
 import ConnectCoreModal from './ConnectCoreModal'
@@ -24,13 +22,14 @@ import type { FlatNode } from '../../hooks/useNodesData'
 import { useNodesData } from '../../hooks/useNodesData'
 
 import {
-  cloneNode, deleteMyNode, exportNodeClientConfig, profileMove, testNodeLatency, disconnectNode,
+  cloneNode, deleteMyNode, exportNodeClientConfig, profileMove, testNodeLatency,
+  createEmptyGroup, renameGroup, deleteEmptyGroup, moveNodeGroup, moveNodesToGroup, updateSubscription,
 } from '../../services/ipc-client'
 
 const api = window.electronAPI
 
 const CORE_LABELS: Record<string, string> = {
-  'clash-meta': 'Clash.Meta', xray: 'Xray', hysteria: 'Hysteria v1',
+  'clash-meta': 'mihomo / Clash', xray: 'Xray', hysteria: 'Hysteria v1',
   hysteria2: 'Hysteria v2', singbox: 'Sing-Box', naiveproxy: 'NaiveProxy',
   juicity: 'Juicity', mieru: 'Mieru', shadowquic: 'ShadowQUIC',
 }
@@ -38,9 +37,11 @@ const CORE_LABELS: Record<string, string> = {
 const DEFAULT_CORE_BY_PROTOCOL: Record<string, string> = {
   vmess: 'xray', vless: 'xray', trojan: 'xray', ss: 'xray',
   ss2022: 'singbox', ssr: 'singbox', hysteria: 'hysteria',
-  hysteria2: 'hysteria2', tuic: 'singbox', naive: 'naiveproxy',
+  hysteria2: 'singbox', tuic: 'singbox', naive: 'naiveproxy',
   juicity: 'juicity', mieru: 'mieru', shadowquic: 'shadowquic',
 }
+
+interface GroupInfo { id: string; name: string; count: number; kind: 'all' | 'manual' | 'local' | 'subscription' }
 
 function sortFlatNodes(list: FlatNode[], col: SortColName | '', asc: boolean): FlatNode[] {
   if (!col) return list
@@ -74,7 +75,7 @@ function sortFlatNodes(list: FlatNode[], col: SortColName | '', asc: boolean): F
 }
 
 export default function MyNodes(): JSX.Element {
-  const { all: allNodes, subs, loading, conn: activeConn, settings, reload } = useNodesData()
+  const { all: allNodes, subs, nodeGroups, loading, conn: activeConn, settings, reload } = useNodesData()
 
   const [search, setSearch] = useState('')
   const [groupFilter, setGroupFilter] = useState('')
@@ -88,6 +89,7 @@ export default function MyNodes(): JSX.Element {
   const [showImport, setShowImport] = useState(false)
   const [showAddSub, setShowAddSub] = useState(false)
   const [editingNode, setEditingNode] = useState<FlatNode | null>(null)
+  const [groupModal, setGroupModal] = useState<{ mode: 'create' | 'rename'; id?: string; name: string } | null>(null)
 
   // ---- Filtered + sorted list ----
   const filtered = useMemo(() => {
@@ -101,9 +103,18 @@ export default function MyNodes(): JSX.Element {
   }, [allNodes, groupFilter, search, sortCol, sortAsc])
 
   const groups: GroupInfo[] = [
-    { id: 'manual', name: '手动添加', count: allNodes.filter((n) => n.groupId === 'manual').length },
-    ...subs.map((s) => ({ id: s.id, name: s.name, count: allNodes.filter((n) => n.groupId === s.id).length })),
+    { id: 'manual', name: '手动节点', count: allNodes.filter((n) => n.groupId === 'manual').length, kind: 'manual' },
+    ...nodeGroups.map((group) => ({ id: group.id, name: group.name, count: allNodes.filter((n) => n.groupId === group.id).length, kind: 'local' as const })),
+    ...subs.map((s) => ({ id: s.id, name: s.name, count: allNodes.filter((n) => n.groupId === s.id).length, kind: 'subscription' as const })),
   ]
+  const groupItems: GroupInfo[] = [
+    { id: '', name: '全部节点', count: allNodes.length, kind: 'all' },
+    ...groups,
+  ]
+  const selectedGroupName = groupItems.find((item) => item.id === groupFilter)?.name || '全部节点'
+  const selectedGroup = groupItems.find((item) => item.id === groupFilter) || null
+  const selectedSub = subs.find((item) => item.id === groupFilter) || null
+  const selectedLocalGroup = nodeGroups.find((item) => item.id === groupFilter) || null
 
   const resolveCore = useCallback((node: StoredNode): string => {
     const map = settings?.defaultCoreByProtocol || DEFAULT_CORE_BY_PROTOCOL
@@ -142,12 +153,6 @@ export default function MyNodes(): JSX.Element {
 
   const handleConnected = () => { reload() }
 
-  const handleDisconnect = async () => {
-    if (!activeConn) return
-    try { await disconnectNode(activeConn.coreId); reload() }
-    catch { message.error('断开失败') }
-  }
-
   const handleDeleteOne = async (fn: FlatNode) => {
     try { await deleteMyNode(fn.node.id, fn.groupId); reload() }
     catch { message.error('删除失败') }
@@ -174,7 +179,85 @@ export default function MyNodes(): JSX.Element {
     message.success(`已导出 ${CORE_LABELS[coreId] || coreId} 配置到剪贴板`)
   }
 
-  const groupNamesForMenu = subs.map((s) => ({ id: s.id, name: s.name }))
+  const groupNamesForMenu = [
+    { id: 'manual', name: '手动节点' },
+    ...nodeGroups.map((group) => ({ id: group.id, name: group.name })),
+    ...subs.map((s) => ({ id: s.id, name: s.name })),
+  ]
+
+  const handleSaveGroup = async (): Promise<void> => {
+    if (!groupModal?.name.trim()) return
+    const result = groupModal.mode === 'create'
+      ? await createEmptyGroup(groupModal.name.trim())
+      : await renameGroup(groupModal.id || '', groupModal.name.trim())
+    if (!result.success) {
+      message.error(result.error || '分组保存失败')
+      return
+    }
+    message.success(groupModal.mode === 'create' ? '分组已创建' : '分组已重命名')
+    setGroupModal(null)
+    await reload()
+  }
+
+  const handleDeleteSelectedGroup = async (): Promise<void> => {
+    const target = selectedLocalGroup || selectedSub
+    if (!target) return
+    const isSubscription = selectedGroup?.kind === 'subscription'
+    const nodeCount = allNodes.filter((node) => node.groupId === target.id).length
+    Modal.confirm({
+      title: isSubscription ? '删除订阅分组' : '删除空分组',
+      content: nodeCount > 0
+        ? `删除“${target.name}”并移除其中 ${nodeCount} 个节点？`
+        : `删除“${target.name}”？`,
+      okText: '删除',
+      cancelText: '取消',
+      okButtonProps: { danger: true },
+      onOk: async () => {
+        const result = await deleteEmptyGroup(target.id)
+        if (!result.success) message.error(result.error || '删除失败')
+        else {
+          setGroupFilter('')
+          message.success('分组已删除')
+          await reload()
+        }
+      },
+    })
+  }
+
+  const handleMoveSelectedToGroup = async (targetGroupId: string): Promise<void> => {
+    const ids = selectedKeys.map(String)
+    if (ids.length === 0) return
+    const result = await moveNodesToGroup(ids, targetGroupId)
+    if (!result.success) {
+      message.error(result.error || '移动失败')
+      return
+    }
+    setSelectedKeys([])
+    if (result.copied && result.copied > 0) {
+      message.success(`已添加 ${result.copied} 个本地副本${result.moved ? `，移动 ${result.moved} 个节点` : ''}`)
+    } else {
+      message.success(`已移动 ${result.moved ?? ids.length} 个节点`)
+    }
+    await reload()
+  }
+
+  const handleMoveLocalGroup = async (direction: 'up' | 'down'): Promise<void> => {
+    if (!selectedLocalGroup) return
+    const result = await moveNodeGroup(selectedLocalGroup.id, direction)
+    if (!result.success) return
+    await reload()
+  }
+
+  const handleUpdateSelectedSubscription = async (): Promise<void> => {
+    if (!selectedSub) return
+    try {
+      const diff = await updateSubscription(selectedSub.id)
+      message.success(diff ? `订阅已更新：新增 ${diff.added}，移除 ${diff.removed}` : '订阅已更新')
+      await reload()
+    } catch {
+      message.error('订阅更新失败')
+    }
+  }
 
   const handleMenuAction = async (action: MenuAction) => {
     const selected = allNodes.filter((fn) => selectedKeys.includes(fn.node.id))
@@ -209,8 +292,8 @@ export default function MyNodes(): JSX.Element {
       case 'copy-share-base64': if (first?.node.rawUrl) { await navigator.clipboard.writeText(btoa(first.node.rawUrl)); message.success('Base64 分享链接已复制') } else { message.warning('无分享链接') } break
       case 'export-config-clipboard': if (first) { await handleExportConfig(first) } break
       case 'export-config-file': if (first) { await handleExportConfig(first) } break
-      default: if (typeof action === 'string' && action.startsWith('move-to-group:')) message.info('移至分组功能将在下一阶段补齐')
-        else message.info('此功能即将推出')
+      default: if (typeof action === 'string' && action.startsWith('move-to-group:')) await handleMoveSelectedToGroup(action.slice('move-to-group:'.length))
+        else message.info('当前版本暂不支持')
     }
   }
 
@@ -244,53 +327,109 @@ export default function MyNodes(): JSX.Element {
     { key: 'realping-all', label: '全部真实延迟', icon: <GlobalOutlined /> },
     { key: 'batch-import', label: '批量导入', icon: <ImportOutlined /> },
     { key: 'add-sub', label: '添加订阅', icon: <PlusOutlined /> },
+    { key: 'create-group', label: '新建空组', icon: <PlusOutlined /> },
     { type: 'divider' },
     { key: 'autofit', label: '自动列宽', icon: <ColumnWidthOutlined /> },
   ]
   const handleToolbarMenu: MenuProps['onClick'] = ({ key }) => {
     switch (key) {
       case 'tcping-all': handleTestNodes(filtered.map((n) => n.node.id)); break
-      case 'realping-all': message.info('真实延迟测试即将推出'); break
+      case 'realping-all': message.info('当前版本暂不支持真实延迟批量测试'); break
       case 'batch-import': setShowImport(true); break
       case 'add-sub': setShowAddSub(true); break
+      case 'create-group': setGroupModal({ mode: 'create', name: '' }); break
       case 'autofit': message.info('自动列宽已应用'); break
     }
   }
 
   return (
     <div style={{ userSelect: 'none' }}>
-      {activeConn && (
-        <Card size="small" style={{ marginBottom: 12, borderLeft: '4px solid #52c41a' }}>
-          <Space>
-            <Tag color="green">⚡ 已连接: {activeConn.nodeName}</Tag>
-            <Tag>{CORE_LABELS[activeConn.coreId] || activeConn.coreId}</Tag>
-            <Button size="small" danger icon={<StopOutlined />} onClick={handleDisconnect}>断开</Button>
+      <Space direction="vertical" size={10} style={{ width: '100%' }}>
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
+          {groupItems.map((group) => {
+            const active = groupFilter === group.id
+            return (
+              <button
+                key={group.id}
+                type="button"
+                onClick={() => setGroupFilter(group.id)}
+                style={{
+                  border: active ? '1px solid #1677ff' : '1px solid transparent',
+                  background: active ? 'rgba(22,119,255,0.12)' : 'transparent',
+                  borderRadius: 6,
+                  padding: '7px 14px',
+                  cursor: 'pointer',
+                  minWidth: 52,
+                }}
+              >
+                <Space size={5}>
+                  <span>{group.name}</span>
+                  {group.kind === 'local' && <Tag bordered={false} color="blue" style={{ marginInlineEnd: 0 }}>本地</Tag>}
+                  {group.kind === 'subscription' && <Tag bordered={false} color="purple" style={{ marginInlineEnd: 0 }}>订阅</Tag>}
+                </Space>
+              </button>
+            )
+          })}
+        </div>
+
+        <div style={{ minWidth: 0 }}>
+          <Space style={{ marginBottom: 12, width: '100%', justifyContent: 'space-between' }} wrap>
+            <Space wrap>
+              <Typography.Text strong>{selectedGroupName}</Typography.Text>
+              <Tag bordered={false}>{filtered.length} 个节点</Tag>
+              <Button size="small" icon={<EditOutlined />} disabled={!selectedLocalGroup && !selectedSub} onClick={() => setGroupModal({ mode: 'rename', id: (selectedLocalGroup || selectedSub)?.id, name: (selectedLocalGroup || selectedSub)?.name || '' })}>重命名</Button>
+              <Button size="small" danger icon={<DeleteOutlined />} disabled={!selectedLocalGroup && !selectedSub} onClick={() => void handleDeleteSelectedGroup()}>删除组及节点</Button>
+              {selectedSub && <Button size="small" icon={<ThunderboltOutlined />} onClick={() => void handleUpdateSelectedSubscription()}>更新订阅</Button>}
+              {selectedLocalGroup && (
+                <Space.Compact>
+                  <Button size="small" icon={<ArrowUpOutlined />} onClick={() => void handleMoveLocalGroup('up')}>上移</Button>
+                  <Button size="small" icon={<ArrowDownOutlined />} onClick={() => void handleMoveLocalGroup('down')}>下移</Button>
+                </Space.Compact>
+              )}
+            </Space>
+            <Space wrap>
+              <Button size="small" icon={<PlusOutlined />} onClick={() => setGroupModal({ mode: 'create', name: '' })}>空组</Button>
+              <Button size="small" icon={<PlusOutlined />} onClick={() => setShowAddSub(true)}>订阅</Button>
+              <Button size="small" danger icon={<DeleteOutlined />} disabled={!selectedLocalGroup && !selectedSub} onClick={() => void handleDeleteSelectedGroup()}>删除</Button>
+              <Input placeholder="搜索名称或地址" prefix={<SearchOutlined />} value={search} onChange={(e) => setSearch(e.target.value)} style={{ width: 210 }} size="small" allowClear />
+              <Button size="small" icon={<ThunderboltOutlined />} onClick={() => handleTestNodes(filtered.map((n) => n.node.id))} disabled={filtered.length === 0}>一键测速</Button>
+              <Button size="small" icon={<ImportOutlined />} onClick={() => setShowImport(true)}>粘贴导入</Button>
+              <Dropdown menu={{ items: toolbarMenu, onClick: handleToolbarMenu }}><Button size="small" icon={<SettingOutlined />}>更多</Button></Dropdown>
+            </Space>
           </Space>
-        </Card>
-      )}
-      <GroupFilter groups={groups} selected={groupFilter} onSelect={setGroupFilter} />
-      <Space style={{ marginBottom: 12 }} wrap>
-        <Input placeholder="搜索节点 (名称/地址)..." prefix={<SearchOutlined />} value={search} onChange={(e) => setSearch(e.target.value)} style={{ width: 200 }} size="small" allowClear />
-        <Button size="small" icon={<ThunderboltOutlined />} onClick={() => handleTestNodes(filtered.map((n) => n.node.id))} disabled={filtered.length === 0}>全部测速</Button>
-        <Button size="small" icon={<ImportOutlined />} onClick={() => setShowImport(true)}>批量导入</Button>
-        <Button size="small" icon={<PlusOutlined />} onClick={() => setShowAddSub(true)}>添加订阅</Button>
-        <Dropdown menu={{ items: toolbarMenu, onClick: handleToolbarMenu }}><Button size="small" icon={<SettingOutlined />}>更多</Button></Dropdown>
+          <NodeContextMenu selectedCount={selectedKeys.length} hasActive={activeConn !== null} onAction={handleMenuAction} groupNames={groupNamesForMenu}>
+            <NodeTable
+              nodes={filtered} loading={loading}
+              selectedRowKeys={selectedKeys} onSelectChange={setSelectedKeys}
+              sortCol={sortCol} sortAsc={sortAsc} onSort={handleSort}
+              onTestNode={(id) => handleTestNodes([id])}
+              onConnectNode={handleConnect} onDeleteNode={handleDeleteOne}
+              onContextMenu={() => {}} onDoubleClick={handleConnect}
+              testingIds={testingIds} connectingId={connectingId}
+            />
+          </NodeContextMenu>
+        </div>
       </Space>
-      <NodeContextMenu selectedCount={selectedKeys.length} hasActive={activeConn !== null} onAction={handleMenuAction} groupNames={groupNamesForMenu}>
-        <NodeTable
-          nodes={filtered} loading={loading}
-          selectedRowKeys={selectedKeys} onSelectChange={setSelectedKeys}
-          sortCol={sortCol} sortAsc={sortAsc} onSort={handleSort}
-          onTestNode={(id) => handleTestNodes([id])}
-          onConnectNode={handleConnect} onDeleteNode={handleDeleteOne}
-          onContextMenu={() => {}} onDoubleClick={handleConnect}
-          testingIds={testingIds} connectingId={connectingId}
-        />
-      </NodeContextMenu>
       <ConnectCoreModal node={coreModalNode} open={!!coreModalNode} onClose={() => setCoreModalNode(null)} onConnected={handleConnected} />
       <ImportBatchModal open={showImport} onClose={() => setShowImport(false)} onImported={reload} />
       <AddSubscriptionModal open={showAddSub} onClose={() => setShowAddSub(false)} onDone={reload} />
       <EditNodeModal open={!!editingNode} node={editingNode} onClose={() => setEditingNode(null)} onSaved={reload} />
+      <Modal
+        title={groupModal?.mode === 'rename' ? '重命名分组' : '新建空组'}
+        open={!!groupModal}
+        onCancel={() => setGroupModal(null)}
+        onOk={() => void handleSaveGroup()}
+        okText="保存"
+        cancelText="取消"
+      >
+        <Input
+          autoFocus
+          placeholder="分组名称"
+          value={groupModal?.name || ''}
+          onChange={(event) => setGroupModal((prev) => prev ? { ...prev, name: event.target.value } : prev)}
+          onPressEnter={() => void handleSaveGroup()}
+        />
+      </Modal>
     </div>
   )
 }

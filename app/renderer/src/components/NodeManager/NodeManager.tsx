@@ -12,7 +12,7 @@ import { useProxyStatus } from '../../hooks/useProxyStatus'
 import { useTheme } from '../../hooks/useTheme'
 
 const PROXY_OPTIONS = [
-  { value: 'clash-meta', label: 'Clash.Meta' }, { value: 'xray', label: 'Xray' },
+  { value: 'clash-meta', label: 'mihomo / Clash' }, { value: 'xray', label: 'Xray' },
   { value: 'hysteria', label: 'Hysteria v1' }, { value: 'hysteria2', label: 'Hysteria v2' },
   { value: 'singbox', label: 'Sing-Box' }, { value: 'naiveproxy', label: 'NaiveProxy' },
   { value: 'juicity', label: 'Juicity' }, { value: 'mieru', label: 'Mieru' },
@@ -20,7 +20,7 @@ const PROXY_OPTIONS = [
 ]
 
 const CORE_LABELS: Record<string, string> = {
-  'clash-meta': 'Clash.Meta', xray: 'Xray', hysteria: 'Hysteria v1',
+  'clash-meta': 'mihomo / Clash', xray: 'Xray', hysteria: 'Hysteria v1',
   hysteria2: 'Hysteria v2', singbox: 'Sing-Box', naiveproxy: 'NaiveProxy',
   juicity: 'Juicity', mieru: 'Mieru', shadowquic: 'ShadowQUIC',
 }

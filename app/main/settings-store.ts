@@ -33,7 +33,7 @@ const defaults: AppSettings = {
     ss2022: 'singbox',
     ssr: 'singbox',
     hysteria: 'hysteria',
-    hysteria2: 'hysteria2',
+    hysteria2: 'singbox',
     tuic: 'singbox',
     naive: 'naiveproxy',
     juicity: 'juicity',

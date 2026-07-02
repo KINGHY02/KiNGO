@@ -10,7 +10,7 @@ import { useProxyStatus } from '../../hooks/useProxyStatus'
 loader.config({ monaco })
 
 const PROXY_OPTIONS = [
-  { value: 'clash-meta', label: 'Clash.Meta' },
+  { value: 'clash-meta', label: 'mihomo / Clash' },
   { value: 'xray', label: 'Xray (VLESS+REALITY)' },
   { value: 'hysteria', label: 'Hysteria v1' },
   { value: 'hysteria2', label: 'Hysteria v2' },

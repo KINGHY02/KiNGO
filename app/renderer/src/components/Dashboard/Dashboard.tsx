@@ -1,18 +1,22 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import { Alert, Button, Card, Collapse, Modal, Space, Tag, Typography, message } from 'antd'
+import { Alert, Button, Card, Collapse, Modal, Space, Spin, Tag, Typography, message } from 'antd'
 import {
+  CheckCircleOutlined,
   ChromeOutlined,
   CloudSyncOutlined,
   DisconnectOutlined,
+  ExclamationCircleOutlined,
   LoadingOutlined,
   PoweroffOutlined,
   RightOutlined,
   SafetyCertificateOutlined,
+  StopOutlined,
   ToolOutlined,
 } from '@ant-design/icons'
 import { useTheme } from '../../hooks/useTheme'
 import {
   connectPublicRoute,
+  diagnosePublicRoute,
   disconnectPublicRoute,
   getPublicConnectionState,
   getSettings,
@@ -43,6 +47,9 @@ export default function Dashboard(): JSX.Element {
   const [systemProxyEnabled, setSystemProxyEnabled] = useState(false)
   const [drawerOpen, setDrawerOpen] = useState(false)
   const [refreshing, setRefreshing] = useState(false)
+  const [diagnosing, setDiagnosing] = useState(false)
+  const [diagnosticOpen, setDiagnosticOpen] = useState(false)
+  const [diagnostic, setDiagnostic] = useState<PublicRouteDiagnosticReport | null>(null)
 
   const load = useCallback(async (): Promise<void> => {
     const [routeList, state, settings, systemProxy] = await Promise.all([
@@ -89,7 +96,9 @@ export default function Dashboard(): JSX.Element {
   const busy = BUSY_STATES.includes(connection.state)
 
   const statusCopy = useMemo(() => {
-    if (connection.state === 'connected') return { title: '已连接', subtitle: '网络连接已建立', color: '#22b573' }
+    if (connection.state === 'connected') {
+      return { title: '已连接', subtitle: '网络连接已建立', color: '#22b573' }
+    }
     if (connection.state === 'failed') {
       const friendlyErrors: Partial<Record<PublicRouteErrorCode, string>> = {
         DOWNLOAD_FAILED: '线路配置暂时无法下载',
@@ -163,10 +172,23 @@ export default function Dashboard(): JSX.Element {
     if (!result.success) message.warning(result.error || '请先建立连接')
   }
 
+  const handleDiagnose = async (): Promise<void> => {
+    setDiagnosing(true)
+    setDiagnosticOpen(true)
+    try {
+      const report = await diagnosePublicRoute(selectedRoute?.id)
+      setDiagnostic(report)
+    } catch (error) {
+      message.error(error instanceof Error ? error.message : '连接诊断失败')
+    } finally {
+      setDiagnosing(false)
+    }
+  }
+
   const handleRepairNetwork = (): void => {
     Modal.confirm({
       title: '恢复系统网络设置',
-      content: '这会停止 KiNGO 的连接并清理其写入的本地系统代理，不会修改其他网络设置。',
+      content: '这会停止 KiNGO 的连接并清理它写入的本地系统代理，不会修改其他网络设置。',
       okText: '立即恢复',
       cancelText: '取消',
       onOk: async () => {
@@ -195,8 +217,8 @@ export default function Dashboard(): JSX.Element {
 
       <div className="public-home__header">
         <div>
-          <Typography.Title level={3} style={{ margin: 0, color: t.text }}>KiNGO 电脑加速器</Typography.Title>
-          <Typography.Text style={{ color: t.textSecondary }}>简单连接，轻松使用</Typography.Text>
+          <Typography.Title level={3} style={{ margin: 0, color: t.text }}>公共线路</Typography.Title>
+          <Typography.Text style={{ color: t.textSecondary }}>管理内置公共线路</Typography.Text>
         </div>
         <Tag
           icon={<SafetyCertificateOutlined />}
@@ -269,7 +291,13 @@ export default function Dashboard(): JSX.Element {
           <Button icon={<CloudSyncOutlined />} loading={refreshing} onClick={() => void handleRefreshSelected()} disabled={!selectedRoute}>
             刷新线路配置
           </Button>
-          <Button icon={<ToolOutlined />} onClick={handleRepairNetwork}>
+          <Button icon={<ToolOutlined />} loading={diagnosing} onClick={() => void handleDiagnose()}>
+            连接诊断
+          </Button>
+        </div>
+
+        <div className="public-home__actions public-home__actions--secondary">
+          <Button onClick={handleRepairNetwork}>
             恢复网络
           </Button>
         </div>
@@ -309,6 +337,78 @@ export default function Dashboard(): JSX.Element {
         onSelect={handleRouteSelect}
         onReload={load}
       />
+
+      <DiagnosticModal
+        open={diagnosticOpen}
+        loading={diagnosing}
+        report={diagnostic}
+        onClose={() => setDiagnosticOpen(false)}
+      />
     </div>
+  )
+}
+
+function DiagnosticModal(props: {
+  open: boolean
+  loading: boolean
+  report: PublicRouteDiagnosticReport | null
+  onClose: () => void
+}): JSX.Element {
+  const { open, loading, report, onClose } = props
+
+  return (
+    <Modal
+      title="连接诊断"
+      open={open}
+      onCancel={onClose}
+      footer={<Button type="primary" onClick={onClose}>知道了</Button>}
+      width={620}
+    >
+      {loading && !report ? (
+        <div style={{ padding: 32, textAlign: 'center' }}>
+          <Spin />
+          <Typography.Paragraph style={{ marginTop: 14, marginBottom: 0 }}>
+            正在检查线路状态……
+          </Typography.Paragraph>
+        </div>
+      ) : report ? (
+        <Space direction="vertical" size={14} style={{ width: '100%' }}>
+          <Alert
+            type={report.checks.some((check) => check.status === 'fail') ? 'error' : 'success'}
+            showIcon
+            message={report.summary}
+            description={
+              report.routeName
+                ? `${report.routeName} · ${report.protocolLabel}${report.latency !== null ? ` · 约 ${report.latency}ms` : ''}`
+                : undefined
+            }
+          />
+          <Space direction="vertical" size={10} style={{ width: '100%' }}>
+            {report.checks.map((check) => (
+              <Card key={check.key} size="small" styles={{ body: { padding: '10px 12px' } }}>
+                <Space align="start">
+                  {check.status === 'pass' && <CheckCircleOutlined style={{ color: '#22b573', marginTop: 3 }} />}
+                  {check.status === 'warn' && <ExclamationCircleOutlined style={{ color: '#faad14', marginTop: 3 }} />}
+                  {check.status === 'fail' && <StopOutlined style={{ color: '#ef5350', marginTop: 3 }} />}
+                  <div>
+                    <Typography.Text strong>{check.label}</Typography.Text>
+                    <Typography.Paragraph style={{ margin: '2px 0 0' }}>
+                      {check.message}
+                    </Typography.Paragraph>
+                    {check.detail && (
+                      <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                        {check.detail}
+                      </Typography.Text>
+                    )}
+                  </div>
+                </Space>
+              </Card>
+            ))}
+          </Space>
+        </Space>
+      ) : (
+        <Typography.Text type="secondary">暂无诊断结果</Typography.Text>
+      )}
+    </Modal>
   )
 }

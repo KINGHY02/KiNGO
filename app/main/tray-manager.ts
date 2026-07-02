@@ -4,6 +4,8 @@ import { existsSync } from 'fs'
 import { ProxyManager } from './proxy-manager'
 import { PublicRouteService } from './public-route-service'
 import { launchChrome } from './chrome-launcher'
+import { getAppConnectionState } from './app-connection-state'
+import { disconnectAllConnections } from './app-connection-control'
 
 function findTrayIcon(baseDir: string): NativeImage {
   const candidates = [
@@ -36,7 +38,7 @@ export class TrayManager {
 
   create(): void {
     this.tray = new Tray(findTrayIcon(this.baseDir).resize({ width: 16, height: 16 }))
-    this.tray.setToolTip('KiNGO 电脑加速器')
+    this.tray.setToolTip('KiNGO')
     this.tray.on('double-click', () => {
       this.mainWindow.show()
       this.mainWindow.focus()
@@ -46,9 +48,12 @@ export class TrayManager {
 
   updateMenu(): void {
     if (!this.tray) return
-    const connection = this.publicRouteService.getState()
+    const appState = getAppConnectionState(this.proxyManager, this.publicRouteService)
+    const publicState = this.publicRouteService.getState()
     const selectedRoute = this.publicRouteService.getSelectedRoute()
     const hasRunningCore = this.proxyManager.getStatus().some((status) => status.running)
+    const isBusy = appState.busy || ['preparing', 'connecting', 'disconnecting'].includes(publicState.state)
+    const current = appState.connected ? appState.displayName : null
 
     this.tray.setContextMenu(Menu.buildFromTemplate([
       {
@@ -62,16 +67,14 @@ export class TrayManager {
         },
       },
       {
-        label: selectedRoute
-          ? `${connection.state === 'connected' ? '已连接' : '当前线路'}：${selectedRoute.name}`
-          : '暂无公共线路',
+        label: current ? `当前连接：${current}` : '当前未连接',
         enabled: false,
       },
       {
-        label: connection.state === 'connected' ? '断开公共线路' : '连接公共线路',
-        enabled: !!selectedRoute && !['preparing', 'connecting', 'disconnecting'].includes(connection.state),
+        label: appState.connected ? '断开当前连接' : '连接公共线路',
+        enabled: appState.connected || (!!selectedRoute && !isBusy),
         click: () => {
-          if (connection.state === 'connected') void this.publicRouteService.disconnect()
+          if (appState.connected) void this.stopAllConnections()
           else void this.publicRouteService.connect()
         },
       },
@@ -90,18 +93,29 @@ export class TrayManager {
       },
       {
         label: '全部停止',
-        enabled: hasRunningCore,
-        click: () => { void this.publicRouteService.disconnect() },
+        enabled: hasRunningCore || appState.connected,
+        click: () => { void this.stopAllConnections() },
       },
       { type: 'separator' },
       {
         label: '退出',
         click: () => {
-          this.proxyManager.stopAll()
+          void this.proxyManager.stopAll()
           app.quit()
         },
       },
     ]))
+  }
+
+  private async stopAllConnections(): Promise<void> {
+    try {
+      await disconnectAllConnections(this.proxyManager, this.publicRouteService)
+      if (!this.mainWindow.isDestroyed()) {
+        this.mainWindow.webContents.send('app:connection-state-changed', getAppConnectionState(this.proxyManager, this.publicRouteService))
+      }
+    } finally {
+      this.updateMenu()
+    }
   }
 
   destroy(): void {

@@ -30,7 +30,7 @@ export interface ProxyStatus {
 
 export const PROXY_DEFINITIONS: ProxyDefinition[] = [
   {
-    id: 'clash-meta', name: 'Clash.Meta', dir: 'clash.meta',
+    id: 'clash-meta', name: 'mihomo / Clash', dir: 'clash.meta',
     executable: 'clash.meta-windows-386.exe', args: ['-d', '{configDir}'],
     configFile: 'config.yaml', configFormat: 'yaml',
     port: 7890, protocol: 'http'
@@ -371,7 +371,7 @@ export class ProxyManager extends EventEmitter {
     const def = this.getDef(proxyId)
     if (!def) return
 
-    const latency = await testRealLatency(def.port)
+    const latency = await testRealLatency(def.port, def.protocol)
     this.updateStatus(proxyId, { latency })
 
     // Schedule periodic re-test every 30s while running
@@ -384,7 +384,7 @@ export class ProxyManager extends EventEmitter {
           if (timer) { clearInterval(timer); this.latencyTimers.delete(proxyId) }
           return
         }
-        const newLatency = await testRealLatency(def.port)
+        const newLatency = await testRealLatency(def.port, def.protocol)
         this.updateStatus(proxyId, { latency: newLatency })
       }, 30_000))
     }

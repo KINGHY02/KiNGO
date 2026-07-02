@@ -7,8 +7,9 @@ import Store from 'electron-store'
 import { ProxyManager, PROXY_DEFINITIONS } from './proxy-manager'
 import { ConfigService } from './config-service'
 import { getAvailableSlots, switchSlot, updateConfig } from './ip-updater'
-import { clearKingoSystemProxy, clearSystemProxy, syncSystemProxy } from './system-proxy'
+import { clearKingoSystemProxy, clearSystemProxy, getSystemProxyStatus, syncSystemProxy } from './system-proxy'
 import { getSettings, setSettings } from './settings-store'
+import { testRealLatencyDetailed } from './latency-tester'
 
 export type PublicRouteConnectionState =
   | 'idle'
@@ -45,6 +46,26 @@ export interface PublicRouteResult {
   pid?: number
   error?: string
   errorCode?: PublicRouteErrorCode
+}
+
+export type PublicRouteDiagnosticStatus = 'pass' | 'warn' | 'fail'
+
+export interface PublicRouteDiagnosticCheck {
+  key: string
+  label: string
+  status: PublicRouteDiagnosticStatus
+  message: string
+  detail?: string
+}
+
+export interface PublicRouteDiagnosticReport {
+  routeId: string | null
+  routeName: string | null
+  protocolLabel: string | null
+  connected: boolean
+  latency: number | null
+  summary: string
+  checks: PublicRouteDiagnosticCheck[]
 }
 
 export type PublicRouteErrorCode =
@@ -283,6 +304,148 @@ export class PublicRouteService extends EventEmitter {
     return { success: failed === 0, updated, failed }
   }
 
+  async diagnose(routeId?: string): Promise<PublicRouteDiagnosticReport> {
+    const routes = this.listRoutes()
+    const settings = getSettings()
+    const targetId = routeId
+      || this.state.routeId
+      || settings.selectedPublicRouteId
+      || settings.lastSuccessfulRouteId
+      || routes[0]?.id
+    const route = routes.find((item) => item.id === targetId) || null
+    const checks: PublicRouteDiagnosticCheck[] = []
+
+    const add = (check: PublicRouteDiagnosticCheck): void => {
+      checks.push(check)
+    }
+
+    if (!route) {
+      add({
+        key: 'route',
+        label: '线路选择',
+        status: 'fail',
+        message: '没有可用的公共线路',
+        detail: '请先刷新公共线路列表，或检查项目目录中的核心配置。'
+      })
+      return {
+        routeId: null,
+        routeName: null,
+        protocolLabel: null,
+        connected: false,
+        latency: null,
+        summary: '暂时无法诊断：没有找到公共线路。',
+        checks
+      }
+    }
+
+    add({
+      key: 'route',
+      label: '线路选择',
+      status: 'pass',
+      message: `当前选择 ${route.name} · ${route.protocolLabel}`
+    })
+
+    const def = PROXY_DEFINITIONS.find((item) => item.id === route.coreId)
+    if (!def) {
+      add({
+        key: 'core',
+        label: '运行组件',
+        status: 'fail',
+        message: '线路对应的运行组件不存在',
+        detail: `核心 ID：${route.coreId}`
+      })
+      return this.buildDiagnosticReport(route, checks, null)
+    }
+
+    const executablePath = join(this.baseDir, def.dir, def.executable)
+    add({
+      key: 'core',
+      label: '运行组件',
+      status: existsSync(executablePath) ? 'pass' : 'fail',
+      message: existsSync(executablePath) ? `${def.name} 已就绪` : `${def.name} 程序文件缺失`,
+      detail: executablePath
+    })
+
+    add({
+      key: 'downloaded',
+      label: '线路配置',
+      status: route.downloaded ? 'pass' : 'warn',
+      message: route.downloaded ? '配置缓存已存在' : '配置还未下载，连接时会自动尝试下载'
+    })
+
+    if (route.downloaded) {
+      try {
+        this.validateRouteConfig(route, def)
+        add({
+          key: 'config',
+          label: '配置解析',
+          status: 'pass',
+          message: '该线路缓存配置可以读取'
+        })
+      } catch (error) {
+        add({
+          key: 'config',
+          label: '配置解析',
+          status: 'fail',
+          message: '当前核心配置无法读取',
+          detail: error instanceof Error ? error.message : String(error)
+        })
+      }
+    }
+
+    const running = this.proxyManager.getStatus(def.id)[0]?.running === true
+    add({
+      key: 'process',
+      label: '连接进程',
+      status: running ? 'pass' : 'warn',
+      message: running ? '线路运行组件正在运行' : '线路当前未运行'
+    })
+
+    const portReady = await waitForPort(def.port, 1200)
+    add({
+      key: 'port',
+      label: '本地端口',
+      status: portReady ? 'pass' : running ? 'fail' : 'warn',
+      message: portReady
+        ? `本地端口 127.0.0.1:${def.port} 已监听`
+        : running
+          ? `核心已运行，但端口 127.0.0.1:${def.port} 未就绪`
+          : `端口 127.0.0.1:${def.port} 当前未监听`
+    })
+
+    const systemProxy = getSystemProxyStatus()
+    const proxyEnabled = !!systemProxy.enabled || !!systemProxy.pacUrl
+    add({
+      key: 'system-proxy',
+      label: '系统代理',
+      status: proxyEnabled ? 'pass' : running ? 'fail' : 'warn',
+      message: proxyEnabled ? 'Windows 系统代理已开启' : 'Windows 系统代理未开启',
+      detail: systemProxy.pacUrl || systemProxy.server || undefined
+    })
+
+    let latency: number | null = null
+    if (portReady) {
+      const test = await testRealLatencyDetailed(def.port, def.protocol)
+      latency = test.success ? test.latency : null
+      add({
+        key: 'proxy-chain',
+        label: '代理链路',
+        status: test.success ? 'pass' : 'fail',
+        message: test.success ? `代理链路可用，响应约 ${test.latency}ms` : '代理链路测试失败',
+        detail: test.error || `测试目标：${test.target}`
+      })
+    } else {
+      add({
+        key: 'proxy-chain',
+        label: '代理链路',
+        status: 'warn',
+        message: '本地端口未就绪，暂时无法测试代理链路'
+      })
+    }
+
+    return this.buildDiagnosticReport(route, checks, latency)
+  }
+
   getSelectedRoute(): PublicRoute | null {
     const routes = this.listRoutes()
     const settings = getSettings()
@@ -310,6 +473,20 @@ export class PublicRouteService extends EventEmitter {
     }
     if (!this.configService.readConfig(coreId, PROXY_DEFINITIONS)) {
       throw new PublicRouteError('CONFIG_INVALID', '线路配置无法读取')
+    }
+  }
+
+  private validateRouteConfig(route: PublicRoute, def: typeof PROXY_DEFINITIONS[number]): void {
+    const cachePath = join(this.baseDir, def.dir, 'ip_Update', `slot_${route.slot}_${def.configFile}`)
+    const activePath = join(this.baseDir, def.dir, def.configFile)
+    const path = existsSync(cachePath) ? cachePath : activePath
+    if (!existsSync(path)) throw new PublicRouteError('CONFIG_INVALID', '线路配置文件不存在')
+    const content = readFileSync(path, 'utf-8')
+    try {
+      if (def.configFormat === 'json') JSON.parse(content)
+      else yaml.load(content)
+    } catch {
+      throw new PublicRouteError('CONFIG_INVALID', '线路配置文件格式无效')
     }
   }
 
@@ -345,6 +522,29 @@ export class PublicRouteService extends EventEmitter {
     if (index >= 0) routes[index] = { ...routes[index], ...fields }
     else routes.push({ routeId, lastSuccessAt: null, lastError: null, ...fields })
     this.metaStore.set('routes', routes)
+  }
+
+  private buildDiagnosticReport(
+    route: PublicRoute,
+    checks: PublicRouteDiagnosticCheck[],
+    latency: number | null,
+  ): PublicRouteDiagnosticReport {
+    const failed = checks.filter((check) => check.status === 'fail')
+    const warned = checks.filter((check) => check.status === 'warn')
+    const connected = this.state.state === 'connected' && this.state.routeId === route.id
+    let summary = '诊断完成，当前线路看起来正常。'
+    if (failed.length > 0) summary = `诊断发现 ${failed.length} 个需要处理的问题。`
+    else if (warned.length > 0) summary = `诊断完成，有 ${warned.length} 个项目需要留意。`
+
+    return {
+      routeId: route.id,
+      routeName: route.name,
+      protocolLabel: route.protocolLabel,
+      connected,
+      latency,
+      summary,
+      checks
+    }
   }
 }
 
