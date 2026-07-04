@@ -13,12 +13,10 @@ import {
 import {
   connectPublicRoute,
   diagnoseClashTun,
-  diagnosePublicRoute,
   disconnectAllConnections,
   getAppConnectionState,
   getClashRuntimeOptions,
   getPublicConnectionState,
-  getSettings,
   getSystemProxyStatus,
   listPublicRoutes,
   onAppConnectionStateChanged,
@@ -139,34 +137,6 @@ export default function HomePage({ onNavigate }: Props): JSX.Element {
       ? 'linear-gradient(145deg, #ff6b6b, #e14c4c)'
       : 'linear-gradient(145deg, #617cff, #7357e8)'
 
-  const choosePublicRoute = async (): Promise<PublicRoute | null> => {
-    const settings = await getSettings()
-    const downloaded = routes.filter((route) => route.downloaded)
-    const candidates = [
-      ...downloaded.filter((route) => route.lastSuccessAt),
-      ...downloaded.filter((route) => !route.lastSuccessAt),
-    ].filter((route, index, arr) => arr.findIndex((item) => item.id === route.id) === index)
-
-    const reports = await Promise.all(
-      candidates.slice(0, 6).map(async (route) => {
-        const report = await diagnosePublicRoute(route.id).catch(() => null)
-        return { route, latency: report?.latency ?? null, ok: !!report && report.checks.every((check) => check.status !== 'fail') }
-      }),
-    )
-    const best = reports
-      .filter((item) => item.ok && item.latency !== null)
-      .sort((a, b) => (a.latency || 999999) - (b.latency || 999999))[0]
-    if (best) {
-      setLastLatency(best.latency)
-      return best.route
-    }
-
-    return routes.find((route) => route.id === settings.lastSuccessfulRouteId)
-      || routes.find((route) => route.id === settings.selectedPublicRouteId)
-      || routes[0]
-      || null
-  }
-
   const handleMainToggle = async (): Promise<void> => {
     if (loading || connection.busy) return
     setLoading(true)
@@ -179,14 +149,14 @@ export default function HomePage({ onNavigate }: Props): JSX.Element {
         return
       }
 
-      const route = await choosePublicRoute()
-      if (!route) {
+      const result = await connectPublicRoute()
+      const route = routes.find((item) => item.id === result.routeId)
+      if (!result.success && routes.length === 0) {
         message.warning('暂无公共线路，请先进入公共线路页面更新配置')
         onNavigate('publicRoutes')
         return
       }
-      const result = await connectPublicRoute(route.id)
-      if (result.success) message.success(`已连接 ${route.name}`)
+      if (result.success) message.success(`已连接 ${route?.name || '公共线路'}`)
       else message.error(result.error || '公共线路连接失败')
       await load()
     } finally {
@@ -316,15 +286,15 @@ export default function HomePage({ onNavigate }: Props): JSX.Element {
 
           <Row gutter={[14, 14]}>
             <Col xs={24} md={8}>
-              <Card>
-                <Space direction="vertical" size={10} style={{ width: '100%' }}>
-                  <Space>
+              <Card style={{ height: '100%', minHeight: 188 }}>
+                <Space direction="vertical" size={10} style={{ width: '100%', height: '100%' }}>
+                  <Space style={{ width: '100%' }}>
                     <ApiOutlined />
-                    <Typography.Text strong>虚拟网卡 / TUN</Typography.Text>
+                    <Typography.Text strong style={{ fontSize: 16, whiteSpace: 'nowrap' }}>虚拟网卡 / TUN</Typography.Text>
                     <Switch size="small" checked={tunEnabled} onChange={(checked) => void handleTunToggle(checked)} />
                   </Space>
                   <Typography.Text type="secondary">接管更多系统流量，重启 Clash 后生效。</Typography.Text>
-                  <Button size="small" onClick={() => void handleTunDiagnose()}>诊断 TUN</Button>
+                  <Button size="small" onClick={() => void handleTunDiagnose()} style={{ marginTop: 'auto', alignSelf: 'flex-start' }}>诊断 TUN</Button>
                 </Space>
               </Card>
             </Col>
@@ -368,17 +338,17 @@ function ModeCard(props: {
 }): JSX.Element {
   return (
     <Col xs={24} md={8}>
-      <Card style={{ height: '100%' }}>
-        <Space direction="vertical" size={12} style={{ width: '100%' }}>
-          <Space>
+      <Card style={{ height: '100%', minHeight: 188 }}>
+        <Space direction="vertical" size={12} style={{ width: '100%', height: '100%' }}>
+          <Space style={{ width: '100%' }}>
             <span style={{ fontSize: 22 }}>{props.icon}</span>
-            <Typography.Text strong style={{ fontSize: 16 }}>{props.title}</Typography.Text>
+            <Typography.Text strong style={{ fontSize: 16, whiteSpace: 'nowrap' }}>{props.title}</Typography.Text>
             <Tag color="blue" bordered={false}>{props.tag}</Tag>
           </Space>
           <Typography.Paragraph type="secondary" style={{ minHeight: 66, marginBottom: 0 }}>
             {props.description}
           </Typography.Paragraph>
-          <Button type="primary" block onClick={props.onClick}>{props.action}</Button>
+          <Button type="primary" block onClick={props.onClick} style={{ marginTop: 'auto' }}>{props.action}</Button>
         </Space>
       </Card>
     </Col>

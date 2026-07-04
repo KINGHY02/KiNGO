@@ -9,6 +9,7 @@ export interface FlatNode {
   delay: number              // ms, 0=untested, -1=unreachable
   speed: number              // bytes/sec, 0=untested
   sort: number               // persistent sort order
+  sourceIndex: number         // original loaded/imported order
   ipInfo: string             // IP geolocation info
   isActive: boolean          // currently connected?
   todayUp: string            // formatted

@@ -41,6 +41,11 @@ interface AppSettings {
   theme: 'light' | 'dark' | 'pink' | 'blue'
   autoCheckUpdates: boolean
   updateMirror: string
+  publicRouteAutoSelectMode: 'quick' | 'full'
+  publicRouteAutoSelectLimit: number
+  publicRouteAutoSwitch: boolean
+  publicRouteHealthCheckInterval: number
+  publicRouteHealthCheckFailures: number
   defaultCoreByProtocol: Record<string, string>
   lastSuccessfulRouteId: string | null
   selectedPublicRouteId: string | null
@@ -321,6 +326,7 @@ interface ElectronAPI {
   cloneNode: (id: string) => Promise<{ node: StoredNode; groupId: string } | null>
   deleteNodes: (ids: string[]) => Promise<void>
   testNodeLatency: (ids: string[]) => Promise<{ id: string; latency: number }[]>
+  onNodeLatencyProgress: (callback: (progress: { done: number; total: number; results: { id: string; latency: number }[] }) => void) => () => void
   getCompatibleCores: (protocol: string) => Promise<CompatibleCore[]>
   exportNodeClientConfig: (nodeId: string, coreId: string) => Promise<{ success: boolean; content?: string; format?: 'yaml' | 'json'; error?: string }>
   connectNode: (nodeId: string, coreId: string) => Promise<{ success: boolean; pid?: number; error?: string }>

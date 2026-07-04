@@ -40,6 +40,7 @@ export default function App(): JSX.Element {
       <ConfigProvider
         locale={zhCN}
         theme={{
+          cssVar: true,
           algorithm: themeMode === 'dark' ? antTheme.darkAlgorithm : antTheme.defaultAlgorithm,
           token: { colorPrimary: themeMode === 'pink' ? '#ff4088' : themeMode === 'blue' ? '#3b82f6' : '#4b6cf7' }
         }}

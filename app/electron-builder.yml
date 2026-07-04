@@ -39,6 +39,10 @@ extraResources:
     to: icons/tray-16.png
   - from: electron-resources/tray-32.png
     to: icons/tray-32.png
+  - from: ../icons/16x16_Connecting.png
+    to: icons/16x16_Connecting.png
+  - from: ../icons/32x32_Connecting.png
+    to: icons/32x32_Connecting.png
   - from: electron-resources/icon.ico
     to: icon.ico
 

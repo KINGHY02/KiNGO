@@ -39,12 +39,33 @@ export function setDelay(nodeId: string, delay: number): void {
   const items = store.get("items")
   let item = items.find((i) => i.nodeId === nodeId)
   if (!item) {
-    item = { nodeId, delay, speed: 0, sort: items.length, ipInfo: "", lastTested: Date.now() }
+    item = { nodeId, delay, speed: 0, sort: 0, ipInfo: "", lastTested: Date.now() }
     items.push(item)
   } else {
     item.delay = delay
     item.lastTested = Date.now()
   }
+  store.set("items", items)
+}
+
+export function setDelays(results: Array<{ id: string; latency: number }>): void {
+  if (results.length === 0) return
+  const items = store.get("items")
+  const index = new Map(items.map((item) => [item.nodeId, item]))
+  const now = Date.now()
+
+  for (const result of results) {
+    let item = index.get(result.id)
+    if (!item) {
+      item = { nodeId: result.id, delay: result.latency, speed: 0, sort: 0, ipInfo: "", lastTested: now }
+      items.push(item)
+      index.set(result.id, item)
+    } else {
+      item.delay = result.latency
+      item.lastTested = now
+    }
+  }
+
   store.set("items", items)
 }
 
@@ -54,10 +75,10 @@ export function setSortOrder(nodeIds: string[]): void {
   nodeIds.forEach((id, idx) => {
     let item = items.find((i) => i.nodeId === id)
     if (!item) {
-      item = { nodeId: id, delay: 0, speed: 0, sort: idx, ipInfo: "", lastTested: null }
+      item = { nodeId: id, delay: 0, speed: 0, sort: idx + 1, ipInfo: "", lastTested: null }
       items.push(item)
     } else {
-      item.sort = idx
+      item.sort = idx + 1
     }
     updated.add(id)
   })

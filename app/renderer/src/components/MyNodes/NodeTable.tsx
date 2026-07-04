@@ -1,6 +1,6 @@
 // NodeTable — unified node table (v2rayN ProfilesView DataGrid aligned)
 // Uses antd Table's onRow for selection + native keydown for keyboard shortcuts
-import { useRef, useEffect, useCallback } from 'react'
+import { useRef, useEffect, useCallback, useMemo } from 'react'
 import { Table, Tag, Button, Space } from 'antd'
 import { ThunderboltOutlined, PlayCircleOutlined, DeleteOutlined, LoadingOutlined } from '@ant-design/icons'
 import type { ColumnsType } from 'antd/es/table'
@@ -17,7 +17,7 @@ const latencyColor = (ms: number): string => {
   if (ms < 0) return 'default'; if (ms < 100) return 'green'; if (ms < 300) return 'orange'; return 'red'
 }
 const latencyText = (ms: number): string => {
-  if (ms < 0) return '不可达'; if (ms === 0) return '-'; return `${ms}ms`
+  if (ms < 0) return '\u4e0d\u53ef\u8fbe'; if (ms === 0) return '-'; return `${ms}ms`
 }
 const speedText = (bytes: number): string => {
   if (!bytes || bytes <= 0) return '-'
@@ -47,9 +47,10 @@ export default function NodeTable({
   sortCol, sortAsc, onSort, onTestNode, onConnectNode, onDeleteNode,
   onContextMenu, onDoubleClick, testingIds, connectingId,
 }: Props): JSX.Element {
-  const sortArrow = (col: string) => sortCol === col ? (sortAsc ? ' ▲' : ' ▼') : ''
+  const sortArrow = (col: string) => sortCol === col ? (sortAsc ? ' \u25B2' : ' \u25BC') : ''
   const containerRef = useRef<HTMLDivElement>(null)
   const lastClickedIdx = useRef<number>(-1)
+  const dataSource = useMemo(() => nodes.map((fn) => ({ ...fn, key: fn.node.id })), [nodes])
 
   // Keep mutable refs so the stable native keydown handler reads latest state
   const selRef = useRef(selectedRowKeys); selRef.current = selectedRowKeys
@@ -156,37 +157,42 @@ export default function NodeTable({
   }, [nodes, selectedRowKeys, onSelectChange, onContextMenu, onDoubleClick, setRowSelected, clearAllRowSelection])
 
   const columns: ColumnsType<FlatNode> = [
+    { title: '#', key: 'rowNum', width: 40, align: 'center', render: (_: unknown, __: FlatNode, idx: number) => idx + 1 },
     {
-      title: '#', key: 'rowNum', width: 40, align: 'center',
-      render: (_: unknown, __: FlatNode, idx: number) => idx + 1,
-    },
-    {
-      title: <a onClick={() => onSort('configType')}>类型{sortArrow('configType')}</a>,
-      dataIndex: ['node', 'protocol'], key: 'configType', width: 70,
+      title: <a onClick={() => onSort('configType')}>{'\u7c7b\u578b'}{sortArrow('configType')}</a>,
+      dataIndex: ['node', 'protocol'], key: 'configType', width: 70, ellipsis: true,
       render: (p: string) => <Tag color={PROTOCOL_COLORS[p] || 'default'} style={{ margin: 0 }}>{p}</Tag>,
     },
     {
-      title: <a onClick={() => onSort('remarks')}>备注{sortArrow('remarks')}</a>,
-      key: 'remarks', width: 180, ellipsis: true,
+      title: <a onClick={() => onSort('remarks')}>{'\u5907\u6ce8'}{sortArrow('remarks')}</a>,
+      key: 'remarks', width: 190, ellipsis: true,
       render: (_: unknown, r: FlatNode) => (
-        <span>
-          {r.isActive && <Tag color="green" style={{ marginRight: 4, fontSize: 10, padding: '0 4px' }}>★</Tag>}
+        <span className="node-cell-ellipsis">
+          {r.isActive && <Tag color="green" style={{ marginRight: 4, fontSize: 10, padding: '0 4px' }}>{'\u6d3b'}</Tag>}
           {r.node.name}
         </span>
       ),
     },
     {
-      title: <a onClick={() => onSort('address')}>地址{sortArrow('address')}</a>,
-      key: 'address', width: 160,
+      title: <a onClick={() => onSort('address')}>{'\u5730\u5740'}{sortArrow('address')}</a>,
+      key: 'address', width: 190, ellipsis: true,
       render: (_: unknown, r: FlatNode) => `${r.node.host}:${r.node.port}`,
     },
     {
-      title: <a onClick={() => onSort('port')}>端口{sortArrow('port')}</a>,
-      dataIndex: ['node', 'port'], key: 'port', width: 60, align: 'right',
+      title: <a onClick={() => onSort('port')}>{'\u7aef\u53e3'}{sortArrow('port')}</a>,
+      dataIndex: ['node', 'port'], key: 'port', width: 64, align: 'right',
     },
     {
-      title: <a onClick={() => onSort('network')}>传输{sortArrow('network')}</a>,
-      key: 'network', width: 80,
+      title: <a onClick={() => onSort('delayVal')}>{'\u5ef6\u8fdf'}{sortArrow('delayVal')}</a>,
+      dataIndex: 'delay', key: 'delayVal', width: 82,
+      render: (ms: number) => {
+        if (ms === 0) return <span style={{ color: '#999' }}>-</span>
+        return <Tag color={latencyColor(ms)}>{latencyText(ms)}</Tag>
+      },
+    },
+    {
+      title: <a onClick={() => onSort('network')}>{'\u4f20\u8f93'}{sortArrow('network')}</a>,
+      key: 'network', width: 76, ellipsis: true,
       render: (_: unknown, r: FlatNode) => {
         const net = String(r.node.details.network || r.node.details.type || 'tcp')
         return <Tag style={{ margin: 0 }}>{net}</Tag>
@@ -194,7 +200,7 @@ export default function NodeTable({
     },
     {
       title: <a onClick={() => onSort('streamSecurity')}>TLS{sortArrow('streamSecurity')}</a>,
-      key: 'streamSecurity', width: 70,
+      key: 'streamSecurity', width: 68,
       render: (_: unknown, r: FlatNode) => {
         const sec = String(r.node.details.security || r.node.details.tls || '')
         if (!sec || sec === 'none') return '-'
@@ -202,52 +208,28 @@ export default function NodeTable({
       },
     },
     {
-      title: <a onClick={() => onSort('subRemarks')}>订阅{sortArrow('subRemarks')}</a>,
+      title: <a onClick={() => onSort('subRemarks')}>{'\u8ba2\u9605'}{sortArrow('subRemarks')}</a>,
       dataIndex: 'groupName', key: 'subRemarks', width: 100, ellipsis: true,
     },
     {
-      title: <a onClick={() => onSort('delayVal')}>延迟{sortArrow('delayVal')}</a>,
-      dataIndex: 'delay', key: 'delayVal', width: 80,
-      render: (ms: number) => {
-        if (ms === 0) return <span style={{ color: '#999' }}>-</span>
-        return <Tag color={latencyColor(ms)}>{latencyText(ms)}</Tag>
-      },
-    },
-    {
-      title: <a onClick={() => onSort('speedVal')}>速度{sortArrow('speedVal')}</a>,
+      title: <a onClick={() => onSort('speedVal')}>{'\u901f\u5ea6'}{sortArrow('speedVal')}</a>,
       dataIndex: 'speed', key: 'speedVal', width: 80,
       render: (bytes: number) => speedText(bytes),
     },
     {
-      title: '操作', key: 'actions', width: 130, fixed: 'right',
+      title: '\u64cd\u4f5c', key: 'actions', width: 130, fixed: 'right',
       render: (_: unknown, r: FlatNode) => (
         <Space size={2}>
-          <Button
-            size="small"
-            icon={testingIds.has(r.node.id) ? <ThunderboltOutlined spin /> : <ThunderboltOutlined />}
-            onClick={(e) => { e.stopPropagation(); onTestNode(r.node.id) }}
-            title="TCPing"
-          />
-          <Button
-            size="small" type="primary"
-            icon={connectingId === r.node.id ? <LoadingOutlined spin /> : <PlayCircleOutlined />}
-            onClick={(e) => { e.stopPropagation(); onConnectNode(r) }}
-            loading={connectingId === r.node.id}
-            title="连接"
-          />
-          <Button
-            size="small" danger
-            icon={<DeleteOutlined />}
-            onClick={(e) => { e.stopPropagation(); onDeleteNode(r) }}
-            title="删除"
-          />
+          <Button size="small" icon={testingIds.has(r.node.id) ? <ThunderboltOutlined spin /> : <ThunderboltOutlined />} onClick={(e) => { e.stopPropagation(); onTestNode(r.node.id) }} title="TCPing" />
+          <Button size="small" type="primary" icon={connectingId === r.node.id ? <LoadingOutlined spin /> : <PlayCircleOutlined />} onClick={(e) => { e.stopPropagation(); onConnectNode(r) }} loading={connectingId === r.node.id} title={'\u8fde\u63a5'} />
+          <Button size="small" danger icon={<DeleteOutlined />} onClick={(e) => { e.stopPropagation(); onDeleteNode(r) }} title={'\u5220\u9664'} />
         </Space>
       ),
     },
   ]
 
   return (
-    <div ref={containerRef} tabIndex={-1} style={{ outline: 'none' }}>
+    <div ref={containerRef} tabIndex={-1} className="kingo-node-table" style={{ outline: 'none' }}>
       <style>{`
         .node-row-selected td { background: var(--ant-primary-1, #e6f4ff) !important; }
         .node-row-active td { background: var(--ant-color-success-bg, #f6ffed) !important; }
@@ -255,12 +237,36 @@ export default function NodeTable({
         .ant-table-row { cursor: default; }
         /* Prevent text selection inside the table (v2rayN DataGrid behaviour) */
         .ant-table-wrapper { user-select: none; -webkit-user-select: none; }
+        .kingo-node-table .ant-table-row,
+        .kingo-node-table .ant-table-cell {
+          height: 38px !important;
+          max-height: 38px !important;
+        }
+        .kingo-node-table .ant-table-cell {
+          white-space: nowrap !important;
+          overflow: hidden !important;
+          text-overflow: ellipsis !important;
+          vertical-align: middle !important;
+          padding-top: 4px !important;
+          padding-bottom: 4px !important;
+        }
+        .kingo-node-table .ant-table-cell > *,
+        .kingo-node-table .node-cell-ellipsis,
+        .kingo-node-table .ant-typography,
+        .kingo-node-table .ant-tag {
+          white-space: nowrap !important;
+          max-width: 100%;
+          overflow: hidden;
+          text-overflow: ellipsis;
+        }
       `}</style>
       <Table<FlatNode>
         columns={columns}
-        dataSource={nodes.map((fn) => ({ ...fn, key: fn.node.id }))}
+        dataSource={dataSource}
         loading={loading}
         size="small"
+        tableLayout="fixed"
+        virtual
         onRow={onRow}
         rowClassName={(record) => {
           const sel = selectedRowKeys.includes(record.node.id)
@@ -269,7 +275,7 @@ export default function NodeTable({
           if (record.isActive) cls.push('node-row-active')
           return cls.join(' ')
         }}
-        scroll={{ x: 1200, y: 'calc(100vh - 340px)' }}
+        scroll={{ x: 1200, y: 520 }}
         pagination={false}
       />
     </div>

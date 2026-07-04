@@ -15,13 +15,15 @@ export interface RealLatencyResult {
   protocol: LocalProxyProtocol
   target: string
   error?: string
+  samples?: number[]
 }
 
 const cache = new Map<string, { result: number; time: number }>()
 const CACHE_TTL = 60_000
-const LATENCY_TARGET_URL = 'http://www.gstatic.com/generate_204'
-const LATENCY_TARGET_HOST = 'www.gstatic.com'
+const LATENCY_TARGET_URL = 'http://cp.cloudflare.com/generate_204'
+const LATENCY_TARGET_HOST = 'cp.cloudflare.com'
 const LATENCY_TARGET_PORT = 80
+const REAL_LATENCY_ATTEMPTS = 2
 
 export function testLatency(host: string, port: number, timeout = 3000, forceRefresh = false): Promise<number> {
   const cacheKey = `${host}:${port}`
@@ -85,14 +87,36 @@ export async function testRealLatencyDetailed(
   protocol: LocalProxyProtocol = 'socks5',
   timeout = 5000
 ): Promise<RealLatencyResult> {
-  return protocol === 'http'
-    ? testHttpProxyLatency(proxyPort, timeout)
-    : testSocks5ProxyLatency(proxyPort, timeout)
+  const results: RealLatencyResult[] = []
+  for (let i = 0; i < REAL_LATENCY_ATTEMPTS; i += 1) {
+    const result = protocol === 'http'
+      ? await testHttpProxyLatencyOnce(proxyPort, timeout)
+      : await testSocks5ProxyLatencyOnce(proxyPort, timeout)
+    results.push(result)
+    if (i < REAL_LATENCY_ATTEMPTS - 1) {
+      await new Promise((resolve) => setTimeout(resolve, 100))
+    }
+  }
+
+  const successful = results.filter((item) => item.success && item.latency >= 0)
+  if (successful.length > 0) {
+    const best = successful.sort((a, b) => a.latency - b.latency)[0]
+    return {
+      ...best,
+      samples: successful.map((item) => item.latency)
+    }
+  }
+
+  return {
+    ...results[results.length - 1],
+    samples: results.map((item) => item.latency).filter((latency) => latency >= 0)
+  }
 }
 
-function testHttpProxyLatency(proxyPort: number, timeout: number): Promise<RealLatencyResult> {
+function testHttpProxyLatencyOnce(proxyPort: number, timeout: number): Promise<RealLatencyResult> {
   return new Promise((resolve) => {
     const start = performance.now()
+    let settled = false
     const options: http.RequestOptions = {
       host: '127.0.0.1',
       port: proxyPort,
@@ -103,6 +127,8 @@ function testHttpProxyLatency(proxyPort: number, timeout: number): Promise<RealL
     }
 
     const finish = (success: boolean, error?: string): void => {
+      if (settled) return
+      settled = true
       resolve({
         latency: success ? Math.round(performance.now() - start) : -1,
         success,
@@ -128,7 +154,7 @@ function testHttpProxyLatency(proxyPort: number, timeout: number): Promise<RealL
   })
 }
 
-function testSocks5ProxyLatency(proxyPort: number, timeout: number): Promise<RealLatencyResult> {
+function testSocks5ProxyLatencyOnce(proxyPort: number, timeout: number): Promise<RealLatencyResult> {
   return new Promise((resolve) => {
     const start = performance.now()
     const socket = net.createConnection({ host: '127.0.0.1', port: proxyPort })

@@ -287,6 +287,12 @@ export async function testNodeLatency(ids: string[]): Promise<{ id: string; late
   return api.testNodeLatency(ids)
 }
 
+export function onNodeLatencyProgress(
+  callback: (progress: { done: number; total: number; results: { id: string; latency: number }[] }) => void
+): () => void {
+  return api.onNodeLatencyProgress(callback)
+}
+
 export async function getCompatibleCores(protocol: string): Promise<CompatibleCore[]> {
   return api.getCompatibleCores(protocol)
 }

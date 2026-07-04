@@ -1,13 +1,13 @@
 // MyNodes — unified node management page (v2rayN ProfilesView aligned)
 // Data comes from useNodesData hook (module-level cache = instant tab switch).
 
-import { useState, useCallback, useMemo } from 'react'
+import { useState, useCallback, useEffect, useMemo } from 'react'
 import {
   Card, Button, Input, Space, Tag, message, Dropdown, Modal, Typography,
 } from 'antd'
 import {
   PlusOutlined, ThunderboltOutlined, ImportOutlined,
-  SearchOutlined, ColumnWidthOutlined, SettingOutlined, GlobalOutlined, EditOutlined, DeleteOutlined, ArrowUpOutlined, ArrowDownOutlined,
+  SearchOutlined, ColumnWidthOutlined, SettingOutlined, GlobalOutlined, EditOutlined, DeleteOutlined, ArrowUpOutlined, ArrowDownOutlined, SyncOutlined,
 } from '@ant-design/icons'
 import type { MenuProps } from 'antd'
 
@@ -24,6 +24,7 @@ import { useNodesData } from '../../hooks/useNodesData'
 import {
   cloneNode, deleteMyNode, exportNodeClientConfig, profileMove, testNodeLatency,
   createEmptyGroup, renameGroup, deleteEmptyGroup, moveNodeGroup, moveNodesToGroup, updateSubscription,
+  onNodeLatencyProgress,
 } from '../../services/ipc-client'
 
 const api = window.electronAPI
@@ -42,6 +43,7 @@ const DEFAULT_CORE_BY_PROTOCOL: Record<string, string> = {
 }
 
 interface GroupInfo { id: string; name: string; count: number; kind: 'all' | 'manual' | 'local' | 'subscription' }
+const SORT_STATE_KEY = 'kingo:v2rayn:sort-state'
 
 function sortFlatNodes(list: FlatNode[], col: SortColName | '', asc: boolean): FlatNode[] {
   if (!col) return list
@@ -81,8 +83,21 @@ export default function MyNodes(): JSX.Element {
   const [groupFilter, setGroupFilter] = useState('')
   const [selectedKeys, setSelectedKeys] = useState<React.Key[]>([])
   const [testingIds, setTestingIds] = useState<Set<string>>(new Set())
-  const [sortCol, setSortCol] = useState<SortColName | ''>('')
-  const [sortAsc, setSortAsc] = useState(true)
+  const [bulkTesting, setBulkTesting] = useState(false)
+  const [updatingGroup, setUpdatingGroup] = useState(false)
+  const [liveDelays, setLiveDelays] = useState<Record<string, number>>({})
+  const [sortCol, setSortCol] = useState<SortColName | ''>(() => {
+    try {
+      const saved = JSON.parse(localStorage.getItem(SORT_STATE_KEY) || '{}') as { col?: SortColName | '' }
+      return saved.col || ''
+    } catch { return '' }
+  })
+  const [sortAsc, setSortAsc] = useState(() => {
+    try {
+      const saved = JSON.parse(localStorage.getItem(SORT_STATE_KEY) || '{}') as { asc?: boolean }
+      return typeof saved.asc === 'boolean' ? saved.asc : true
+    } catch { return true }
+  })
   const [connectingId, setConnectingId] = useState<string | null>(null)
 
   const [coreModalNode, setCoreModalNode] = useState<StoredNode | null>(null)
@@ -91,16 +106,38 @@ export default function MyNodes(): JSX.Element {
   const [editingNode, setEditingNode] = useState<FlatNode | null>(null)
   const [groupModal, setGroupModal] = useState<{ mode: 'create' | 'rename'; id?: string; name: string } | null>(null)
 
+  useEffect(() => {
+    localStorage.setItem(SORT_STATE_KEY, JSON.stringify({ col: sortCol, asc: sortAsc }))
+  }, [sortCol, sortAsc])
+
+  useEffect(() => {
+    return onNodeLatencyProgress((progress) => {
+      setLiveDelays((prev) => {
+        const next = { ...prev }
+        for (const item of progress.results) next[item.id] = item.latency
+        return next
+      })
+    })
+  }, [])
+
   // ---- Filtered + sorted list ----
+  const nodesWithLiveDelay = useMemo(() => {
+    if (Object.keys(liveDelays).length === 0) return allNodes
+    return allNodes.map((fn) => {
+      const delay = liveDelays[fn.node.id]
+      return delay === undefined ? fn : { ...fn, delay }
+    })
+  }, [allNodes, liveDelays])
+
   const filtered = useMemo(() => {
-    let list = allNodes
+    let list = nodesWithLiveDelay
     if (groupFilter) list = list.filter((fn) => fn.groupId === groupFilter)
     if (search) {
       const q = search.toLowerCase()
       list = list.filter((fn) => fn.node.name.toLowerCase().includes(q) || fn.node.host.toLowerCase().includes(q))
     }
     return sortFlatNodes(list, sortCol, sortAsc)
-  }, [allNodes, groupFilter, search, sortCol, sortAsc])
+  }, [nodesWithLiveDelay, groupFilter, search, sortCol, sortAsc])
 
   const groups: GroupInfo[] = [
     { id: 'manual', name: '手动节点', count: allNodes.filter((n) => n.groupId === 'manual').length, kind: 'manual' },
@@ -124,16 +161,23 @@ export default function MyNodes(): JSX.Element {
   // ---- Node actions ----
   const handleTestNodes = async (ids: string[]) => {
     if (ids.length === 0) return
-    setTestingIds(new Set(ids))
-    let reachable = 0
-    for (const id of ids) {
-      try {
-        const r = (await testNodeLatency([id]))[0]
-        if (r) { if (r.latency >= 0) reachable++; await reload() }
-      } catch { /* skip */ }
+    const uniqueIds = Array.from(new Set(ids))
+    const isBulk = uniqueIds.length > 1
+    setBulkTesting(isBulk)
+    setTestingIds(isBulk ? new Set() : new Set(uniqueIds))
+    const key = `node-latency-${Date.now()}`
+    message.loading({ content: `正在并发测速 ${uniqueIds.length} 个节点...`, key, duration: 0 })
+    try {
+      const results = await testNodeLatency(uniqueIds)
+      const reachable = results.filter((item) => item.latency >= 0).length
+      await reload()
+      message.success({ content: `测速完成：${reachable}/${uniqueIds.length} 可达`, key, duration: 2 })
+    } catch {
+      message.error({ content: '测速失败', key, duration: 2 })
+    } finally {
+      setTestingIds(new Set())
+      setBulkTesting(false)
     }
-    setTestingIds(new Set())
-    message.success(`测速: ${reachable}/${ids.length} 可达`)
   }
 
   const handleConnect = useCallback(async (fn: FlatNode) => {
@@ -249,14 +293,28 @@ export default function MyNodes(): JSX.Element {
   }
 
   const handleUpdateSelectedSubscription = async (): Promise<void> => {
-    if (!selectedSub) return
+    if (!selectedSub) {
+      message.warning('当前分组不是订阅组，无法在线更新')
+      return
+    }
+    setUpdatingGroup(true)
     try {
       const diff = await updateSubscription(selectedSub.id)
+      setSortCol('')
+      setSortAsc(true)
       message.success(diff ? `订阅已更新：新增 ${diff.added}，移除 ${diff.removed}` : '订阅已更新')
       await reload()
+      setUpdatingGroup(false)
     } catch {
+      setUpdatingGroup(false)
       message.error('订阅更新失败')
     }
+  }
+
+  const handleNodesImported = async (): Promise<void> => {
+    setSortCol('')
+    setSortAsc(true)
+    await reload()
   }
 
   const handleMenuAction = async (action: MenuAction) => {
@@ -343,7 +401,7 @@ export default function MyNodes(): JSX.Element {
   }
 
   return (
-    <div style={{ userSelect: 'none' }}>
+    <div className="kingo-v2rayn-page" style={{ userSelect: 'none', color: 'var(--ant-color-text)' }}>
       <Space direction="vertical" size={10} style={{ width: '100%' }}>
         <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
           {groupItems.map((group) => {
@@ -379,7 +437,6 @@ export default function MyNodes(): JSX.Element {
               <Tag bordered={false}>{filtered.length} 个节点</Tag>
               <Button size="small" icon={<EditOutlined />} disabled={!selectedLocalGroup && !selectedSub} onClick={() => setGroupModal({ mode: 'rename', id: (selectedLocalGroup || selectedSub)?.id, name: (selectedLocalGroup || selectedSub)?.name || '' })}>重命名</Button>
               <Button size="small" danger icon={<DeleteOutlined />} disabled={!selectedLocalGroup && !selectedSub} onClick={() => void handleDeleteSelectedGroup()}>删除组及节点</Button>
-              {selectedSub && <Button size="small" icon={<ThunderboltOutlined />} onClick={() => void handleUpdateSelectedSubscription()}>更新订阅</Button>}
               {selectedLocalGroup && (
                 <Space.Compact>
                   <Button size="small" icon={<ArrowUpOutlined />} onClick={() => void handleMoveLocalGroup('up')}>上移</Button>
@@ -390,9 +447,19 @@ export default function MyNodes(): JSX.Element {
             <Space wrap>
               <Button size="small" icon={<PlusOutlined />} onClick={() => setGroupModal({ mode: 'create', name: '' })}>空组</Button>
               <Button size="small" icon={<PlusOutlined />} onClick={() => setShowAddSub(true)}>订阅</Button>
+              <Button
+                size="small"
+                icon={<SyncOutlined spin={updatingGroup} />}
+                loading={updatingGroup}
+                disabled={!selectedSub || updatingGroup}
+                title={selectedSub ? `更新 ${selectedSub.name}` : '只有订阅组可以在线更新'}
+                onClick={() => void handleUpdateSelectedSubscription()}
+              >
+                更新当前组
+              </Button>
               <Button size="small" danger icon={<DeleteOutlined />} disabled={!selectedLocalGroup && !selectedSub} onClick={() => void handleDeleteSelectedGroup()}>删除</Button>
               <Input placeholder="搜索名称或地址" prefix={<SearchOutlined />} value={search} onChange={(e) => setSearch(e.target.value)} style={{ width: 210 }} size="small" allowClear />
-              <Button size="small" icon={<ThunderboltOutlined />} onClick={() => handleTestNodes(filtered.map((n) => n.node.id))} disabled={filtered.length === 0}>一键测速</Button>
+              <Button size="small" icon={<ThunderboltOutlined />} loading={bulkTesting} onClick={() => handleTestNodes(filtered.map((n) => n.node.id))} disabled={filtered.length === 0 || bulkTesting}>一键测速</Button>
               <Button size="small" icon={<ImportOutlined />} onClick={() => setShowImport(true)}>粘贴导入</Button>
               <Dropdown menu={{ items: toolbarMenu, onClick: handleToolbarMenu }}><Button size="small" icon={<SettingOutlined />}>更多</Button></Dropdown>
             </Space>
@@ -411,8 +478,8 @@ export default function MyNodes(): JSX.Element {
         </div>
       </Space>
       <ConnectCoreModal node={coreModalNode} open={!!coreModalNode} onClose={() => setCoreModalNode(null)} onConnected={handleConnected} />
-      <ImportBatchModal open={showImport} onClose={() => setShowImport(false)} onImported={reload} />
-      <AddSubscriptionModal open={showAddSub} onClose={() => setShowAddSub(false)} onDone={reload} />
+      <ImportBatchModal open={showImport} onClose={() => setShowImport(false)} onImported={handleNodesImported} />
+      <AddSubscriptionModal open={showAddSub} onClose={() => setShowAddSub(false)} onDone={handleNodesImported} />
       <EditNodeModal open={!!editingNode} node={editingNode} onClose={() => setEditingNode(null)} onSaved={reload} />
       <Modal
         title={groupModal?.mode === 'rename' ? '重命名分组' : '新建空组'}

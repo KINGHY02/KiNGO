@@ -51,8 +51,8 @@ function createWindow(): void {
   const mainWindow = new BrowserWindow({
     width: 1100,
     height: 750,
-    minWidth: 900,
-    minHeight: 600,
+    minWidth: 1120,
+    minHeight: 720,
     show: false,
     frame: false,
     title: 'KiNGO',

@@ -26,8 +26,26 @@ function findTrayIcon(baseDir: string): NativeImage {
   return nativeImage.createEmpty()
 }
 
+function findConnectingTrayIcon(baseDir: string): NativeImage {
+  const candidates = [
+    join(baseDir, 'icons', '32x32_Connecting.png'),
+    join(baseDir, 'icons', '16x16_Connecting.png'),
+    join(baseDir, 'icons', 'connecting-32.png'),
+    join(baseDir, 'icons', 'connecting-16.png'),
+  ]
+  for (const path of candidates) {
+    if (!existsSync(path)) continue
+    const image = nativeImage.createFromPath(path)
+    if (!image.isEmpty()) return image
+  }
+  return findTrayIcon(baseDir)
+}
+
 export class TrayManager {
   private tray: Tray | null = null
+  private normalIcon: NativeImage | null = null
+  private activeIcon: NativeImage | null = null
+  private usingActiveIcon = false
 
   constructor(
     private proxyManager: ProxyManager,
@@ -37,7 +55,9 @@ export class TrayManager {
   ) {}
 
   create(): void {
-    this.tray = new Tray(findTrayIcon(this.baseDir).resize({ width: 16, height: 16 }))
+    this.normalIcon = findTrayIcon(this.baseDir).resize({ width: 16, height: 16 })
+    this.activeIcon = findConnectingTrayIcon(this.baseDir).resize({ width: 16, height: 16 })
+    this.tray = new Tray(this.normalIcon)
     this.tray.setToolTip('KiNGO')
     this.tray.on('double-click', () => {
       this.mainWindow.show()
@@ -54,6 +74,11 @@ export class TrayManager {
     const hasRunningCore = this.proxyManager.getStatus().some((status) => status.running)
     const isBusy = appState.busy || ['preparing', 'connecting', 'disconnecting'].includes(publicState.state)
     const current = appState.connected ? appState.displayName : null
+    const shouldUseActiveIcon = appState.connected || isBusy || hasRunningCore
+    if (shouldUseActiveIcon !== this.usingActiveIcon) {
+      this.tray.setImage(shouldUseActiveIcon ? this.activeIcon || findConnectingTrayIcon(this.baseDir).resize({ width: 16, height: 16 }) : this.normalIcon || findTrayIcon(this.baseDir).resize({ width: 16, height: 16 }))
+      this.usingActiveIcon = shouldUseActiveIcon
+    }
 
     this.tray.setContextMenu(Menu.buildFromTemplate([
       {

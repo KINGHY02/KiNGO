@@ -41,6 +41,52 @@ body {
   background: inherit !important;
 }
 
+.kingo-v2rayn-page {
+  color: var(--ant-color-text, inherit);
+}
+
+.kingo-v2rayn-page button:not(.ant-btn) {
+  color: var(--ant-color-text, inherit);
+  background: var(--ant-color-bg-container, transparent);
+}
+
+.kingo-v2rayn-page button:not(.ant-btn):hover {
+  background: var(--ant-color-fill-tertiary, rgba(128, 128, 128, 0.08));
+}
+
+.kingo-v2rayn-page .ant-table {
+  color: var(--ant-color-text, inherit);
+}
+
+.kingo-clash-page {
+  color: var(--ant-color-text, inherit);
+}
+
+.kingo-clash-page .ant-btn-primary:not(.ant-btn-dangerous),
+.kingo-clash-page .ant-radio-button-wrapper-checked:not(.ant-radio-button-wrapper-disabled) {
+  background: var(--ant-color-primary, #4b6cf7) !important;
+  border-color: var(--ant-color-primary, #4b6cf7) !important;
+  color: #fff !important;
+}
+
+.kingo-clash-page .ant-btn-default:not(.ant-btn-dangerous):hover,
+.kingo-clash-page .ant-btn-default:not(.ant-btn-dangerous):focus-visible {
+  border-color: var(--ant-color-primary, #4b6cf7) !important;
+  color: var(--ant-color-primary, #4b6cf7) !important;
+}
+
+.kingo-clash-page .ant-tag:not(.ant-tag-error):not(.ant-tag-success):not(.ant-tag-processing):not(.ant-tag-warning):not(.ant-tag-green):not(.ant-tag-red):not(.ant-tag-orange):not(.ant-tag-blue):not(.ant-tag-purple):not(.ant-tag-cyan):not(.ant-tag-magenta):not(.ant-tag-gold):not(.ant-tag-lime):not(.ant-tag-volcano):not(.ant-tag-geekblue) {
+  color: var(--ant-color-text, inherit);
+  background: var(--ant-color-fill-tertiary, rgba(128, 128, 128, 0.08));
+  border-color: var(--ant-color-border, rgba(128, 128, 128, 0.18));
+}
+
+.kingo-clash-page .ant-card,
+.kingo-clash-page .ant-table,
+.kingo-clash-page .ant-table-cell {
+  color: var(--ant-color-text, inherit);
+}
+
 .public-home {
   min-height: 100%;
   padding: 28px 36px 24px;

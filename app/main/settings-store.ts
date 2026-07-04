@@ -9,6 +9,11 @@ export interface AppSettings {
   theme: 'light' | 'dark' | 'pink' | 'blue'
   autoCheckUpdates: boolean
   updateMirror: string
+  publicRouteAutoSelectMode: 'quick' | 'full'
+  publicRouteAutoSelectLimit: number
+  publicRouteAutoSwitch: boolean
+  publicRouteHealthCheckInterval: number
+  publicRouteHealthCheckFailures: number
   defaultCoreByProtocol: Record<string, string>
   lastSuccessfulRouteId: string | null
   selectedPublicRouteId: string | null
@@ -23,6 +28,11 @@ const defaults: AppSettings = {
   theme: 'light',
   autoCheckUpdates: true,
   updateMirror: '',
+  publicRouteAutoSelectMode: 'quick',
+  publicRouteAutoSelectLimit: 8,
+  publicRouteAutoSwitch: true,
+  publicRouteHealthCheckInterval: 30,
+  publicRouteHealthCheckFailures: 3,
   lastSuccessfulRouteId: null,
   selectedPublicRouteId: null,
   defaultCoreByProtocol: {
@@ -54,6 +64,11 @@ const store = new Store<AppSettings>({
     theme: { type: 'string', enum: ['light', 'dark', 'pink', 'blue'] },
     autoCheckUpdates: { type: 'boolean' },
     updateMirror: { type: 'string' },
+    publicRouteAutoSelectMode: { type: 'string', enum: ['quick', 'full'] },
+    publicRouteAutoSelectLimit: { type: 'number', minimum: 1, maximum: 50 },
+    publicRouteAutoSwitch: { type: 'boolean' },
+    publicRouteHealthCheckInterval: { type: 'number', minimum: 10, maximum: 300 },
+    publicRouteHealthCheckFailures: { type: 'number', minimum: 1, maximum: 10 },
     lastSuccessfulRouteId: { type: ['string', 'null'] },
     selectedPublicRouteId: { type: ['string', 'null'] },
     defaultCoreByProtocol: {

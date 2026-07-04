@@ -305,6 +305,50 @@ export function updateNodeLatency(id: string, latency: number): void {
   }
 }
 
+export function updateNodeLatencies(results: Array<{ id: string; latency: number }>): void {
+  if (results.length === 0) return
+  const resultMap = new Map(results.map((item) => [item.id, item.latency]))
+  const now = Date.now()
+
+  const nodes = store.get('nodes')
+  let manualChanged = false
+  for (const node of nodes) {
+    const latency = resultMap.get(node.id)
+    if (latency === undefined) continue
+    node.latency = latency
+    node.lastTested = now
+    manualChanged = true
+  }
+  if (manualChanged) store.set('nodes', nodes)
+
+  const groups = getNodeGroups()
+  let groupsChanged = false
+  for (const group of groups) {
+    for (const node of group.nodes) {
+      const latency = resultMap.get(node.id)
+      if (latency === undefined) continue
+      node.latency = latency
+      node.lastTested = now
+      group.updatedAt = now
+      groupsChanged = true
+    }
+  }
+  if (groupsChanged) setNodeGroups(groups)
+
+  const subs = getSubscriptions()
+  let subsChanged = false
+  for (const sub of subs) {
+    for (const node of sub.nodes) {
+      const latency = resultMap.get(node.id)
+      if (latency === undefined) continue
+      node.latency = latency
+      node.lastTested = now
+      subsChanged = true
+    }
+  }
+  if (subsChanged) setSubscriptions(subs)
+}
+
 export function findNodeById(id: string): { node: StoredNode; groupId: string } | undefined {
   const node = store.get('nodes').find((n) => n.id === id)
   if (node) return { node, groupId: 'manual' }

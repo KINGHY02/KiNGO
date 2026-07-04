@@ -3,7 +3,7 @@ import { ProxyManager, PROXY_DEFINITIONS } from './proxy-manager'
 import { ConfigService } from './config-service'
 import { LogService } from './log-service'
 import { getSettings, setSettings, AppSettings } from './settings-store'
-import { testProxyNodes, testRealLatency } from './latency-tester'
+import { testLatency, testProxyNodes, testRealLatency } from './latency-tester'
 import { launchChrome } from './chrome-launcher'
 import { getSystemProxyStatus, syncSystemProxy, clearSystemProxy } from './system-proxy'
 import { getAvailableSlots, updateConfig, getCurrentSlot, switchSlot } from './ip-updater'
@@ -11,9 +11,9 @@ import { checkForUpdates, downloadUpdate, installUpdate, getAppVersion, setUpdat
 import { checkAllVersions } from './core-version'
 import { parseNodeUrl, parseNodeUrls, StoredNode } from './protocol-parser'
 import { generateConfig, compatibleCores } from './config-generator'
-import { listNodes, addNode, addNodes, updateNode, deleteNodes, deleteSubscriptionNode, deleteSubscriptionNodes, updateNodeLatency, findNodeById, getAllNodes, getActiveConnection, setActiveConnection, listSubscriptions, cloneNode, moveNodesToGroup, listNodeGroups, createNodeGroup, renameNodeGroup, deleteNodeGroup, moveNodeGroup } from './nodes-store'
+import { listNodes, addNode, addNodes, updateNode, deleteNodes, deleteSubscriptionNode, deleteSubscriptionNodes, updateNodeLatencies, findNodeById, getAllNodes, getActiveConnection, setActiveConnection, listSubscriptions, cloneNode, moveNodesToGroup, listNodeGroups, createNodeGroup, renameNodeGroup, deleteNodeGroup, moveNodeGroup } from './nodes-store'
 import { saveSubscription, updateSubscriptionNodes, updateSubscription, deleteSubscription, getSubscription } from './subscription-service'
-import { setDelay, setSortOrder, deleteProfileEx, getProfileEx, listAll as listAllProfileEx } from './profile-ex-store'
+import { setDelay, setDelays, setSortOrder, deleteProfileEx, getProfileEx, listAll as listAllProfileEx } from './profile-ex-store'
 import { PublicRouteService } from './public-route-service'
 import { MihomoService } from './mihomo-service'
 import { listCoreProfiles } from './core-profiles'
@@ -441,22 +441,51 @@ export function registerIpcHandlers(
   })
 
   ipcMain.handle('node:test-latency', async (_e, nodeIds: string[]) => {
+    const ids = Array.from(new Set(nodeIds)).filter(Boolean)
     const results: { id: string; latency: number }[] = []
-    for (const id of nodeIds) {
-      const found = findNodeById(id)
-      if (!found) continue
-      const n = found.node
-      try {
-        const res = await testProxyNodes([{ host: n.host, port: n.port }], false)
-        const latency = res[0]?.latency ?? -1
-        updateNodeLatency(n.id, latency)
-        setDelay(n.id, latency)
-        results.push({ id: n.id, latency })
-      } catch {
-        setDelay(n.id, -1)
-        results.push({ id: n.id, latency: -1 })
+    const nodeMap = new Map(getAllNodes().map((item) => [item.node.id, item.node]))
+    const concurrency = Math.min(12, ids.length)
+    let cursor = 0
+    let done = 0
+    let pendingProgress: { id: string; latency: number }[] = []
+
+    const publishProgress = (force = false): void => {
+      if (!force && pendingProgress.length < 12) return
+      if (pendingProgress.length === 0) return
+      const win = mainWindow()
+      if (win && !win.isDestroyed()) {
+        win.webContents.send('node:latency-progress', {
+          done,
+          total: ids.length,
+          results: pendingProgress.splice(0)
+        })
+      } else {
+        pendingProgress = []
       }
     }
+
+    const worker = async (): Promise<void> => {
+      while (cursor < ids.length) {
+        const id = ids[cursor++]
+        const n = nodeMap.get(id)
+        if (!n) continue
+        try {
+          const latency = await testLatency(n.host, n.port, 1500, true)
+          results.push({ id: n.id, latency })
+          pendingProgress.push({ id: n.id, latency })
+        } catch {
+          results.push({ id: n.id, latency: -1 })
+          pendingProgress.push({ id: n.id, latency: -1 })
+        }
+        done += 1
+        publishProgress()
+      }
+    }
+
+    await Promise.all(Array.from({ length: Math.min(concurrency, ids.length) }, () => worker()))
+    publishProgress(true)
+    updateNodeLatencies(results)
+    setDelays(results)
     return results
   })
 

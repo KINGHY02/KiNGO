@@ -38,3 +38,14 @@ app/dev-output.txt
 # Windows compatibility (large binaries)
 win7-win8/
 KiNGO-GUI-实施计划.md
+
+# Internal planning notes (local only)
+KINGO_ROADMAP.md
+KiNGO-GUI-实施计划.md
+MyNodes-V2rayN-Rebuild-Plan.md
+
+# Local reference source trees (not part of KiNGO release)
+clash-verge-rev-dev/
+v2rayN-dev/
+参考软件：v2rayN/
+参考软件：v2rayN-windows-64app/

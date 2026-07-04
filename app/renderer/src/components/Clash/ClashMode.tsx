@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useState } from 'react'
-import { Alert, Button, Card, Col, Empty, Form, Input, InputNumber, Modal, Popconfirm, Radio, Row, Select, Space, Switch, Table, Tabs, Tag, Typography, message } from 'antd'
+import { useCallback, useEffect, useMemo, useState } from 'react'
+import { Alert, Button, Card, Col, Drawer, Empty, Form, Input, InputNumber, Modal, Popconfirm, Radio, Row, Select, Space, Switch, Table, Tabs, Tag, Typography, message } from 'antd'
 import { ApiOutlined, CloudSyncOutlined, DeleteOutlined, DisconnectOutlined, FieldTimeOutlined, FileAddOutlined, LinkOutlined, PlayCircleOutlined } from '@ant-design/icons'
 import {
   deleteClashProfile,
@@ -26,6 +26,13 @@ import {
 
 type ClashModeValue = 'rule' | 'global' | 'direct'
 type ProxySortMode = 'default' | 'delay' | 'name'
+
+function delayTagColor(delay: number): string {
+  if (delay < 0) return 'red'
+  if (delay < 300) return 'green'
+  if (delay < 800) return 'orange'
+  return 'red'
+}
 
 const RULE_TEMPLATES = [
   {
@@ -147,6 +154,7 @@ export default function ClashMode(): JSX.Element {
   const [testingGroupName, setTestingGroupName] = useState<string | null>(null)
   const [proxyFilter, setProxyFilter] = useState('')
   const [proxySort, setProxySort] = useState<ProxySortMode>('default')
+  const [drawerGroupName, setDrawerGroupName] = useState<string | null>(null)
   const [profileModalOpen, setProfileModalOpen] = useState(false)
   const [profileInputMode, setProfileInputMode] = useState<'url' | 'yaml'>('url')
   const [savingProfile, setSavingProfile] = useState(false)
@@ -440,8 +448,42 @@ export default function ClashMode(): JSX.Element {
     return filtered
   }
 
+  const drawerGroup = useMemo(
+    () => groups.find((group) => group.name === drawerGroupName) || null,
+    [groups, drawerGroupName],
+  )
+
+  const visibleGroups = useMemo(() => {
+    const priority = (name: string): number => {
+      const lower = name.toLowerCase()
+      if (name.includes('节点选择') || lower === 'proxy' || lower === 'proxies' || lower === 'select') return 0
+      if (name.includes('手动挑选') || lower.includes('manual')) return 1
+      return 2
+    }
+    return groups
+      .map((group, index) => ({ group, index }))
+      .sort((a, b) => {
+        const pa = priority(a.group.name)
+        const pb = priority(b.group.name)
+        if (pa !== pb) return pa - pb
+        return a.index - b.index
+      })
+      .map((item) => item.group)
+  }, [groups])
+
+  const drawerProxyRows = useMemo(() => {
+    if (!drawerGroup) return []
+    return getVisibleProxies(drawerGroup).map((name, index) => ({
+      key: `${drawerGroup.name}:${name}`,
+      index: index + 1,
+      name,
+      delay: delays[name],
+      active: drawerGroup.now === name,
+    }))
+  }, [drawerGroup, proxyFilter, proxySort, delays])
+
   return (
-    <Space direction="vertical" size={16} style={{ width: '100%' }}>
+    <Space className="kingo-clash-page" direction="vertical" size={16} style={{ width: '100%' }}>
       <div>
         <Typography.Title level={3} style={{ marginBottom: 4 }}>Clash 模式</Typography.Title>
         <Typography.Text type="secondary">选择配置，启动 mihomo，切换代理组。</Typography.Text>
@@ -523,7 +565,7 @@ export default function ClashMode(): JSX.Element {
                       ]}
                     />
                   </Space>
-                  {groups.map((group) => (
+                  {visibleGroups.map((group) => (
                     <Card key={group.name} size="small">
                       <Space direction="vertical" size={10} style={{ width: '100%' }}>
                         <Row gutter={[12, 12]} align="middle">
@@ -536,12 +578,20 @@ export default function ClashMode(): JSX.Element {
                               showSearch
                               style={{ width: '100%' }}
                               value={group.now || undefined}
-                              options={group.all.map((name) => ({ label: name, value: name }))}
-                              onChange={(value) => void handleSelect(group, value)}
+                              placeholder="Open node drawer"
+                              open={false}
+                              options={group.now ? [{ label: group.now, value: group.now }] : []}
+                              onClick={() => setDrawerGroupName(group.name)}
                             />
                           </Col>
                           <Col xs={24} md={5}>
-                            <Space>
+                            <Space.Compact>
+                              <Button
+                                size="small"
+                                onClick={() => setDrawerGroupName(group.name)}
+                              >
+                                Select
+                              </Button>
                               <Button
                                 size="small"
                                 icon={<FieldTimeOutlined />}
@@ -551,11 +601,11 @@ export default function ClashMode(): JSX.Element {
                               >
                                 测速全部
                               </Button>
-                            </Space>
+                            </Space.Compact>
                           </Col>
                         </Row>
                         <Space wrap size={[8, 8]}>
-                          {getVisibleProxies(group).map((name) => {
+                          {([] as string[]).map((name) => {
                             const delay = delays[name]
                             const active = group.now === name
                             return (
@@ -608,6 +658,8 @@ export default function ClashMode(): JSX.Element {
                   size="small"
                   rowKey="id"
                   pagination={false}
+                  tableLayout="fixed"
+                  scroll={{ x: 1040 }}
                   dataSource={profiles}
                   columns={[
                     { title: '名称', dataIndex: 'name', key: 'name' },
@@ -690,6 +742,94 @@ export default function ClashMode(): JSX.Element {
         ]}
       />
       </Card>
+
+      <Drawer
+        title={drawerGroup ? `Select node: ${drawerGroup.name}` : 'Select node'}
+        open={!!drawerGroup}
+        onClose={() => setDrawerGroupName(null)}
+        width={560}
+        rootClassName="kingo-clash-page"
+        closable
+        keyboard
+        maskClosable
+        destroyOnClose
+      >
+        {!drawerGroup ? <Empty /> : (
+          <Space direction="vertical" size={12} style={{ width: '100%' }}>
+            <Space wrap>
+              <Input.Search
+                allowClear
+                placeholder="Filter nodes"
+                value={proxyFilter}
+                onChange={(event) => setProxyFilter(event.target.value)}
+                style={{ width: 220 }}
+              />
+              <Select
+                value={proxySort}
+                style={{ width: 140 }}
+                onChange={setProxySort}
+                options={[
+                  { label: 'Original', value: 'default' },
+                  { label: 'Delay', value: 'delay' },
+                  { label: 'Name', value: 'name' },
+                ]}
+              />
+              <Button
+                icon={<FieldTimeOutlined />}
+                disabled={!!testingDelayName || !!testingGroupName}
+                loading={testingGroupName === drawerGroup.name}
+                onClick={() => void handleDelayGroup(drawerGroup)}
+              >
+                Test group
+              </Button>
+            </Space>
+            <Table
+              size="small"
+              rowKey="key"
+              virtual
+              pagination={false}
+              dataSource={drawerProxyRows}
+              scroll={{ x: 480, y: 560 }}
+              columns={[
+                { title: '#', dataIndex: 'index', width: 52 },
+                {
+                  title: 'Node',
+                  dataIndex: 'name',
+                  ellipsis: true,
+                  render: (name: string, row: { active: boolean }) => (
+                    <Space>
+                      {row.active && <Tag color="green">Current</Tag>}
+                      <Typography.Text ellipsis style={{ maxWidth: 270 }}>{name}</Typography.Text>
+                    </Space>
+                  ),
+                },
+                {
+                  title: 'Delay',
+                  dataIndex: 'delay',
+                  width: 86,
+                  render: (delay?: number) => delay === undefined
+                    ? '-'
+                    : <Tag color={delayTagColor(delay)}>{delay >= 0 ? `${delay}ms` : 'Timeout'}</Tag>,
+                },
+                {
+                  title: 'Action',
+                  key: 'action',
+                  width: 84,
+                  render: (_: unknown, row: { name?: string; active: boolean }) => (
+                    <Button
+                      size="small"
+                      type={row.active ? 'primary' : 'default'}
+                      onClick={() => row.name && void handleSelect(drawerGroup, row.name)}
+                    >
+                      {row.active ? 'Selected' : 'Select'}
+                    </Button>
+                  ),
+                },
+              ]}
+            />
+          </Space>
+        )}
+      </Drawer>
 
       <Modal
         title={profileInputMode === 'url' ? '导入 Clash 订阅 URL' : '导入 Clash YAML'}

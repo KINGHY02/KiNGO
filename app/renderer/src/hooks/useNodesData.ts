@@ -35,22 +35,26 @@ async function fetchAll(): Promise<void> {
     ..._groupsCache.map((group, index): [string, number] => [group.id, index + 1]),
     ..._subsCache.map((sub, index): [string, number] => [sub.id, index + _groupsCache.length + 1]),
   ])
+  const subscriptionIds = new Set(_subsCache.map((sub) => sub.id))
 
-  _allCache = nodes.map((n: { node: StoredNode; groupId: string; groupName: string }) => {
+  _allCache = nodes.map((n: { node: StoredNode; groupId: string; groupName: string }, sourceIndex: number) => {
     const ex = exMap.get(n.node.id)
     return {
       node: n.node, groupId: n.groupId, groupName: n.groupName,
       delay: ex?.delay ?? 0, speed: ex?.speed ?? 0, sort: ex?.sort ?? 0,
+      sourceIndex,
       ipInfo: ex?.ipInfo ?? '', isActive: conn?.nodeId === n.node.id,
       todayUp: '', todayDown: '', totalUp: '', totalDown: '',
     } satisfies FlatNode
   }).sort((a, b) => {
     const groupCmp = (groupOrder.get(a.groupId) ?? Number.MAX_SAFE_INTEGER) - (groupOrder.get(b.groupId) ?? Number.MAX_SAFE_INTEGER)
     if (groupCmp !== 0) return groupCmp
-    const sortA = a.sort > 0 ? a.sort : Number.MAX_SAFE_INTEGER
-    const sortB = b.sort > 0 ? b.sort : Number.MAX_SAFE_INTEGER
-    if (sortA !== sortB) return sortA - sortB
-    return a.node.name.localeCompare(b.node.name, 'zh-CN')
+    if (!subscriptionIds.has(a.groupId) && !subscriptionIds.has(b.groupId)) {
+      const sortA = a.sort > 0 ? a.sort : Number.MAX_SAFE_INTEGER
+      const sortB = b.sort > 0 ? b.sort : Number.MAX_SAFE_INTEGER
+      if (sortA !== sortB) return sortA - sortB
+    }
+    return a.sourceIndex - b.sourceIndex
   })
   _ready = true
 }
@@ -62,6 +66,7 @@ export interface FlatNode {
   delay: number
   speed: number
   sort: number
+  sourceIndex: number
   ipInfo: string
   isActive: boolean
   todayUp: string

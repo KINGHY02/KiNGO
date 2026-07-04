@@ -78,6 +78,11 @@ const electronAPI = {
   cloneNode: (id: string) => ipcRenderer.invoke('node:clone', id),
   deleteNodes: (ids: string[]) => ipcRenderer.invoke('node:delete', ids),
   testNodeLatency: (ids: string[]) => ipcRenderer.invoke('node:test-latency', ids),
+  onNodeLatencyProgress: (callback: (progress: unknown) => void) => {
+    const handler = (_event: Electron.IpcRendererEvent, progress: unknown) => callback(progress)
+    ipcRenderer.on('node:latency-progress', handler)
+    return () => { ipcRenderer.removeListener('node:latency-progress', handler) }
+  },
   getCompatibleCores: (protocol: string) => ipcRenderer.invoke('node:compatible-cores', protocol),
   exportNodeClientConfig: (nodeId: string, coreId: string) => ipcRenderer.invoke('node:export-client-config', nodeId, coreId),
   connectNode: (nodeId: string, coreId: string) => ipcRenderer.invoke('node:connect', nodeId, coreId),

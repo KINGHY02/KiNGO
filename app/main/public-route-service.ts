@@ -104,6 +104,11 @@ const PROTOCOL_LABELS: Record<string, string> = {
   shadowquic: 'ShadowQUIC',
 }
 
+interface AutoRouteCandidateResult {
+  route: PublicRoute
+  latency: number
+}
+
 export class PublicRouteService extends EventEmitter {
   private state: PublicConnectionState = {
     routeId: null,
@@ -113,6 +118,11 @@ export class PublicRouteService extends EventEmitter {
     errorCode: null,
   }
   private intentionalStop = false
+  private autoSelectCursor = Math.floor(Math.random() * 1000)
+  private healthCheckTimer: ReturnType<typeof setInterval> | null = null
+  private healthCheckFailures = 0
+  private autoSwitching = false
+  private excludedAutoRouteIds = new Set<string>()
   private metaStore = new Store<RouteMetaData>({
     name: 'public-routes',
     defaults: { routes: [] },
@@ -128,10 +138,15 @@ export class PublicRouteService extends EventEmitter {
       if (!this.state.routeId || status.running || this.state.state !== 'connected') return
       const route = this.findRoute(this.state.routeId)
       if (!route || route.coreId !== status.id || this.intentionalStop) return
+      void this.handleConnectedRouteLost(route, 'Core process exited', 'CORE_EXITED')
+      /*
       this.recordFailure(route.id, '线路连接已中断')
+      void this.handleConnectedRouteLost(route, '线路运行组件已退出', 'CORE_EXITED')
+      /*
       setSettings({ systemProxy: false })
       this.setState(route.id, 'failed', '连接已中断', '线路连接已中断，请尝试重新连接或更换线路', 'CORE_EXITED')
       clearSystemProxy()
+      */
     })
   }
 
@@ -181,16 +196,14 @@ export class PublicRouteService extends EventEmitter {
 
   async connect(routeId?: string): Promise<PublicRouteResult> {
     const routes = this.listRoutes()
-    const settings = getSettings()
-    const targetId = routeId
-      || settings.selectedPublicRouteId
-      || settings.lastSuccessfulRouteId
-      || routes[0]?.id
-    const route = routes.find((item) => item.id === targetId)
+    let route = routeId
+      ? routes.find((item) => item.id === routeId)
+      : await this.chooseBestRoute(routes)
     if (!route) return { success: false, error: '没有可用的公共线路', errorCode: 'NO_ROUTES' }
     const def = PROXY_DEFINITIONS.find((item) => item.id === route.coreId)
     if (!def) return { success: false, error: '线路对应的运行组件不存在', errorCode: 'CORE_NOT_FOUND' }
 
+    this.stopHealthMonitor()
     this.intentionalStop = true
     try {
       this.setState(route.id, 'preparing', '正在准备线路', null, null)
@@ -235,6 +248,7 @@ export class PublicRouteService extends EventEmitter {
 
       this.recordSuccess(route.id)
       this.setState(route.id, 'connected', '连接已建立', null, null)
+      this.startHealthMonitor(route.id)
       return { success: true, routeId: route.id, pid: started.pid }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
@@ -251,6 +265,7 @@ export class PublicRouteService extends EventEmitter {
 
   async disconnect(): Promise<PublicRouteResult> {
     const routeId = this.state.routeId || undefined
+    this.stopHealthMonitor()
     this.intentionalStop = true
     this.setState(routeId || null, 'disconnecting', '正在断开连接', null, null)
     clearSystemProxy()
@@ -263,6 +278,7 @@ export class PublicRouteService extends EventEmitter {
 
   async repairNetwork(): Promise<PublicRouteResult> {
     const routeId = this.state.routeId || undefined
+    this.stopHealthMonitor()
     this.intentionalStop = true
     this.setState(routeId || null, 'disconnecting', '正在恢复网络设置', null, null)
     await this.stopRunningCores()
@@ -459,6 +475,103 @@ export class PublicRouteService extends EventEmitter {
     return this.listRoutes().find((route) => route.id === routeId)
   }
 
+  private async chooseBestRoute(routes: PublicRoute[]): Promise<PublicRoute | undefined> {
+    const settings = getSettings()
+    const availableRoutes = routes.filter((route) => !this.excludedAutoRouteIds.has(route.id))
+    const fallback = availableRoutes.find((route) => route.id === settings.lastSuccessfulRouteId)
+      || availableRoutes.find((route) => route.id === settings.selectedPublicRouteId)
+      || availableRoutes[0]
+
+    const downloaded = availableRoutes.filter((route) => route.downloaded)
+    const orderedCandidates = this.uniqueRoutes([
+      ...downloaded.filter((route) => route.id === settings.selectedPublicRouteId),
+      ...downloaded.filter((route) => route.id === settings.lastSuccessfulRouteId),
+      ...downloaded.filter((route) => route.lastSuccessAt),
+      ...downloaded,
+    ])
+    const quickLimit = Math.max(1, Math.min(50, Math.floor(settings.publicRouteAutoSelectLimit || 8)))
+    const candidates = settings.publicRouteAutoSelectMode === 'full'
+      ? orderedCandidates
+      : this.pickQuickCandidates(downloaded, settings.selectedPublicRouteId, settings.lastSuccessfulRouteId, quickLimit)
+
+    if (candidates.length === 0) return fallback
+
+    this.setState(null, 'preparing', '正在自动选择公共线路', null, null)
+    clearSystemProxy()
+    await this.stopRunningCores()
+
+    const results: AutoRouteCandidateResult[] = []
+    for (const candidate of candidates) {
+      const result = await this.testRouteCandidate(candidate)
+      if (result) results.push(result)
+    }
+
+    await this.stopRunningCores()
+
+    const best = results.sort((a, b) => a.latency - b.latency)[0]
+    return best?.route || fallback
+  }
+
+  private uniqueRoutes(routes: PublicRoute[]): PublicRoute[] {
+    const seen = new Set<string>()
+    return routes.filter((route) => {
+      if (seen.has(route.id)) return false
+      seen.add(route.id)
+      return true
+    })
+  }
+
+  private pickQuickCandidates(
+    downloaded: PublicRoute[],
+    selectedRouteId: string | null,
+    lastSuccessfulRouteId: string | null,
+    limit: number,
+  ): PublicRoute[] {
+    const pinned = this.uniqueRoutes([
+      ...downloaded.filter((route) => route.id === selectedRouteId),
+      ...downloaded.filter((route) => route.id === lastSuccessfulRouteId),
+      ...downloaded.filter((route) => route.lastSuccessAt),
+    ]).slice(0, Math.max(1, Math.min(limit, 3)))
+
+    const pinnedIds = new Set(pinned.map((route) => route.id))
+    const pool = downloaded.filter((route) => !pinnedIds.has(route.id))
+    if (pool.length === 0) return pinned.slice(0, limit)
+
+    const remaining = Math.max(0, limit - pinned.length)
+    const start = this.autoSelectCursor % pool.length
+    const rotated = [...pool.slice(start), ...pool.slice(0, start)].slice(0, remaining)
+    this.autoSelectCursor += Math.max(1, remaining)
+
+    return this.uniqueRoutes([...pinned, ...rotated]).slice(0, limit)
+  }
+
+  private async testRouteCandidate(route: PublicRoute): Promise<AutoRouteCandidateResult | null> {
+    const def = PROXY_DEFINITIONS.find((item) => item.id === route.coreId)
+    if (!def) return null
+
+    try {
+      this.setState(route.id, 'preparing', `正在测试 ${route.name}`, null, null)
+      this.validateRouteConfig(route, def)
+
+      const switched = switchSlot(this.baseDir, def.dir, def.configFile, route.slot)
+      if (!switched.success) return null
+      this.validateActiveConfig(def.id)
+
+      const started = await this.proxyManager.start(def.id)
+      if (!started.success) return null
+
+      const ready = await waitForPort(def.port, 6_500)
+      if (!ready) return null
+
+      const test = await testRealLatencyDetailed(def.port, def.protocol, 3_500)
+      return test.success ? { route, latency: test.latency } : null
+    } catch {
+      return null
+    } finally {
+      await this.proxyManager.stop(route.coreId).catch(() => undefined)
+    }
+  }
+
   private validateActiveConfig(coreId: string): void {
     const def = PROXY_DEFINITIONS.find((item) => item.id === coreId)
     if (!def) throw new PublicRouteError('CORE_NOT_FOUND', '线路运行组件不存在')
@@ -506,6 +619,84 @@ export class PublicRouteService extends EventEmitter {
     this.state = { routeId, state, stage, error, errorCode }
     this.emit('state-changed', this.getState())
     this.emit('routes-changed', this.listRoutes())
+  }
+
+  private startHealthMonitor(routeId: string): void {
+    this.stopHealthMonitor()
+    const settings = getSettings()
+    if (!settings.publicRouteAutoSwitch) return
+
+    const intervalMs = Math.max(10, Math.min(300, settings.publicRouteHealthCheckInterval || 30)) * 1000
+    this.healthCheckFailures = 0
+    this.healthCheckTimer = setInterval(() => {
+      void this.checkConnectedRouteHealth(routeId)
+    }, intervalMs)
+  }
+
+  private stopHealthMonitor(): void {
+    if (this.healthCheckTimer) clearInterval(this.healthCheckTimer)
+    this.healthCheckTimer = null
+    this.healthCheckFailures = 0
+  }
+
+  private async checkConnectedRouteHealth(routeId: string): Promise<void> {
+    if (this.autoSwitching || this.intentionalStop) return
+    if (this.state.state !== 'connected' || this.state.routeId !== routeId) return
+
+    const settings = getSettings()
+    if (!settings.publicRouteAutoSwitch) {
+      this.stopHealthMonitor()
+      return
+    }
+
+    const route = this.findRoute(routeId)
+    const def = route ? PROXY_DEFINITIONS.find((item) => item.id === route.coreId) : undefined
+    if (!route || !def) return
+
+    const test = await testRealLatencyDetailed(def.port, def.protocol, 5_000)
+    if (test.success) {
+      this.healthCheckFailures = 0
+      return
+    }
+
+    this.healthCheckFailures += 1
+    const threshold = Math.max(1, Math.min(10, settings.publicRouteHealthCheckFailures || 3))
+    if (this.healthCheckFailures < threshold) return
+
+    await this.handleConnectedRouteLost(route, test.error || 'Proxy health check failed', 'UNKNOWN')
+  }
+
+  private async handleConnectedRouteLost(
+    route: PublicRoute,
+    reason: string,
+    errorCode: PublicRouteErrorCode,
+  ): Promise<void> {
+    if (this.autoSwitching || this.intentionalStop) return
+    this.stopHealthMonitor()
+    this.recordFailure(route.id, reason)
+
+    const settings = getSettings()
+    if (!settings.publicRouteAutoSwitch) {
+      setSettings({ systemProxy: false })
+      this.setState(route.id, 'failed', '连接已中断', reason, errorCode)
+      clearSystemProxy()
+      return
+    }
+
+    this.autoSwitching = true
+    this.excludedAutoRouteIds.add(route.id)
+    this.setState(route.id, 'connecting', '当前线路不可用，正在自动切换', null, null)
+
+    try {
+      const result = await this.connect()
+      if (!result.success) {
+        setSettings({ systemProxy: false })
+        this.setState(route.id, 'failed', '自动切换失败', result.error || reason, result.errorCode || errorCode)
+      }
+    } finally {
+      this.excludedAutoRouteIds.delete(route.id)
+      this.autoSwitching = false
+    }
   }
 
   private recordSuccess(routeId: string): void {

@@ -81,7 +81,7 @@ interface ClashProfileStore {
 const MIHOMO_CORE_ID = 'mihomo'
 const DEFAULT_SECRET = 'KiNGO'
 const DEFAULT_PROFILE_ID = 'default'
-const DELAY_TEST_URL = 'http://www.gstatic.com/generate_204'
+const DELAY_TEST_URL = 'http://cp.cloudflare.com/generate_204'
 
 export class MihomoService {
   private store = new Store<ClashProfileStore>({
@@ -381,9 +381,19 @@ export class MihomoService {
     const profile = getCoreProfile(MIHOMO_CORE_ID)
     if (profile && !this.proxyManager.getStatus(profile.runtimeProxyId)[0]?.running) return []
     const data = await this.request<{ proxies: Record<string, ClashProxy> }>('GET', '/proxies')
+    const configuredGroupOrder = this.getConfiguredGroupOrder()
+    const groupOrder = new Map(configuredGroupOrder.map((name, index) => [name, index]))
     return Object.values(data.proxies || {})
       .filter((proxy) => Array.isArray(proxy.all) && proxy.all.length > 0)
       .map((proxy) => ({ name: proxy.name, type: proxy.type, now: proxy.now || null, all: proxy.all || [] }))
+      .sort((a, b) => {
+        const ai = groupOrder.get(a.name)
+        const bi = groupOrder.get(b.name)
+        if (ai !== undefined && bi !== undefined) return ai - bi
+        if (ai !== undefined) return -1
+        if (bi !== undefined) return 1
+        return 0
+      })
   }
 
   async selectGroupProxy(groupName: string, proxyName: string): Promise<Result> {
@@ -477,6 +487,21 @@ export class MihomoService {
       return { success: true }
     } catch (error) {
       return { success: false, error: `mihomo 配置准备失败：${error instanceof Error ? error.message : String(error)}` }
+    }
+  }
+
+  private getConfiguredGroupOrder(): string[] {
+    const profile = getCoreProfile(MIHOMO_CORE_ID)
+    const configPath = profile ? join(this.baseDir, profile.dir, profile.configFile) : ''
+    try {
+      const config = (yaml.load(readFileSync(configPath, 'utf-8')) || {}) as Record<string, unknown>
+      const groups = config['proxy-groups']
+      if (!Array.isArray(groups)) return []
+      return groups
+        .map((group) => typeof group === 'object' && group !== null ? String((group as Record<string, unknown>).name || '') : '')
+        .filter(Boolean)
+    } catch {
+      return []
     }
   }
 

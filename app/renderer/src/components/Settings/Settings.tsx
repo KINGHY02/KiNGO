@@ -1,5 +1,5 @@
 ﻿import { useState, useEffect } from 'react'
-import { Card, Form, Switch, Input, Button, Typography, Divider, message, Select, Space, Row, Col } from 'antd'
+import { Card, Form, Switch, Input, InputNumber, Button, Typography, Divider, message, Select, Space, Row, Col } from 'antd'
 import { CloudDownloadOutlined, GithubOutlined, LinkOutlined, CopyrightCircleOutlined, WarningOutlined } from '@ant-design/icons'
 import { getSettings, setSettings, getAppVersion, checkForUpdates, getCompatibleCores } from '../../services/ipc-client'
 import CoreVersion from '../CoreVersion/CoreVersion'
@@ -15,6 +15,11 @@ const INITIAL_VALUES = {
   theme: 'light',
   autoCheckUpdates: true,
   updateMirror: '',
+  publicRouteAutoSelectMode: 'quick',
+  publicRouteAutoSelectLimit: 8,
+  publicRouteAutoSwitch: true,
+  publicRouteHealthCheckInterval: 30,
+  publicRouteHealthCheckFailures: 3,
   defaultCoreByProtocol: {}
 }
 
@@ -60,6 +65,18 @@ const CORE_LABELS: Record<string, string> = {
   juicity: 'Juicity',
   mieru: 'Mieru',
   shadowquic: 'ShadowQUIC'
+}
+
+function TelegramLogo(): JSX.Element {
+  return (
+    <svg width="16" height="16" viewBox="0 0 240 240" aria-hidden="true" style={{ marginRight: 6, verticalAlign: -3 }}>
+      <circle cx="120" cy="120" r="120" fill="#229ED9" />
+      <path
+        fill="#fff"
+        d="M51.9 117.1c35-15.2 58.3-25.2 70-30 33.3-13.8 40.2-16.2 44.7-16.3 1 0 3.2.2 4.7 1.4 1.2 1 1.5 2.4 1.7 3.4.2 1 .4 3.2.2 4.9-2 21.4-10.8 73.3-15.3 97.3-1.9 10.2-5.7 13.6-9.3 13.9-7.9.7-13.9-5.2-21.5-10.2-12-7.8-18.7-12.7-30.3-20.3-13.4-8.8-4.7-13.7 2.9-21.6 2-2.1 36.7-33.6 37.4-36.5.1-.4.2-1.7-.6-2.4-.8-.7-2-.5-2.8-.3-1.2.3-20.3 12.9-57.2 37.9-5.4 3.7-10.3 5.5-14.7 5.4-4.8-.1-14.1-2.7-21-4.9-8.5-2.8-15.2-4.2-14.6-8.9.3-2.4 3.9-4.9 10.9-7.8Z"
+      />
+    </svg>
+  )
 }
 
 export default function Settings(): JSX.Element {
@@ -143,7 +160,7 @@ export default function Settings(): JSX.Element {
         }
       }}
     >
-      <div style={{ maxWidth: 600 }}>
+      <div style={{ width: '100%', maxWidth: '100%' }}>
         <Card title="基本设置">
           <Form.Item
             label="连接时自动设置系统代理"
@@ -197,6 +214,74 @@ export default function Settings(): JSX.Element {
               ]}
               style={{ width: 120 }}
             />
+          </Form.Item>
+
+          <Form.Item
+            label="公共线路自动选择"
+            name="publicRouteAutoSelectMode"
+            extra="快速模式按下方数量测试已下载线路；完整模式会测试全部已下载线路，选择更准但等待更久。"
+          >
+            <Select
+              options={[
+                { label: '快速模式', value: 'quick' },
+                { label: '完整模式', value: 'full' }
+              ]}
+              style={{ width: 180 }}
+            />
+          </Form.Item>
+
+          <Form.Item
+            noStyle
+            shouldUpdate={(prev, next) => prev.publicRouteAutoSelectMode !== next.publicRouteAutoSelectMode}
+          >
+            {({ getFieldValue }) => getFieldValue('publicRouteAutoSelectMode') === 'quick' ? (
+              <Form.Item
+                label="快速模式测速数量"
+                name="publicRouteAutoSelectLimit"
+                extra="数量越大，选择越准，但一键连接等待时间越长。建议 8–12。"
+              >
+                <InputNumber min={1} max={50} precision={0} style={{ width: 180 }} addonAfter="条线路" />
+              </Form.Item>
+            ) : null}
+          </Form.Item>
+
+          <Divider />
+
+          <Form.Item
+            label="公共线路断线自动切换"
+            name="publicRouteAutoSwitch"
+            valuePropName="checked"
+            extra="连接成功后会定时检测当前公共线路，连续失败后自动切换到其他可用线路。"
+          >
+            <Switch />
+          </Form.Item>
+
+          <Form.Item
+            noStyle
+            shouldUpdate={(prev, next) => prev.publicRouteAutoSwitch !== next.publicRouteAutoSwitch}
+          >
+            {({ getFieldValue }) => getFieldValue('publicRouteAutoSwitch') ? (
+              <Row gutter={12}>
+                <Col span={12}>
+                  <Form.Item
+                    label="健康检查间隔"
+                    name="publicRouteHealthCheckInterval"
+                    extra="建议 30 秒。太短可能增加切换误判。"
+                  >
+                    <InputNumber min={10} max={300} precision={0} style={{ width: '100%' }} addonAfter="秒" />
+                  </Form.Item>
+                </Col>
+                <Col span={12}>
+                  <Form.Item
+                    label="连续失败后切换"
+                    name="publicRouteHealthCheckFailures"
+                    extra="建议 3 次。"
+                  >
+                    <InputNumber min={1} max={10} precision={0} style={{ width: '100%' }} addonAfter="次" />
+                  </Form.Item>
+                </Col>
+              </Row>
+            ) : null}
           </Form.Item>
 
         </Card>
@@ -297,6 +382,10 @@ export default function Settings(): JSX.Element {
             <Link href="https://github.com/KINGHY02/KiNGO/releases/latest" target="_blank">
               <LinkOutlined style={{ marginRight: 6 }} />
               更新日志 (Releases)
+            </Link>
+            <Link href="https://t.me/kingovpn" target="_blank">
+              <TelegramLogo />
+              Telegram 用户群
             </Link>
           </Space>
         </div>
