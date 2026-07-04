@@ -40,6 +40,17 @@ export interface ClashConnection {
   start?: string
 }
 
+export interface ClashTrafficOverview {
+  up: number
+  down: number
+  uploadTotal: number
+  downloadTotal: number
+  activeConnections: number
+  timestamp: number
+  available: boolean
+  error?: string
+}
+
 export type ClashMode = 'rule' | 'global' | 'direct'
 
 export interface ClashRuntimeConfig {
@@ -84,6 +95,8 @@ const DEFAULT_PROFILE_ID = 'default'
 const DELAY_TEST_URL = 'http://cp.cloudflare.com/generate_204'
 
 export class MihomoService {
+  private lastTrafficSample: { uploadTotal: number; downloadTotal: number; timestamp: number } | null = null
+
   private store = new Store<ClashProfileStore>({
     name: 'clash-profiles',
     defaults: { activeProfileId: DEFAULT_PROFILE_ID, profiles: [], tunEnabled: false },
@@ -127,13 +140,15 @@ export class MihomoService {
       message: profile.supportsTun ? `${profile.name} 标记为支持 TUN` : `${profile.name} 不支持 TUN`,
     })
 
-    const executablePath = join(this.baseDir, profile.dir, profile.executable)
+    const runtime = this.proxyManager.getRuntimePath(profile.runtimeProxyId)
+    const executablePath = runtime?.executablePath || join(this.baseDir, profile.dir, profile.executable)
+    const coreReady = !!runtime && runtime.source !== 'missing' && existsSync(executablePath)
     checks.push({
       key: 'executable',
       label: '核心文件',
-      status: existsSync(executablePath) ? 'pass' : 'fail',
-      message: existsSync(executablePath) ? 'mihomo 可执行文件存在' : 'mihomo 可执行文件缺失',
-      detail: executablePath,
+      status: coreReady ? 'pass' : 'fail',
+      message: coreReady ? 'mihomo 可执行文件已就绪' : 'mihomo 可执行文件缺失',
+      detail: runtime ? `${executablePath} (${runtime.source})` : executablePath,
     })
 
     const configPath = join(this.baseDir, profile.dir, profile.configFile)
@@ -435,6 +450,63 @@ export class MihomoService {
   async getConnections(): Promise<ClashConnection[]> {
     const data = await this.request<{ connections?: ClashConnection[] }>('GET', '/connections')
     return data.connections || []
+  }
+
+  async closeConnection(id: string): Promise<Result> {
+    if (!id) return { success: false, error: '连接 ID 为空' }
+    try {
+      await this.request('DELETE', `/connections/${encodeURIComponent(id)}`, undefined, { timeout: 2500 })
+      return { success: true }
+    } catch (error) {
+      return { success: false, error: error instanceof Error ? error.message : String(error) }
+    }
+  }
+
+  async closeAllConnections(): Promise<Result> {
+    try {
+      await this.request('DELETE', '/connections', undefined, { timeout: 2500 })
+      return { success: true }
+    } catch (error) {
+      return { success: false, error: error instanceof Error ? error.message : String(error) }
+    }
+  }
+
+  async getTrafficOverview(): Promise<ClashTrafficOverview> {
+    try {
+      const data = await this.request<{
+        uploadTotal?: number
+        downloadTotal?: number
+        connections?: ClashConnection[]
+      }>('GET', '/connections', undefined, { timeout: 2500 })
+      const timestamp = Date.now()
+      const uploadTotal = Number(data.uploadTotal || 0)
+      const downloadTotal = Number(data.downloadTotal || 0)
+      const previous = this.lastTrafficSample
+      this.lastTrafficSample = { uploadTotal, downloadTotal, timestamp }
+      const seconds = previous ? Math.max(0.2, (timestamp - previous.timestamp) / 1000) : 1
+      const up = previous ? Math.max(0, Math.round((uploadTotal - previous.uploadTotal) / seconds)) : 0
+      const down = previous ? Math.max(0, Math.round((downloadTotal - previous.downloadTotal) / seconds)) : 0
+      return {
+        up,
+        down,
+        uploadTotal,
+        downloadTotal,
+        activeConnections: data.connections?.length || 0,
+        timestamp,
+        available: true,
+      }
+    } catch (error) {
+      return {
+        up: 0,
+        down: 0,
+        uploadTotal: this.lastTrafficSample?.uploadTotal || 0,
+        downloadTotal: this.lastTrafficSample?.downloadTotal || 0,
+        activeConnections: 0,
+        timestamp: Date.now(),
+        available: false,
+        error: error instanceof Error ? error.message : String(error),
+      }
+    }
   }
 
   private applyProfile(profileId: string): Result {

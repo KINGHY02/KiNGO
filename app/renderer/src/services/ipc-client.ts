@@ -23,6 +23,10 @@ export async function disconnectAllConnections(): Promise<{ success: boolean; er
   return api.disconnectAllConnections()
 }
 
+export async function getExitIpInfo(): Promise<ExitIpInfo> {
+  return api.getExitIpInfo()
+}
+
 export async function getConfig(proxyId: string): Promise<{ content: string; format: string; backupExists: boolean }> {
   return api.getConfig(proxyId)
 }
@@ -170,6 +174,26 @@ export async function checkCoreVersions(): Promise<CoreVersionInfo[]> {
   return api.checkCoreVersions()
 }
 
+export async function getCoreUpdateInfo(proxyId: string): Promise<{ success: boolean; proxyId: string; version?: string; assetName?: string; assetSize?: number; downloadUrl?: string; checksumAvailable?: boolean; checksumAssetName?: string; error?: string }> {
+  return api.getCoreUpdateInfo(proxyId)
+}
+
+export async function updateCore(proxyId: string): Promise<{ success: boolean; proxyId: string; version?: string; source?: string; executablePath?: string; checksumVerified?: boolean; checksumAssetName?: string; checksumError?: string; error?: string }> {
+  return api.updateCore(proxyId)
+}
+
+export async function restoreBundledCore(proxyId: string): Promise<{ success: boolean; proxyId: string; error?: string }> {
+  return api.restoreBundledCore(proxyId)
+}
+
+export async function openCoreDir(proxyId: string): Promise<{ success: boolean; error?: string }> {
+  return api.openCoreDir(proxyId)
+}
+
+export function onCoreUpdateProgress(callback: (progress: CoreUpdateProgress) => void): () => void {
+  return api.onCoreUpdateProgress(callback)
+}
+
 export async function listCoreProfiles(): Promise<CoreProfile[]> {
   return api.listCoreProfiles()
 }
@@ -240,6 +264,18 @@ export async function testClashProxyDelay(proxyName: string): Promise<{ success:
 
 export async function getClashConnections(): Promise<ClashConnection[]> {
   return api.getClashConnections()
+}
+
+export async function closeClashConnection(id: string): Promise<{ success: boolean; error?: string }> {
+  return api.closeClashConnection(id)
+}
+
+export async function closeAllClashConnections(): Promise<{ success: boolean; error?: string }> {
+  return api.closeAllClashConnections()
+}
+
+export async function getClashTrafficOverview(): Promise<ClashTrafficOverview> {
+  return api.getClashTrafficOverview()
 }
 
 // Node management (unified)

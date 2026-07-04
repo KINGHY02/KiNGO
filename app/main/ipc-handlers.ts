@@ -1,4 +1,6 @@
-import { ipcMain, BrowserWindow } from 'electron'
+import { ipcMain, BrowserWindow, shell } from 'electron'
+import { mkdirSync } from 'fs'
+import { join } from 'path'
 import { ProxyManager, PROXY_DEFINITIONS } from './proxy-manager'
 import { ConfigService } from './config-service'
 import { LogService } from './log-service'
@@ -8,7 +10,8 @@ import { launchChrome } from './chrome-launcher'
 import { getSystemProxyStatus, syncSystemProxy, clearSystemProxy } from './system-proxy'
 import { getAvailableSlots, updateConfig, getCurrentSlot, switchSlot } from './ip-updater'
 import { checkForUpdates, downloadUpdate, installUpdate, getAppVersion, setUpdateFeedURL } from './updater'
-import { checkAllVersions } from './core-version'
+import { checkAllVersions, clearCoreVersionCache } from './core-version'
+import { getCoreUpdateInfo, restoreBundledCore, updateCore } from './core-updater'
 import { parseNodeUrl, parseNodeUrls, StoredNode } from './protocol-parser'
 import { generateConfig, compatibleCores } from './config-generator'
 import { listNodes, addNode, addNodes, updateNode, deleteNodes, deleteSubscriptionNode, deleteSubscriptionNodes, updateNodeLatencies, findNodeById, getAllNodes, getActiveConnection, setActiveConnection, listSubscriptions, cloneNode, moveNodesToGroup, listNodeGroups, createNodeGroup, renameNodeGroup, deleteNodeGroup, moveNodeGroup } from './nodes-store'
@@ -19,12 +22,14 @@ import { MihomoService } from './mihomo-service'
 import { listCoreProfiles } from './core-profiles'
 import { getAppConnectionState } from './app-connection-state'
 import { disconnectAllConnections } from './app-connection-control'
+import { getExitIpInfo } from './exit-ip-service'
 
 export function registerIpcHandlers(
   proxyManager: ProxyManager,
   configService: ConfigService,
   logService: LogService,
   baseDir: string,
+  userCoreRoot: string,
   publicRouteService: PublicRouteService,
   mihomoService: MihomoService,
   notifyAppConnectionState: () => void = () => undefined,
@@ -86,6 +91,10 @@ export function registerIpcHandlers(
     publishSettings()
     notifyAppConnectionState()
     return result
+  })
+
+  ipcMain.handle('app:exit-ip-info', async () => {
+    return getExitIpInfo(proxyManager)
   })
 
   // Config
@@ -264,11 +273,40 @@ export function registerIpcHandlers(
 
   // Core version check
   ipcMain.handle('core:check-versions', async () => {
-    return checkAllVersions(baseDir)
+    return checkAllVersions(baseDir, userCoreRoot)
+  })
+
+  ipcMain.handle('core:update', async (event, proxyId: string) => {
+    const running = proxyManager.getStatus(proxyId)[0]?.running
+    if (running) return { success: false, proxyId, error: '请先断开该核心连接，再更新核心文件' }
+    const result = await updateCore(proxyId, userCoreRoot, (progress) => {
+      event.sender.send('core:update-progress', progress)
+    })
+    clearCoreVersionCache()
+    return result
+  })
+
+  ipcMain.handle('core:update-info', async (_e, proxyId: string) => {
+    return getCoreUpdateInfo(proxyId)
+  })
+
+  ipcMain.handle('core:restore-bundled', async (_e, proxyId: string) => {
+    const running = proxyManager.getStatus(proxyId)[0]?.running
+    if (running) return { success: false, proxyId, error: '请先断开该核心连接，再恢复内置核心' }
+    const result = restoreBundledCore(proxyId, userCoreRoot)
+    clearCoreVersionCache()
+    return result
+  })
+
+  ipcMain.handle('core:open-dir', async (_e, proxyId: string) => {
+    const dir = join(userCoreRoot, proxyId)
+    mkdirSync(dir, { recursive: true })
+    const error = await shell.openPath(dir)
+    return { success: !error, error: error || undefined }
   })
 
   ipcMain.handle('core:list-profiles', () => {
-    return listCoreProfiles(baseDir)
+    return listCoreProfiles(baseDir, userCoreRoot)
   })
 
   ipcMain.handle('clash:start-profile', async (_e, profileId: string) => {
@@ -352,8 +390,14 @@ export function registerIpcHandlers(
     return mihomoService.updateProfileOptions(profileId, options)
   })
 
-  ipcMain.handle('clash:delete-profile', (_e, profileId: string) => {
-    return mihomoService.deleteProfile(profileId)
+  ipcMain.handle('clash:delete-profile', async (_e, profileId: string) => {
+    const target = mihomoService.listProfiles().find((profile) => profile.id === profileId)
+    if (target?.active) {
+      await mihomoService.stop().catch(() => undefined)
+    }
+    const result = mihomoService.deleteProfile(profileId)
+    notifyAppConnectionState()
+    return result
   })
 
   ipcMain.handle('clash:select-proxy', async (_e, groupName: string, proxyName: string) => {
@@ -378,6 +422,18 @@ export function registerIpcHandlers(
     } catch {
       return []
     }
+  })
+
+  ipcMain.handle('clash:close-connection', async (_e, id: string) => {
+    return mihomoService.closeConnection(id)
+  })
+
+  ipcMain.handle('clash:close-all-connections', async () => {
+    return mihomoService.closeAllConnections()
+  })
+
+  ipcMain.handle('clash:traffic-overview', async () => {
+    return mihomoService.getTrafficOverview()
   })
 
   // ---- Node management (unified) ----

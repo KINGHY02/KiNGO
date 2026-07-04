@@ -32,6 +32,19 @@ interface AppConnectionState {
   error: string | null
 }
 
+interface ExitIpInfo {
+  available: boolean
+  ip: string | null
+  country: string | null
+  countryCode: string | null
+  region: string | null
+  city: string | null
+  isp: string | null
+  source: string | null
+  checkedAt: number
+  error?: string
+}
+
 interface AppSettings {
   systemProxy: boolean
   proxyMode: 'global' | 'rule'
@@ -129,7 +142,20 @@ interface CoreVersionInfo {
   currentVersion: string | null
   latestVersion: string | null
   isOutdated: boolean
+  source: 'user' | 'bundled' | 'missing'
+  executablePath: string
+  userExecutablePath: string
+  bundledExecutablePath: string
   error?: string
+}
+
+interface CoreUpdateProgress {
+  proxyId: string
+  stage: 'checking' | 'downloading' | 'verifying' | 'extracting' | 'installing' | 'completed' | 'failed'
+  percent: number
+  transferred?: number
+  total?: number
+  message: string
 }
 
 interface StoredNode {
@@ -178,6 +204,10 @@ interface CoreProfile {
   supportsExternalController: boolean
   runtimeProxyId: string
   installed: boolean
+  source: 'user' | 'bundled' | 'missing'
+  executablePath: string | null
+  userExecutablePath: string | null
+  bundledExecutablePath: string | null
 }
 
 interface ClashGroup {
@@ -209,6 +239,17 @@ interface ClashConnection {
   rule?: string
   rulePayload?: string
   start?: string
+}
+
+interface ClashTrafficOverview {
+  up: number
+  down: number
+  uploadTotal: number
+  downloadTotal: number
+  activeConnections: number
+  timestamp: number
+  available: boolean
+  error?: string
 }
 
 interface TunDiagnosticCheck {
@@ -260,6 +301,7 @@ interface ElectronAPI {
   getProxyStatus: () => Promise<ProxyStatus[]>
   getAppConnectionState: () => Promise<AppConnectionState>
   disconnectAllConnections: () => Promise<{ success: boolean; error?: string }>
+  getExitIpInfo: () => Promise<ExitIpInfo>
   getConfig: (proxyId: string) => Promise<{ content: string; format: string; backupExists: boolean }>
   saveConfig: (proxyId: string, content: string) => Promise<{ success: boolean; error?: string }>
   restoreBackup: (proxyId: string) => Promise<{ success: boolean }>
@@ -297,6 +339,10 @@ interface ElectronAPI {
   getAppVersion: () => Promise<string>
   setUpdateFeedURL: (url: string) => Promise<void>
   checkCoreVersions: () => Promise<CoreVersionInfo[]>
+  getCoreUpdateInfo: (proxyId: string) => Promise<{ success: boolean; proxyId: string; version?: string; assetName?: string; assetSize?: number; downloadUrl?: string; checksumAvailable?: boolean; checksumAssetName?: string; error?: string }>
+  updateCore: (proxyId: string) => Promise<{ success: boolean; proxyId: string; version?: string; source?: string; executablePath?: string; checksumVerified?: boolean; checksumAssetName?: string; checksumError?: string; error?: string }>
+  restoreBundledCore: (proxyId: string) => Promise<{ success: boolean; proxyId: string; error?: string }>
+  openCoreDir: (proxyId: string) => Promise<{ success: boolean; error?: string }>
   listCoreProfiles: () => Promise<CoreProfile[]>
   startClashProfile: (profileId: string) => Promise<{ success: boolean; pid?: number; error?: string }>
   stopClash: () => Promise<{ success: boolean; error?: string }>
@@ -315,6 +361,9 @@ interface ElectronAPI {
   selectClashGroupProxy: (groupName: string, proxyName: string) => Promise<{ success: boolean; error?: string }>
   testClashProxyDelay: (proxyName: string) => Promise<{ success: boolean; delay: number; error?: string }>
   getClashConnections: () => Promise<ClashConnection[]>
+  closeClashConnection: (id: string) => Promise<{ success: boolean; error?: string }>
+  closeAllClashConnections: () => Promise<{ success: boolean; error?: string }>
+  getClashTrafficOverview: () => Promise<ClashTrafficOverview>
   importNodeUrl: (url: string) => Promise<StoredNode | null>
   importNodeBatch: (urls: string[]) => Promise<StoredNode[]>
   listAllNodes: () => Promise<Array<{ node: StoredNode; groupId: string; groupName: string }>>
@@ -364,6 +413,7 @@ interface ElectronAPI {
   onAppConnectionStateChanged: (callback: (state: AppConnectionState) => void) => () => void
   onLog: (callback: (entry: LogEntry) => void) => () => void
   onProxyUpdateProgress: (callback: (progress: { proxyId: string; slot: number; percent: number }) => void) => () => void
+  onCoreUpdateProgress: (callback: (progress: CoreUpdateProgress) => void) => () => void
   onPublicRouteStateChanged: (callback: (state: PublicConnectionState) => void) => () => void
   onPublicRoutesChanged: (callback: (routes: PublicRoute[]) => void) => () => void
   onSubscriptionAutoUpdated: (callback: (result: {

@@ -1,5 +1,7 @@
 import { existsSync } from 'fs'
 import { join } from 'path'
+import { resolveCoreRuntime, CoreRuntimeSource } from './core-runtime'
+import { PROXY_DEFINITIONS } from './proxy-manager'
 
 export type CoreFamily = 'mihomo' | 'xray' | 'sing-box' | 'legacy'
 
@@ -80,10 +82,39 @@ export const CORE_PROFILES: CoreProfile[] = [
   },
 ]
 
-export function listCoreProfiles(baseDir: string): Array<CoreProfile & { installed: boolean }> {
+export function listCoreProfiles(baseDir: string, userCoreRoot: string): Array<CoreProfile & { installed: boolean; source: CoreRuntimeSource; executablePath: string | null; userExecutablePath: string | null; bundledExecutablePath: string | null }> {
   return CORE_PROFILES.map((profile) => ({
     ...profile,
-    installed: profile.executable ? existsSync(join(baseDir, profile.dir, profile.executable)) : true,
+    ...(() => {
+      if (!profile.executable) {
+        return {
+          installed: true,
+          source: 'bundled' as CoreRuntimeSource,
+          executablePath: null,
+          userExecutablePath: null,
+          bundledExecutablePath: null,
+        }
+      }
+      const runtimeDef = PROXY_DEFINITIONS.find((def) => def.id === profile.runtimeProxyId)
+      if (!runtimeDef) {
+        const bundledExecutablePath = join(baseDir, profile.dir, profile.executable)
+        return {
+          installed: existsSync(bundledExecutablePath),
+          source: existsSync(bundledExecutablePath) ? 'bundled' as CoreRuntimeSource : 'missing' as CoreRuntimeSource,
+          executablePath: bundledExecutablePath,
+          userExecutablePath: null,
+          bundledExecutablePath,
+        }
+      }
+      const runtime = resolveCoreRuntime(baseDir, userCoreRoot, runtimeDef)
+      return {
+        installed: runtime.source !== 'missing',
+        source: runtime.source,
+        executablePath: runtime.executablePath,
+        userExecutablePath: runtime.userExecutablePath,
+        bundledExecutablePath: runtime.bundledExecutablePath,
+      }
+    })(),
   }))
 }
 

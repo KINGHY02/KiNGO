@@ -15,6 +15,7 @@ import { SubscriptionScheduler } from './subscription-scheduler'
 import { MihomoService } from './mihomo-service'
 import { ClashProfileScheduler } from './clash-profile-scheduler'
 import { getAppConnectionState } from './app-connection-state'
+import { ensureUserCoreRoot, getUserCoreRoot } from './core-runtime'
 
 
 // Catch unhandled errors so the user sees something instead of silent crash
@@ -38,6 +39,7 @@ let subscriptionScheduler: SubscriptionScheduler
 let mihomoService: MihomoService
 let clashProfileScheduler: ClashProfileScheduler
 let BASE_DIR: string
+let USER_CORE_ROOT: string
 let forceQuitting = false
 let shutdownComplete = false
 const coreRunningState = new Map<string, boolean>()
@@ -186,9 +188,11 @@ app.whenReady().then(() => {
     BASE_DIR = app.isPackaged
       ? process.resourcesPath
       : join(__dirname, '..', '..', '..')
+    USER_CORE_ROOT = getUserCoreRoot(app.getPath('userData'))
+    ensureUserCoreRoot(USER_CORE_ROOT)
 
     logService = new LogService(10000)
-    proxyManager = new ProxyManager(BASE_DIR)
+    proxyManager = new ProxyManager(BASE_DIR, USER_CORE_ROOT)
     configService = new ConfigService(BASE_DIR)
     publicRouteService = new PublicRouteService(BASE_DIR, proxyManager, configService)
     mihomoService = new MihomoService(BASE_DIR, proxyManager)
@@ -206,6 +210,7 @@ app.whenReady().then(() => {
       configService,
       logService,
       BASE_DIR,
+      USER_CORE_ROOT,
       publicRouteService,
       mihomoService,
       () => {

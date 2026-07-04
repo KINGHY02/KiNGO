@@ -4,6 +4,7 @@ import { writeFileSync, copyFileSync, existsSync, unlinkSync } from 'fs'
 import { EventEmitter } from 'events'
 import * as net from 'net'
 import { testRealLatency } from './latency-tester'
+import { resolveCoreRuntime, CoreRuntimePath } from './core-runtime'
 
 export interface ProxyDefinition {
   id: string
@@ -90,12 +91,14 @@ export class ProxyManager extends EventEmitter {
   private statuses = new Map<string, ProxyStatus>()
   private latencyTimers = new Map<string, ReturnType<typeof setInterval>>()
   private baseDir: string
+  private userCoreRoot: string
   private customConfigBackups = new Map<string, string>()
   private customConfigRunning = new Set<string>()
 
-  constructor(baseDir: string) {
+  constructor(baseDir: string, userCoreRoot: string) {
     super()
     this.baseDir = baseDir
+    this.userCoreRoot = userCoreRoot
     for (const def of PROXY_DEFINITIONS) {
       this.statuses.set(def.id, {
         id: def.id,
@@ -116,6 +119,12 @@ export class ProxyManager extends EventEmitter {
 
   getAllDefs(): ProxyDefinition[] {
     return PROXY_DEFINITIONS
+  }
+
+  getRuntimePath(proxyId: string): CoreRuntimePath | null {
+    const def = this.getDef(proxyId)
+    if (!def) return null
+    return resolveCoreRuntime(this.baseDir, this.userCoreRoot, def)
   }
 
   getStatus(proxyId?: string): ProxyStatus[] {
@@ -155,15 +164,16 @@ export class ProxyManager extends EventEmitter {
       }
     }
 
-    const proxyDir = join(this.baseDir, def.dir)
-    const exePath = join(proxyDir, def.executable)
-    const configPath = join(proxyDir, def.configFile)
+    const runtime = resolveCoreRuntime(this.baseDir, this.userCoreRoot, def)
+    const proxyDir = runtime.executableDir
+    const exePath = runtime.executablePath
+    const configPath = runtime.configPath
 
     if (!this.customConfigRunning.has(proxyId)) {
       this.recoverConfigIfNeeded(proxyId)
     }
-    if (!existsSync(exePath)) {
-      return { success: false, error: `Executable not found: ${exePath}` }
+    if (runtime.source === 'missing' || !existsSync(exePath)) {
+      return { success: false, error: `Executable not found. User path: ${runtime.userExecutablePath}; bundled path: ${runtime.bundledExecutablePath}` }
     }
     if (!existsSync(configPath)) {
       return { success: false, error: `Config file not found: ${configPath}` }
@@ -216,7 +226,7 @@ export class ProxyManager extends EventEmitter {
         this.processes.delete(proxyId)
       })
 
-      this.emit('log', proxyId, `启动成功，PID: ${proc.pid}`, 'info')
+      this.emit('log', proxyId, `启动成功，PID: ${proc.pid}，核心来源: ${runtime.source === 'user' ? 'user' : 'bundled'}`, 'info')
 
       // Auto-test real latency 2s after proxy starts
       setTimeout(() => this.runLatencyTest(proxyId), 2000)
@@ -265,8 +275,13 @@ export class ProxyManager extends EventEmitter {
 
     // Mieru special: apply config first
     if (proxyId === 'mieru') {
-      const proxyDir = join(this.baseDir, def.dir)
-      const exePath = join(proxyDir, def.executable)
+      const runtime = resolveCoreRuntime(this.baseDir, this.userCoreRoot, def)
+      const proxyDir = runtime.executableDir
+      const exePath = runtime.executablePath
+      if (runtime.source === 'missing') {
+        this.restoreConfig(proxyId)
+        return { success: false, error: `Executable not found. User path: ${runtime.userExecutablePath}; bundled path: ${runtime.bundledExecutablePath}` }
+      }
       try {
         await this.spawnAndWait(exePath, ['apply', 'config', configPath], proxyDir)
       } catch (err) {

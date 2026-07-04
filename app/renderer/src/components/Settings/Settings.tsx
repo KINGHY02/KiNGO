@@ -161,7 +161,7 @@ export default function Settings(): JSX.Element {
       }}
     >
       <div style={{ width: '100%', maxWidth: '100%' }}>
-        <Card title="基本设置">
+        <Card title="常规与界面">
           <Form.Item
             label="连接时自动设置系统代理"
             name="systemProxy"
@@ -215,7 +215,9 @@ export default function Settings(): JSX.Element {
               style={{ width: 120 }}
             />
           </Form.Item>
+        </Card>
 
+        <Card title="公共线路" style={{ marginTop: 16 }}>
           <Form.Item
             label="公共线路自动选择"
             name="publicRouteAutoSelectMode"

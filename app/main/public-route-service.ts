@@ -80,6 +80,7 @@ export type PublicRouteErrorCode =
   | 'PORT_NOT_READY'
   | 'SYSTEM_PROXY_FAILED'
   | 'CORE_EXITED'
+  | 'CANCELLED'
   | 'UNKNOWN'
 
 interface RouteMeta {
@@ -123,6 +124,7 @@ export class PublicRouteService extends EventEmitter {
   private healthCheckFailures = 0
   private autoSwitching = false
   private excludedAutoRouteIds = new Set<string>()
+  private connectRunId = 0
   private metaStore = new Store<RouteMetaData>({
     name: 'public-routes',
     defaults: { routes: [] },
@@ -195,10 +197,11 @@ export class PublicRouteService extends EventEmitter {
   }
 
   async connect(routeId?: string): Promise<PublicRouteResult> {
+    const runId = ++this.connectRunId
     const routes = this.listRoutes()
     let route = routeId
       ? routes.find((item) => item.id === routeId)
-      : await this.chooseBestRoute(routes)
+      : await this.chooseBestRoute(routes, runId)
     if (!route) return { success: false, error: '没有可用的公共线路', errorCode: 'NO_ROUTES' }
     const def = PROXY_DEFINITIONS.find((item) => item.id === route.coreId)
     if (!def) return { success: false, error: '线路对应的运行组件不存在', errorCode: 'CORE_NOT_FOUND' }
@@ -209,16 +212,19 @@ export class PublicRouteService extends EventEmitter {
       this.setState(route.id, 'preparing', '正在准备线路', null, null)
       clearSystemProxy()
       await this.stopRunningCores()
+      this.ensureConnectActive(runId)
 
       if (!route.downloaded) {
         this.setState(route.id, 'preparing', '正在下载线路配置', null, null)
         const updated = await updateConfig(this.baseDir, def.dir, def.configFile, route.slot)
+        this.ensureConnectActive(runId)
         if (!updated.success) throw new PublicRouteError('DOWNLOAD_FAILED', `线路配置下载失败：${updated.error || '未知错误'}`)
       }
 
       const switched = switchSlot(this.baseDir, def.dir, def.configFile, route.slot)
       if (!switched.success) throw new PublicRouteError('CONFIG_SWITCH_FAILED', `线路配置切换失败：${switched.error || '未知错误'}`)
       this.validateActiveConfig(def.id)
+      this.ensureConnectActive(runId)
 
       this.setState(route.id, 'connecting', '正在建立连接', null, null)
       const started = await this.proxyManager.start(def.id)
@@ -227,11 +233,15 @@ export class PublicRouteService extends EventEmitter {
         throw new PublicRouteError(code, `线路运行组件未能启动：${started.error || '未知错误'}`)
       }
 
+      this.ensureConnectActive(runId)
+
       const ready = await waitForPort(def.port, 8_000)
       if (!ready) {
         await this.proxyManager.stop(def.id).catch(() => undefined)
         throw new PublicRouteError('PORT_NOT_READY', '线路运行组件已启动，但本地连接端口未就绪')
       }
+
+      this.ensureConnectActive(runId)
 
       setSettings({
         systemProxy: true,
@@ -243,6 +253,8 @@ export class PublicRouteService extends EventEmitter {
         await this.proxyManager.stop(def.id).catch(() => undefined)
         throw new PublicRouteError('SYSTEM_PROXY_FAILED', proxyResult.error || 'Windows 系统代理设置失败')
       }
+      this.ensureConnectActive(runId)
+
       const proxyStatus = this.proxyManager.getStatus(def.id)[0]
       if (!proxyStatus?.running) throw new PublicRouteError('CORE_EXITED', '线路在系统代理设置完成前意外停止')
 
@@ -254,7 +266,12 @@ export class PublicRouteService extends EventEmitter {
       const message = error instanceof Error ? error.message : String(error)
       const errorCode = error instanceof PublicRouteError ? error.code : 'UNKNOWN'
       clearSystemProxy()
+      await this.stopRunningCores().catch(() => undefined)
       setSettings({ systemProxy: false })
+      if (errorCode === 'CANCELLED') {
+        this.setState(null, 'idle', '等待连接', null, null)
+        return { success: false, routeId: route.id, error: message, errorCode }
+      }
       this.recordFailure(route.id, message)
       this.setState(route.id, 'failed', '连接失败', message, errorCode)
       return { success: false, routeId: route.id, error: message, errorCode }
@@ -264,6 +281,7 @@ export class PublicRouteService extends EventEmitter {
   }
 
   async disconnect(): Promise<PublicRouteResult> {
+    this.connectRunId += 1
     const routeId = this.state.routeId || undefined
     this.stopHealthMonitor()
     this.intentionalStop = true
@@ -373,13 +391,15 @@ export class PublicRouteService extends EventEmitter {
       return this.buildDiagnosticReport(route, checks, null)
     }
 
-    const executablePath = join(this.baseDir, def.dir, def.executable)
+    const runtime = this.proxyManager.getRuntimePath(def.id)
+    const executablePath = runtime?.executablePath || join(this.baseDir, def.dir, def.executable)
+    const coreReady = !!runtime && runtime.source !== 'missing' && existsSync(executablePath)
     add({
       key: 'core',
       label: '运行组件',
-      status: existsSync(executablePath) ? 'pass' : 'fail',
-      message: existsSync(executablePath) ? `${def.name} 已就绪` : `${def.name} 程序文件缺失`,
-      detail: executablePath
+      status: coreReady ? 'pass' : 'fail',
+      message: coreReady ? `${def.name} 已就绪` : `${def.name} 程序文件缺失`,
+      detail: runtime ? `${executablePath} (${runtime.source})` : executablePath
     })
 
     add({
@@ -475,7 +495,7 @@ export class PublicRouteService extends EventEmitter {
     return this.listRoutes().find((route) => route.id === routeId)
   }
 
-  private async chooseBestRoute(routes: PublicRoute[]): Promise<PublicRoute | undefined> {
+  private async chooseBestRoute(routes: PublicRoute[], runId?: number): Promise<PublicRoute | undefined> {
     const settings = getSettings()
     const availableRoutes = routes.filter((route) => !this.excludedAutoRouteIds.has(route.id))
     const fallback = availableRoutes.find((route) => route.id === settings.lastSuccessfulRouteId)
@@ -499,14 +519,17 @@ export class PublicRouteService extends EventEmitter {
     this.setState(null, 'preparing', '正在自动选择公共线路', null, null)
     clearSystemProxy()
     await this.stopRunningCores()
+    if (runId !== undefined) this.ensureConnectActive(runId)
 
     const results: AutoRouteCandidateResult[] = []
     for (const candidate of candidates) {
+      if (runId !== undefined) this.ensureConnectActive(runId)
       const result = await this.testRouteCandidate(candidate)
       if (result) results.push(result)
     }
 
     await this.stopRunningCores()
+    if (runId !== undefined) this.ensureConnectActive(runId)
 
     const best = results.sort((a, b) => a.latency - b.latency)[0]
     return best?.route || fallback
@@ -569,6 +592,12 @@ export class PublicRouteService extends EventEmitter {
       return null
     } finally {
       await this.proxyManager.stop(route.coreId).catch(() => undefined)
+    }
+  }
+
+  private ensureConnectActive(runId: number): void {
+    if (runId !== this.connectRunId) {
+      throw new PublicRouteError('CANCELLED', '连接已取消')
     }
   }
 

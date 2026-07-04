@@ -1,6 +1,6 @@
 {
   "name": "kingo",
-  "version": "1.0.6",
+  "version": "1.0.7",
   "description": "KiNGO - 网络代理管理桌面客户端",
   "main": "./out/main/index.js",
   "author": "KiNGO",
@@ -22,7 +22,9 @@
     "monaco-editor": "^0.55.1",
     "react": "^18.3.0",
     "react-dom": "^18.3.0",
-    "react-router-dom": "^6.28.0"
+    "react-router-dom": "^6.28.0",
+    "extract-zip": "^2.0.1",
+    "tar": "^6.2.1"
   },
   "devDependencies": {
     "@electron-toolkit/preload": "^3.0.0",

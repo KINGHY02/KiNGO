@@ -1,7 +1,9 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import { Alert, Button, Card, Col, Drawer, Empty, Form, Input, InputNumber, Modal, Popconfirm, Radio, Row, Select, Space, Switch, Table, Tabs, Tag, Typography, message } from 'antd'
+import { Alert, Button, Card, Col, Drawer, Empty, Form, Input, InputNumber, Modal, Radio, Row, Select, Space, Switch, Table, Tabs, Tag, Typography, message } from 'antd'
 import { ApiOutlined, CloudSyncOutlined, DeleteOutlined, DisconnectOutlined, FieldTimeOutlined, FileAddOutlined, LinkOutlined, PlayCircleOutlined } from '@ant-design/icons'
 import {
+  closeAllClashConnections,
+  closeClashConnection,
   deleteClashProfile,
   disconnectAllConnections,
   diagnoseClashTun,
@@ -32,6 +34,34 @@ function delayTagColor(delay: number): string {
   if (delay < 300) return 'green'
   if (delay < 800) return 'orange'
   return 'red'
+}
+
+function formatBytes(bytes?: number): string {
+  const value = Number(bytes || 0)
+  if (!Number.isFinite(value) || value <= 0) return '0 B'
+  const units = ['B', 'KB', 'MB', 'GB', 'TB']
+  let next = value
+  let index = 0
+  while (next >= 1024 && index < units.length - 1) {
+    next /= 1024
+    index += 1
+  }
+  return `${next >= 10 || index === 0 ? next.toFixed(0) : next.toFixed(1)} ${units[index]}`
+}
+
+function metadataText(connection: ClashConnection, key: string): string {
+  const value = connection.metadata?.[key]
+  return typeof value === 'string' || typeof value === 'number' ? String(value) : ''
+}
+
+function connectionTarget(connection: ClashConnection): string {
+  const host = metadataText(connection, 'host') || metadataText(connection, 'destinationIP') || metadataText(connection, 'remoteDestination') || '-'
+  const port = metadataText(connection, 'destinationPort') || metadataText(connection, 'remoteDestinationPort')
+  return port ? `${host}:${port}` : host
+}
+
+function connectionProcess(connection: ClashConnection): string {
+  return metadataText(connection, 'process') || metadataText(connection, 'processPath') || metadataText(connection, 'specialProxy') || '-'
 }
 
 const RULE_TEMPLATES = [
@@ -147,6 +177,9 @@ export default function ClashMode(): JSX.Element {
   const [selectedProfileId, setSelectedProfileId] = useState('default')
   const [groups, setGroups] = useState<ClashGroup[]>([])
   const [connections, setConnections] = useState<ClashConnection[]>([])
+  const [connectionFilter, setConnectionFilter] = useState('')
+  const [connectionsLoading, setConnectionsLoading] = useState(false)
+  const [closingConnectionId, setClosingConnectionId] = useState<string | null>(null)
   const [running, setRunning] = useState(false)
   const [loading, setLoading] = useState(false)
   const [delays, setDelays] = useState<Record<string, number>>({})
@@ -160,10 +193,23 @@ export default function ClashMode(): JSX.Element {
   const [savingProfile, setSavingProfile] = useState(false)
   const [profileSaveStatus, setProfileSaveStatus] = useState<{ type: 'info' | 'success' | 'error'; message: string } | null>(null)
   const [updatingProfileId, setUpdatingProfileId] = useState<string | null>(null)
+  const [deletingProfileId, setDeletingProfileId] = useState<string | null>(null)
   const [tunEnabled, setTunEnabled] = useState(false)
   const [clashMode, setCurrentClashMode] = useState<ClashModeValue>('rule')
   const [appState, setAppState] = useState<AppConnectionState | null>(null)
   const [form] = Form.useForm<{ name: string; content?: string; url?: string; autoUpdate?: boolean; updateInterval?: number }>()
+
+  const refreshConnections = useCallback(async (silent = false): Promise<void> => {
+    if (!silent) setConnectionsLoading(true)
+    try {
+      const next = await getClashConnections()
+      setConnections(next)
+    } catch (error) {
+      if (!silent) message.warning(error instanceof Error ? error.message : '连接列表刷新失败')
+    } finally {
+      if (!silent) setConnectionsLoading(false)
+    }
+  }, [])
 
   const load = useCallback(async (): Promise<void> => {
     const [status, nextProfiles, runtimeOptions, nextAppState] = await Promise.all([
@@ -187,13 +233,11 @@ export default function ClashMode(): JSX.Element {
       return
     }
     try {
-      const [nextGroups, nextConnections, nextConfig] = await Promise.all([
+      const [nextGroups, nextConfig] = await Promise.all([
         getClashGroups(),
-        getClashConnections().catch(() => []),
         getClashConfig().catch(() => ({ mode: 'rule' as ClashModeValue })),
       ])
       setGroups(nextGroups)
-      setConnections(nextConnections)
       setCurrentClashMode(nextConfig.mode)
     } catch (error) {
       message.warning(error instanceof Error ? error.message : 'mihomo 控制接口暂时不可用')
@@ -215,6 +259,13 @@ export default function ClashMode(): JSX.Element {
       unsubscribeAppState()
     }
   }, [load])
+
+  useEffect(() => {
+    if (!running) return
+    void refreshConnections(true)
+    const timer = window.setInterval(() => void refreshConnections(true), 2000)
+    return () => window.clearInterval(timer)
+  }, [refreshConnections, running])
 
   const handleStart = async (): Promise<void> => {
     setLoading(true)
@@ -353,12 +404,33 @@ export default function ClashMode(): JSX.Element {
   }
 
   const handleDeleteProfile = async (profileId: string): Promise<void> => {
-    const result = await deleteClashProfile(profileId)
-    if (!result.success) message.error(result.error || '删除失败')
-    else {
-      message.success('配置已删除')
-      await load()
+    if (deletingProfileId) return
+    setDeletingProfileId(profileId)
+    try {
+      const result = await deleteClashProfile(profileId)
+      if (!result.success) message.error(result.error || '删除失败')
+      else {
+        message.success('配置已删除')
+        if (selectedProfileId === profileId) setSelectedProfileId('default')
+        await load()
+      }
+    } finally {
+      setDeletingProfileId(null)
     }
+  }
+
+  const confirmDeleteProfile = (profile: ClashProfile): void => {
+    Modal.confirm({
+      title: `删除 Clash 配置：${profile.name}`,
+      content: profile.active
+        ? '这个配置当前正在使用。删除前 KiNGO 会先断开 Clash，并切回默认配置。'
+        : '删除后会移除这个订阅配置及本地缓存文件。',
+      okText: '删除',
+      okButtonProps: { danger: true, loading: deletingProfileId === profile.id },
+      cancelText: '取消',
+      centered: true,
+      onOk: () => handleDeleteProfile(profile.id),
+    })
   }
 
   const handleSelect = async (group: ClashGroup, proxyName: string): Promise<void> => {
@@ -410,6 +482,39 @@ export default function ClashMode(): JSX.Element {
     }
   }
 
+  const handleCloseConnection = async (id: string): Promise<void> => {
+    if (closingConnectionId) return
+    setClosingConnectionId(id)
+    try {
+      const result = await closeClashConnection(id)
+      if (!result.success) message.error(result.error || '关闭连接失败')
+      else {
+        message.success('连接已关闭')
+        await refreshConnections(true)
+      }
+    } finally {
+      setClosingConnectionId(null)
+    }
+  }
+
+  const confirmCloseAllConnections = (): void => {
+    Modal.confirm({
+      title: '关闭全部 Clash 连接？',
+      content: '这只会断开当前活动连接，不会停止 mihomo，也不会删除节点或配置。',
+      okText: '关闭全部',
+      cancelText: '取消',
+      centered: true,
+      onOk: async () => {
+        const result = await closeAllClashConnections()
+        if (!result.success) message.error(result.error || '关闭全部连接失败')
+        else {
+          message.success('已关闭全部连接')
+          await refreshConnections(true)
+        }
+      },
+    })
+  }
+
   const handleChangeClashMode = async (mode: ClashModeValue): Promise<void> => {
     setCurrentClashMode(mode)
     const result = await setClashMode(mode)
@@ -452,6 +557,21 @@ export default function ClashMode(): JSX.Element {
     () => groups.find((group) => group.name === drawerGroupName) || null,
     [groups, drawerGroupName],
   )
+
+  const filteredConnections = useMemo(() => {
+    const keyword = connectionFilter.trim().toLowerCase()
+    if (!keyword) return connections
+    return connections.filter((connection) => {
+      const haystack = [
+        connectionTarget(connection),
+        connectionProcess(connection),
+        connection.rule,
+        connection.rulePayload,
+        ...(connection.chains || []),
+      ].join(' ').toLowerCase()
+      return haystack.includes(keyword)
+    })
+  }, [connectionFilter, connections])
 
   const visibleGroups = useMemo(() => {
     const priority = (name: string): number => {
@@ -566,7 +686,7 @@ export default function ClashMode(): JSX.Element {
                     />
                   </Space>
                   {visibleGroups.map((group) => (
-                    <Card key={group.name} size="small">
+                    <Card key={group.name} size="small" className="kingo-clash-group-card">
                       <Space direction="vertical" size={10} style={{ width: '100%' }}>
                         <Row gutter={[12, 12]} align="middle">
                           <Col xs={24} md={7}>
@@ -578,7 +698,7 @@ export default function ClashMode(): JSX.Element {
                               showSearch
                               style={{ width: '100%' }}
                               value={group.now || undefined}
-                              placeholder="Open node drawer"
+                              placeholder="点击选择节点"
                               open={false}
                               options={group.now ? [{ label: group.now, value: group.now }] : []}
                               onClick={() => setDrawerGroupName(group.name)}
@@ -590,7 +710,7 @@ export default function ClashMode(): JSX.Element {
                                 size="small"
                                 onClick={() => setDrawerGroupName(group.name)}
                               >
-                                Select
+                                选择节点
                               </Button>
                               <Button
                                 size="small"
@@ -659,7 +779,7 @@ export default function ClashMode(): JSX.Element {
                   rowKey="id"
                   pagination={false}
                   tableLayout="fixed"
-                  scroll={{ x: 1040 }}
+                  scroll={{ x: 1120 }}
                   dataSource={profiles}
                   columns={[
                     { title: '名称', dataIndex: 'name', key: 'name' },
@@ -672,13 +792,20 @@ export default function ClashMode(): JSX.Element {
                     {
                       title: '操作',
                       key: 'actions',
-                      width: 180,
+                      width: 170,
+                      fixed: 'right',
                       render: (_: unknown, profile: ClashProfile) => profile.source === 'default' ? null : (
                         <Space>
                           {profile.source === 'url' && <Button size="small" icon={<CloudSyncOutlined />} loading={updatingProfileId === profile.id} onClick={() => void handleUpdateProfile(profile.id)}>更新</Button>}
-                          <Popconfirm title="删除这个 Clash 配置？" onConfirm={() => void handleDeleteProfile(profile.id)}>
-                            <Button size="small" danger icon={<DeleteOutlined />}>删除</Button>
-                          </Popconfirm>
+                          <Button
+                            size="small"
+                            danger
+                            icon={<DeleteOutlined />}
+                            loading={deletingProfileId === profile.id}
+                            onClick={() => confirmDeleteProfile(profile)}
+                          >
+                            删除
+                          </Button>
                         </Space>
                       ),
                     },
@@ -731,12 +858,121 @@ export default function ClashMode(): JSX.Element {
             key: 'connections',
             label: '连接列表',
             children: (
-              <Table size="small" rowKey="id" pagination={{ pageSize: 6 }} dataSource={connections} columns={[
-                { title: '规则', dataIndex: 'rule', key: 'rule', width: 120 },
-                { title: '链路', dataIndex: 'chains', key: 'chains', render: (chains?: string[]) => chains?.join(' → ') || '-' },
-                { title: '上传', dataIndex: 'upload', key: 'upload', width: 90 },
-                { title: '下载', dataIndex: 'download', key: 'download', width: 90 },
-              ]} />
+              <Space direction="vertical" size={12} style={{ width: '100%' }}>
+                <Space wrap style={{ width: '100%', justifyContent: 'space-between' }}>
+                  <Space wrap>
+                    <Input.Search
+                      allowClear
+                      placeholder="筛选目标、进程、规则或节点"
+                      value={connectionFilter}
+                      onChange={(event) => setConnectionFilter(event.target.value)}
+                      style={{ width: 260 }}
+                    />
+                    <Tag bordered={false}>活动连接 {connections.length}</Tag>
+                  </Space>
+                  <Space wrap>
+                    <Button loading={connectionsLoading} onClick={() => void refreshConnections(false)}>
+                      刷新
+                    </Button>
+                    <Button danger disabled={connections.length === 0} onClick={confirmCloseAllConnections}>
+                      关闭全部
+                    </Button>
+                  </Space>
+                </Space>
+                <Table
+                  size="small"
+                  rowKey="id"
+                  loading={connectionsLoading}
+                  pagination={{ pageSize: 10, showSizeChanger: true }}
+                  dataSource={filteredConnections}
+                  scroll={{ x: 980 }}
+                  columns={[
+                    {
+                      title: '目标',
+                      key: 'target',
+                      width: 220,
+                      ellipsis: true,
+                      render: (_: unknown, row: ClashConnection) => (
+                        <Space direction="vertical" size={0} style={{ maxWidth: 210 }}>
+                          <Typography.Text ellipsis>{connectionTarget(row)}</Typography.Text>
+                          <Typography.Text type="secondary" ellipsis style={{ fontSize: 12 }}>{connectionProcess(row)}</Typography.Text>
+                        </Space>
+                      ),
+                    },
+                    {
+                      title: '规则',
+                      key: 'rule',
+                      width: 150,
+                      ellipsis: true,
+                      render: (_: unknown, row: ClashConnection) => (
+                        <Space direction="vertical" size={0}>
+                          <Typography.Text ellipsis>{row.rule || '-'}</Typography.Text>
+                          {row.rulePayload && <Typography.Text type="secondary" ellipsis style={{ fontSize: 12 }}>{row.rulePayload}</Typography.Text>}
+                        </Space>
+                      ),
+                    },
+                    {
+                      title: '链路',
+                      dataIndex: 'chains',
+                      key: 'chains',
+                      width: 260,
+                      render: (chains?: string[]) => (
+                        <Space size={4} wrap>
+                          {(chains && chains.length > 0 ? chains : ['-']).map((chain, index) => (
+                            <Tag key={`${chain}:${index}`} bordered={false}>{chain}</Tag>
+                          ))}
+                        </Space>
+                      ),
+                    },
+                    {
+                      title: '网络',
+                      key: 'network',
+                      width: 92,
+                      render: (_: unknown, row: ClashConnection) => (
+                        <Tag bordered={false}>{metadataText(row, 'network') || metadataText(row, 'type') || '-'}</Tag>
+                      ),
+                    },
+                    {
+                      title: '上传',
+                      dataIndex: 'upload',
+                      key: 'upload',
+                      width: 96,
+                      render: (value?: number) => formatBytes(value),
+                    },
+                    {
+                      title: '下载',
+                      dataIndex: 'download',
+                      key: 'download',
+                      width: 96,
+                      render: (value?: number) => formatBytes(value),
+                    },
+                    {
+                      title: '开始时间',
+                      dataIndex: 'start',
+                      key: 'start',
+                      width: 150,
+                      ellipsis: true,
+                      render: (value?: string) => value ? new Date(value).toLocaleTimeString() : '-',
+                    },
+                    {
+                      title: '操作',
+                      key: 'action',
+                      fixed: 'right',
+                      width: 92,
+                      render: (_: unknown, row: ClashConnection) => (
+                        <Button
+                          size="small"
+                          danger
+                          loading={closingConnectionId === row.id}
+                          onClick={() => void handleCloseConnection(row.id)}
+                        >
+                          关闭
+                        </Button>
+                      ),
+                    },
+                  ]}
+                />
+              </Space>
             ),
           },
         ]}
@@ -744,7 +980,7 @@ export default function ClashMode(): JSX.Element {
       </Card>
 
       <Drawer
-        title={drawerGroup ? `Select node: ${drawerGroup.name}` : 'Select node'}
+        title={drawerGroup ? `选择节点：${drawerGroup.name}` : '选择节点'}
         open={!!drawerGroup}
         onClose={() => setDrawerGroupName(null)}
         width={560}
@@ -759,7 +995,7 @@ export default function ClashMode(): JSX.Element {
             <Space wrap>
               <Input.Search
                 allowClear
-                placeholder="Filter nodes"
+                placeholder="搜索当前组节点"
                 value={proxyFilter}
                 onChange={(event) => setProxyFilter(event.target.value)}
                 style={{ width: 220 }}
@@ -769,9 +1005,9 @@ export default function ClashMode(): JSX.Element {
                 style={{ width: 140 }}
                 onChange={setProxySort}
                 options={[
-                  { label: 'Original', value: 'default' },
-                  { label: 'Delay', value: 'delay' },
-                  { label: 'Name', value: 'name' },
+                  { label: '默认顺序', value: 'default' },
+                  { label: '按延迟', value: 'delay' },
+                  { label: '按名称', value: 'name' },
                 ]}
               />
               <Button
@@ -780,7 +1016,7 @@ export default function ClashMode(): JSX.Element {
                 loading={testingGroupName === drawerGroup.name}
                 onClick={() => void handleDelayGroup(drawerGroup)}
               >
-                Test group
+                测试本组
               </Button>
             </Space>
             <Table
@@ -793,26 +1029,26 @@ export default function ClashMode(): JSX.Element {
               columns={[
                 { title: '#', dataIndex: 'index', width: 52 },
                 {
-                  title: 'Node',
+                  title: '节点',
                   dataIndex: 'name',
                   ellipsis: true,
                   render: (name: string, row: { active: boolean }) => (
                     <Space>
-                      {row.active && <Tag color="green">Current</Tag>}
+                      {row.active && <Tag color="green">当前</Tag>}
                       <Typography.Text ellipsis style={{ maxWidth: 270 }}>{name}</Typography.Text>
                     </Space>
                   ),
                 },
                 {
-                  title: 'Delay',
+                  title: '延迟',
                   dataIndex: 'delay',
                   width: 86,
                   render: (delay?: number) => delay === undefined
                     ? '-'
-                    : <Tag color={delayTagColor(delay)}>{delay >= 0 ? `${delay}ms` : 'Timeout'}</Tag>,
+                    : <Tag color={delayTagColor(delay)}>{delay >= 0 ? `${delay}ms` : '超时'}</Tag>,
                 },
                 {
-                  title: 'Action',
+                  title: '操作',
                   key: 'action',
                   width: 84,
                   render: (_: unknown, row: { name?: string; active: boolean }) => (
@@ -821,7 +1057,7 @@ export default function ClashMode(): JSX.Element {
                       type={row.active ? 'primary' : 'default'}
                       onClick={() => row.name && void handleSelect(drawerGroup, row.name)}
                     >
-                      {row.active ? 'Selected' : 'Select'}
+                      {row.active ? '已选择' : '选择'}
                     </Button>
                   ),
                 },

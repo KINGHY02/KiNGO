@@ -44,6 +44,24 @@ export function getAppConnectionState(
     }
   }
 
+  if (BUSY_PUBLIC_STATES.includes(publicState.state)) {
+    const route = publicState.routeId
+      ? publicRouteService.listRoutes().find((item) => item.id === publicState.routeId) || selectedRoute
+      : selectedRoute
+    const publicRouteStatus = route ? statuses.find((item) => item.id === route.coreId) : null
+    return {
+      mode: 'public-route',
+      connected: false,
+      busy: true,
+      coreId: route?.coreId || null,
+      displayName: route?.name || '公共线路',
+      detail: route?.protocolLabel || null,
+      latency: publicRouteStatus?.latency ?? null,
+      stage: publicState.stage,
+      error: null,
+    }
+  }
+
   if (activeNode && activeNodeStatus?.running) {
     return {
       mode: 'v2rayn',

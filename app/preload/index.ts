@@ -7,6 +7,7 @@ const electronAPI = {
   getProxyStatus: () => ipcRenderer.invoke('proxy:status'),
   getAppConnectionState: () => ipcRenderer.invoke('app:connection-state'),
   disconnectAllConnections: () => ipcRenderer.invoke('app:disconnect-all'),
+  getExitIpInfo: () => ipcRenderer.invoke('app:exit-ip-info'),
   // Config
   getConfig: (proxyId: string) => ipcRenderer.invoke('proxy:get-config', proxyId),
   saveConfig: (proxyId: string, content: string) => ipcRenderer.invoke('proxy:save-config', proxyId, content),
@@ -50,6 +51,10 @@ const electronAPI = {
   setUpdateFeedURL: (url: string) => ipcRenderer.invoke('updater:set-feed-url', url),
   // Core version check
   checkCoreVersions: () => ipcRenderer.invoke('core:check-versions'),
+  getCoreUpdateInfo: (proxyId: string) => ipcRenderer.invoke('core:update-info', proxyId),
+  updateCore: (proxyId: string) => ipcRenderer.invoke('core:update', proxyId),
+  restoreBundledCore: (proxyId: string) => ipcRenderer.invoke('core:restore-bundled', proxyId),
+  openCoreDir: (proxyId: string) => ipcRenderer.invoke('core:open-dir', proxyId),
   listCoreProfiles: () => ipcRenderer.invoke('core:list-profiles'),
   // Clash / mihomo mode
   startClashProfile: (profileId: string) => ipcRenderer.invoke('clash:start-profile', profileId),
@@ -69,6 +74,9 @@ const electronAPI = {
   selectClashGroupProxy: (groupName: string, proxyName: string) => ipcRenderer.invoke('clash:select-proxy', groupName, proxyName),
   testClashProxyDelay: (proxyName: string) => ipcRenderer.invoke('clash:test-delay', proxyName),
   getClashConnections: () => ipcRenderer.invoke('clash:connections'),
+  closeClashConnection: (id: string) => ipcRenderer.invoke('clash:close-connection', id),
+  closeAllClashConnections: () => ipcRenderer.invoke('clash:close-all-connections'),
+  getClashTrafficOverview: () => ipcRenderer.invoke('clash:traffic-overview'),
   // Node management
   importNodeUrl: (url: string) => ipcRenderer.invoke('node:import-url', url),
   importNodeBatch: (urls: string[]) => ipcRenderer.invoke('node:import-batch', urls),
@@ -126,6 +134,11 @@ const electronAPI = {
     const handler = (_event: Electron.IpcRendererEvent, progress: unknown) => callback(progress)
     ipcRenderer.on('proxy:update-progress', handler)
     return () => { ipcRenderer.removeListener('proxy:update-progress', handler) }
+  },
+  onCoreUpdateProgress: (callback: (progress: unknown) => void) => {
+    const handler = (_event: Electron.IpcRendererEvent, progress: unknown) => callback(progress)
+    ipcRenderer.on('core:update-progress', handler)
+    return () => { ipcRenderer.removeListener('core:update-progress', handler) }
   },
   onPublicRouteStateChanged: (callback: (state: unknown) => void) => {
     const handler = (_event: Electron.IpcRendererEvent, state: unknown) => callback(state)
