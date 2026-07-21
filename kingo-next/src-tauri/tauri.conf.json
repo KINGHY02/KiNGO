@@ -1,0 +1,68 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "KiNGO",
+  "version": "2.0.0",
+  "identifier": "com.kingo.client",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "KiNGO",
+        "width": 1180,
+        "height": 760,
+        "minWidth": 960,
+        "minHeight": 640
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["nsis"],
+    "publisher": "KINGHY02",
+    "copyright": "Copyright © 2026 KINGHY02. All rights reserved.",
+    "shortDescription": "KiNGO 多核心网络连接工具",
+    "longDescription": "简洁、安全的多核心网络连接与代理管理桌面客户端。",
+    "resources": [
+      "resources/public-routes.json",
+      "resources/cores/**/*",
+      "resources/cores/hy2/hysteria2.exe",
+      "resources/route-configs/**/*",
+      "resources/route-configs/hy2/*.json"
+    ],
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "windows": {
+      "nsis": {
+        "installerIcon": "icons/icon.ico",
+        "uninstallerIcon": "icons/icon.ico",
+        "headerImage": "installer/nsis-header.bmp",
+        "sidebarImage": "installer/nsis-sidebar.bmp",
+        "installMode": "currentUser",
+        "languages": ["SimpChinese", "English"],
+        "customLanguageFiles": {
+          "SimpChinese": "installer/SimpChinese.nsh"
+        },
+        "displayLanguageSelector": false,
+        "startMenuFolder": "KiNGO"
+      },
+      "wix": {
+        "language": "zh-CN",
+        "bannerPath": "installer/wix-banner.bmp",
+        "dialogImagePath": "installer/wix-dialog.bmp"
+      }
+    }
+  }
+}

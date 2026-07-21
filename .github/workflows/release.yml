@@ -1,36 +1,77 @@
-name: Release
+name: Build and release KiNGO
 
 on:
+  pull_request:
+    paths:
+      - "README.md"
+      - "kingo-next/**"
+      - ".github/workflows/release.yml"
   push:
     tags:
-      - 'v*'
-  workflow_dispatch:
+      - "v*"
 
 permissions:
   contents: write
 
 jobs:
-  release:
+  windows:
+    name: Windows x64
     runs-on: windows-latest
-    env:
-      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-    steps:
-      - uses: actions/checkout@v4
+    defaults:
+      run:
+        shell: pwsh
 
-      - uses: actions/setup-node@v4
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
         with:
           node-version: 20
+          cache: npm
+          cache-dependency-path: kingo-next/package-lock.json
 
-      - name: Download proxy resources
-        run: gh release download resources --pattern "resources.zip" --dir .
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install frontend dependencies
+        working-directory: kingo-next
+        run: npm ci
+
+      - name: Check Rust formatting
+        working-directory: kingo-next
+        run: cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
+
+      - name: Check Rust lints
+        working-directory: kingo-next
+        run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings -A linker_messages
+
+      - name: Test Rust backend
+        working-directory: kingo-next
+        run: cargo test --manifest-path src-tauri/Cargo.toml
+
+      - name: Build pull request installer
+        if: github.event_name == 'pull_request'
+        working-directory: kingo-next
+        run: npm run tauri -- build --bundles nsis
+
+      - name: Build and publish tagged release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: tauri-apps/tauri-action@v1
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          projectPath: kingo-next
+          tagName: ${{ github.ref_name }}
+          releaseName: "KiNGO ${{ github.ref_name }}"
+          releaseBody: |
+            KiNGO 2.0 新架构 Windows x64 安装包。
 
-      - name: Extract resources
-        run: powershell Expand-Archive -Path resources.zip -DestinationPath . -Force
-
-      - name: Install dependencies
-        run: cd app && npm ci
-
-      - name: Build & Publish
-        run: cd app && npm run dist
+            请下载 `KiNGO-Setup-*-x64.exe`。本版本为未签名构建，Windows 首次运行时可能显示 SmartScreen 提示。
+          generateReleaseNotes: true
+          releaseDraft: false
+          prerelease: false
+          uploadUpdaterJson: false
+          args: --bundles nsis
+          releaseAssetNamePattern: "KiNGO-Setup-[version]-[arch][ext]"

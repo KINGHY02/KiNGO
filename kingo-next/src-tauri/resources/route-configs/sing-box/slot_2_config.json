@@ -1,0 +1,41 @@
+{
+  "inbounds": [
+    {
+      "type": "mixed",
+      "tag": "mixed-in",
+      "listen": "::",
+      "listen_port": 1080,
+      "set_system_proxy": false
+    }
+  ],
+  "outbounds": [
+    {
+      "type": "tuic",
+      "tag": "https://github.com/Alvin9999-newpac/fanqian",
+      "server": "89.144.35.232",
+      "server_port": 17306,
+      "uuid": "3ebac90b-6977-47c0-bef5-b2e37554432c",
+      "password": "3ebac90b-6977-47c0-bef5-b2e37554432c",
+      "congestion_control": "bbr",
+      "tls": {
+        "enabled": true,
+        "server_name": "www.microsoft.com",
+        "alpn": ["h3"],
+        "insecure": true
+      }
+    },
+    {
+      "type": "direct",
+      "tag": "direct"
+    }
+  ],
+  "route": {
+    "rules": [
+      {
+        "inbound": "mixed-in",
+        "action": "sniff"
+      }
+    ],
+    "final": "https://github.com/Alvin9999-newpac/fanqian"
+  }
+}
