@@ -1,0 +1,30 @@
+
+
+{
+    "profiles": [
+        {
+            "profileName": "default",
+            "user": {
+                "name": "dongtaiwang.com",
+                "password": "dongtaiwang.com"
+            },
+            "servers": [
+                {
+                    "ipAddress": "157.254.223.44",
+                    "domainName": "",
+                    "portBindings": [
+                        {
+                            "port": 34567,
+                            "protocol": "TCP"
+                        }
+                    ]
+                }
+            ],
+            "mtu": 1400
+        }
+    ],
+    "activeProfile": "default",
+    "rpcPort": 8964,
+    "socks5Port": 3080,
+    "loggingLevel": "INFO"
+}
