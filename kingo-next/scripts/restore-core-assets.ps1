@@ -14,6 +14,24 @@ $archivePath = Join-Path $workDirectory ([string]$manifest.archive)
 $markerPath = Join-Path $workDirectory "restored.sha256"
 $requiredFiles = @($manifest.requiredFiles)
 
+function Get-Sha256Hash {
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    if (Get-Command Get-FileHash -ErrorAction SilentlyContinue) {
+        return (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToUpperInvariant()
+    }
+
+    $output = & certutil.exe -hashfile $Path SHA256
+    if ($LASTEXITCODE -ne 0) {
+        throw "Failed to calculate SHA256 for $Path."
+    }
+    $hash = ($output | Where-Object { $_ -match '^[0-9a-fA-F]{64}$' } | Select-Object -First 1)
+    if (-not $hash) {
+        throw "Failed to parse SHA256 for $Path."
+    }
+    return ([string]$hash).ToUpperInvariant()
+}
+
 function Test-CoreAssetsRestored {
     if (-not (Test-Path -LiteralPath $markerPath -PathType Leaf)) {
         return $false
@@ -59,7 +77,7 @@ finally {
     $archiveStream.Dispose()
 }
 
-$actualHash = (Get-FileHash -LiteralPath $archivePath -Algorithm SHA256).Hash.ToUpperInvariant()
+$actualHash = Get-Sha256Hash -Path $archivePath
 if ($actualHash -ne $expectedHash) {
     throw "Core asset archive checksum mismatch. Expected $expectedHash, got $actualHash."
 }
