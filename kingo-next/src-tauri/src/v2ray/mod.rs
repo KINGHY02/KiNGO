@@ -14,6 +14,7 @@ use std::{
     collections::VecDeque,
     io::{Read, Write},
     net::{SocketAddr, TcpListener, TcpStream, ToSocketAddrs, UdpSocket},
+    process::Stdio,
     sync::{
         atomic::{AtomicBool, AtomicUsize, Ordering},
         Arc, Mutex,
@@ -23,6 +24,7 @@ use std::{
 use tauri::{AppHandle, Emitter};
 
 static TEST_CANCELLED: AtomicBool = AtomicBool::new(false);
+static TEST_RUNNING: AtomicBool = AtomicBool::new(false);
 
 pub fn get_settings(app: &AppHandle) -> V2raySettings {
     settings::load(app)
@@ -42,7 +44,7 @@ fn parse_many(text: &str) -> (Vec<ParsedNode>, Vec<String>) {
     for (index, line) in parser::subscription_lines(text).into_iter().enumerate() {
         match parser::parse_line(&line) {
             Ok(node) => nodes.push(node),
-            Err(error) => errors.push(format!("第 {} 行：{}", index + 1, error)),
+            Err(error) => errors.push(format!("? {} ??{}", index + 1, error)),
         }
     }
     (nodes, errors)
@@ -53,7 +55,7 @@ fn download_subscription(subscription: &V2raySubscription) -> Result<String, Str
         .timeout(Duration::from_secs(25))
         .redirect(reqwest::redirect::Policy::limited(5))
         .build()
-        .map_err(|error| format!("创建订阅请求失败：{error}"))?;
+        .map_err(|error| format!("?????????{error}"))?;
     let configured = subscription.user_agent.trim();
     let fallback = "v2rayN/7.12.5";
     let user_agents = if configured.is_empty() || configured == fallback {
@@ -84,7 +86,7 @@ fn download_subscription(subscription: &V2raySubscription) -> Result<String, Str
             .content_length()
             .is_some_and(|size| size > 5 * 1024 * 1024)
         {
-            return Err("订阅响应超过 5 MiB 安全限制".into());
+            return Err("?????? 5 MiB ????".into());
         }
         let mut bytes = Vec::new();
         if let Err(error) = response
@@ -92,27 +94,27 @@ fn download_subscription(subscription: &V2raySubscription) -> Result<String, Str
             .take(5 * 1024 * 1024 + 1)
             .read_to_end(&mut bytes)
         {
-            last_error = format!("读取响应失败：{error}");
+            last_error = format!("???????{error}");
             continue;
         }
         if bytes.len() > 5 * 1024 * 1024 {
-            return Err("订阅响应超过 5 MiB 安全限制".into());
+            return Err("?????? 5 MiB ????".into());
         }
         let content = match String::from_utf8(bytes) {
             Ok(content) => content,
-            Err(_) => return Err("订阅内容不是 UTF-8 文本".into()),
+            Err(_) => return Err("?????? UTF-8 ??".into()),
         };
         let normalized = content.trim_start().to_ascii_lowercase();
         if normalized.starts_with("<!doctype html") || normalized.starts_with("<html") {
-            last_error = "服务端返回了网页而不是订阅内容".into();
+            last_error = "???????????????".into();
             continue;
         }
         if !content.trim().is_empty() {
             return Ok(content);
         }
-        last_error = "订阅响应为空".into();
+        last_error = "??????".into();
     }
-    Err(format!("下载订阅失败（已重试 3 次）：{last_error}"))
+    Err(format!("?????????? 3 ???{last_error}"))
 }
 
 pub fn list_nodes(
@@ -138,7 +140,7 @@ pub fn import_nodes(app: &AppHandle, text: String) -> Result<ImportResult, Strin
         return Err(errors
             .first()
             .cloned()
-            .unwrap_or_else(|| "没有识别到支持的节点、订阅或配置".into()));
+            .unwrap_or_else(|| "????????????????".into()));
     }
     let requested = parsed.len();
     let ids = store::import_nodes(app, &parsed, None)?;
@@ -160,13 +162,13 @@ pub fn import_nodes(app: &AppHandle, text: String) -> Result<ImportResult, Strin
                             .map(|(_, value)| value.into_owned())
                             .or_else(|| parsed.host_str().map(str::to_string))
                     })
-                    .unwrap_or_else(|| "导入订阅".into());
+                    .unwrap_or_else(|| "????".into());
                 store::add_subscription(app, &name, &url, Some("v2rayN/7.22.7"))?
             }
         };
         match update_subscription(app, subscription.id.clone()) {
             Ok(result) => subscriptions.push(result),
-            Err(error) => errors.push(format!("订阅“{}”更新失败：{error}", subscription.name)),
+            Err(error) => errors.push(format!("???{}??????{error}", subscription.name)),
         }
     }
     Ok(ImportResult {
@@ -269,12 +271,12 @@ pub fn export_nodes(app: &AppHandle, node_ids: Vec<String>) -> Result<String, St
         .collect::<Vec<_>>()
         .join("\n");
     if content.is_empty() {
-        return Err("没有可导出的节点".into());
+        return Err("????????".into());
     }
     let directory = std::path::PathBuf::from(crate::paths::ensure(app)?.data_dir).join("exports");
-    std::fs::create_dir_all(&directory).map_err(|error| format!("创建导出目录失败：{error}"))?;
+    std::fs::create_dir_all(&directory).map_err(|error| format!("?????????{error}"))?;
     let path = directory.join(format!("v2ray-nodes-{}.txt", store::now()));
-    std::fs::write(&path, content).map_err(|error| format!("导出节点失败：{error}"))?;
+    std::fs::write(&path, content).map_err(|error| format!("???????{error}"))?;
     Ok(path.to_string_lossy().into_owned())
 }
 
@@ -282,7 +284,7 @@ pub fn node_qr_svg(app: &AppHandle, node_id: String) -> Result<String, String> {
     let node = store::get_node(app, &node_id)?;
     let link = formatter::share_link(&node)?;
     qrcode::QrCode::new(link.as_bytes())
-        .map_err(|error| format!("生成二维码失败：{error}"))
+        .map_err(|error| format!("????????{error}"))
         .map(|code| {
             code.render::<qrcode::render::svg::Color>()
                 .min_dimensions(260, 260)
@@ -337,7 +339,7 @@ pub fn update_subscription(
         let error = errors
             .first()
             .cloned()
-            .unwrap_or_else(|| "订阅中没有可用节点".into());
+            .unwrap_or_else(|| "?????????".into());
         let _ = store::set_subscription_error(app, &subscription_id, Some(&error));
         return Err(error);
     }
@@ -369,6 +371,7 @@ pub fn delete_subscription(app: &AppHandle, subscription_id: String) -> Result<(
     store::delete_subscription(app, &subscription_id)
 }
 
+#[allow(dead_code)]
 fn curl_proxy_output(
     port: u16,
     url: &str,
@@ -393,9 +396,60 @@ fn curl_proxy_output(
     let output = command
         .arg(url)
         .output()
-        .map_err(|error| format!("启动代理请求失败：{error}"))?;
+        .map_err(|error| format!("?????????{error}"))?;
     if !output.status.success() {
-        return Err(format!("代理请求失败：{}", output.status));
+        return Err(format!("???????{}", output.status));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+fn curl_proxy_output_cancelable(
+    port: u16,
+    url: &str,
+    timeout: u32,
+    write_out: Option<&str>,
+) -> Result<String, String> {
+    let timeout = timeout.to_string();
+    let proxy = format!("socks5h://127.0.0.1:{port}");
+    let mut command = hidden_command("curl.exe");
+    command.args([
+        "-fsS",
+        "--connect-timeout",
+        &timeout,
+        "--max-time",
+        &timeout,
+        "--proxy",
+        &proxy,
+    ]);
+    if let Some(format) = write_out {
+        command.args(["-o", "NUL", "-w", format]);
+    }
+    let mut child = command
+        .arg(url)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|error| format!("?????????{error}"))?;
+    loop {
+        if TEST_CANCELLED.load(Ordering::Relaxed) {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err("?????".into());
+        }
+        if child
+            .try_wait()
+            .map_err(|error| format!("???????????{error}"))?
+            .is_some()
+        {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(80));
+    }
+    let output = child
+        .wait_with_output()
+        .map_err(|error| format!("???????????{error}"))?;
+    if !output.status.success() {
+        return Err(format!("???????{}", output.status));
     }
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
@@ -403,17 +457,17 @@ fn curl_proxy_output(
 fn real_delay(port: u16, url: &str, timeout: u32) -> Result<u32, String> {
     let mut samples = Vec::new();
     for _ in 0..2 {
-        let seconds = curl_proxy_output(port, url, timeout, Some("%{time_total}"))?
+        let seconds = curl_proxy_output_cancelable(port, url, timeout, Some("%{time_total}"))?
             .parse::<f64>()
-            .map_err(|_| "测速返回了无效耗时".to_string())?;
+            .map_err(|_| "?????????".to_string())?;
         samples.push((seconds * 1000.0).round().max(1.0) as u32);
         std::thread::sleep(Duration::from_millis(100));
     }
-    samples.into_iter().min().ok_or("真实延迟测试失败".into())
+    samples.into_iter().min().ok_or("????????".into())
 }
 
 fn exit_ip_info(port: u16, url: &str, timeout: u32) -> Option<String> {
-    let content = curl_proxy_output(port, url, timeout, None).ok()?;
+    let content = curl_proxy_output_cancelable(port, url, timeout, None).ok()?;
     let value = serde_json::from_str::<serde_json::Value>(&content).ok();
     if let Some(value) = value {
         let ip = value
@@ -428,7 +482,7 @@ fn exit_ip_info(port: u16, url: &str, timeout: u32) -> Option<String> {
             .and_then(serde_json::Value::as_str)
             .unwrap_or_default();
         return Some(match (country.is_empty(), ip.is_empty()) {
-            (false, false) => format!("{country} · {ip}"),
+            (false, false) => format!("{country} ? {ip}"),
             (true, false) => ip.to_string(),
             (false, true) => country.to_string(),
             (true, true) => content,
@@ -438,11 +492,11 @@ fn exit_ip_info(port: u16, url: &str, timeout: u32) -> Option<String> {
 }
 
 fn download_speed(port: u16, url: &str, timeout: u32) -> Result<u64, String> {
-    let value = curl_proxy_output(port, url, timeout, Some("%{speed_download}"))?
+    let value = curl_proxy_output_cancelable(port, url, timeout, Some("%{speed_download}"))?
         .parse::<f64>()
-        .map_err(|_| "下载测速返回了无效速度".to_string())?;
+        .map_err(|_| "???????????".to_string())?;
     if value <= 0.0 {
-        Err("下载测速没有收到数据".into())
+        Err("??????????".into())
     } else {
         Ok(value.round() as u64)
     }
@@ -464,7 +518,7 @@ fn read_socks_address(stream: &mut TcpStream, atyp: u8) -> Result<SocketAddr, St
                 .map_err(|error| error.to_string())?;
             std::net::IpAddr::V6(bytes.into())
         }
-        _ => return Err("SOCKS UDP中继返回了不支持的地址类型".into()),
+        _ => return Err("SOCKS UDP?????????????".into()),
     };
     let mut port = [0_u8; 2];
     stream
@@ -476,12 +530,12 @@ fn read_socks_address(stream: &mut TcpStream, atyp: u8) -> Result<SocketAddr, St
 fn udp_delay(port: u16, target: &str) -> Result<u32, String> {
     let target = target
         .parse::<SocketAddr>()
-        .map_err(|_| "UDP测试目标格式无效".to_string())?;
+        .map_err(|_| "UDP????????".to_string())?;
     let mut control = TcpStream::connect_timeout(
         &SocketAddr::from(([127, 0, 0, 1], port)),
         Duration::from_secs(5),
     )
-    .map_err(|error| format!("连接SOCKS UDP入口失败：{error}"))?;
+    .map_err(|error| format!("??SOCKS UDP?????{error}"))?;
     control
         .set_read_timeout(Some(Duration::from_secs(5)))
         .map_err(|error| error.to_string())?;
@@ -493,7 +547,7 @@ fn udp_delay(port: u16, target: &str) -> Result<u32, String> {
         .read_exact(&mut greeting)
         .map_err(|error| error.to_string())?;
     if greeting != [5, 0] {
-        return Err("SOCKS入口不支持无认证UDP测试".into());
+        return Err("SOCKS????????UDP??".into());
     }
     control
         .write_all(&[5, 3, 0, 1, 0, 0, 0, 0, 0, 0])
@@ -503,7 +557,7 @@ fn udp_delay(port: u16, target: &str) -> Result<u32, String> {
         .read_exact(&mut header)
         .map_err(|error| error.to_string())?;
     if header[1] != 0 {
-        return Err(format!("SOCKS UDP关联失败：代码{}", header[1]));
+        return Err(format!("SOCKS UDP???????{}", header[1]));
     }
     let mut relay = read_socks_address(&mut control, header[3])?;
     if relay.ip().is_unspecified() {
@@ -536,7 +590,7 @@ fn udp_delay(port: u16, target: &str) -> Result<u32, String> {
     let mut response = [0_u8; 2048];
     socket
         .recv_from(&mut response)
-        .map_err(|error| format!("UDP响应超时：{error}"))?;
+        .map_err(|error| format!("UDP?????{error}"))?;
     Ok(started.elapsed().as_millis().max(1).min(u32::MAX as u128) as u32)
 }
 
@@ -557,7 +611,7 @@ fn proxy_test_node(
                 speed: None,
                 ip_info: None,
                 mode: mode.into(),
-                message: format!("配置生成失败：{error}"),
+                message: format!("???????{error}"),
             }
         }
     };
@@ -574,14 +628,32 @@ fn proxy_test_node(
             }
         }
     };
-    let result = if !wait_for_port(port, Duration::from_secs(6)) {
+    let result = if TEST_CANCELLED.load(Ordering::Relaxed) {
         NodeTestResult {
             node_id: node.id.clone(),
             delay: None,
             speed: None,
             ip_info: None,
             mode: mode.into(),
-            message: "核心未能在6秒内启动测速代理".into(),
+            message: "?????".into(),
+        }
+    } else if !wait_for_port(port, Duration::from_secs(6)) {
+        NodeTestResult {
+            node_id: node.id.clone(),
+            delay: None,
+            speed: None,
+            ip_info: None,
+            mode: mode.into(),
+            message: "?????6????????".into(),
+        }
+    } else if TEST_CANCELLED.load(Ordering::Relaxed) {
+        NodeTestResult {
+            node_id: node.id.clone(),
+            delay: None,
+            speed: None,
+            ip_info: None,
+            mode: mode.into(),
+            message: "?????".into(),
         }
     } else if child.try_wait().ok().flatten().is_some() {
         NodeTestResult {
@@ -590,7 +662,7 @@ fn proxy_test_node(
             speed: None,
             ip_info: None,
             mode: mode.into(),
-            message: "测速核心已提前退出，请检查节点参数或核心日志".into(),
+            message: "??????????????????????".into(),
         }
     } else {
         if mode == "udp" {
@@ -601,7 +673,7 @@ fn proxy_test_node(
                     speed: None,
                     ip_info: None,
                     mode: mode.into(),
-                    message: "UDP可用".into(),
+                    message: "UDP??".into(),
                 },
                 Err(error) => NodeTestResult {
                     node_id: node.id.clone(),
@@ -632,7 +704,7 @@ fn proxy_test_node(
                                 speed: Some(speed),
                                 ip_info,
                                 mode: mode.into(),
-                                message: "下载测速完成".into(),
+                                message: "??????".into(),
                             },
                             Err(error) => NodeTestResult {
                                 node_id: node.id.clone(),
@@ -650,7 +722,7 @@ fn proxy_test_node(
                             speed: None,
                             ip_info,
                             mode: mode.into(),
-                            message: "真实代理可用".into(),
+                            message: "??????".into(),
                         }
                     }
                 }
@@ -672,14 +744,65 @@ fn proxy_test_node(
 
 fn available_test_port() -> Result<u16, String> {
     let listener = TcpListener::bind(("127.0.0.1", 0))
-        .map_err(|error| format!("分配测速端口失败：{error}"))?;
+        .map_err(|error| format!("?????????{error}"))?;
     listener
         .local_addr()
         .map(|address| address.port())
-        .map_err(|error| format!("读取测速端口失败：{error}"))
+        .map_err(|error| format!("?????????{error}"))
 }
 
 pub fn test_nodes(
+    app: &AppHandle,
+    node_ids: Vec<String>,
+    mode: Option<String>,
+) -> Result<NodeTestBatchResult, String> {
+    if TEST_RUNNING.swap(true, Ordering::AcqRel) {
+        return Err("V2ray??????".into());
+    }
+    let result = run_test_nodes(app, node_ids, mode);
+    TEST_RUNNING.store(false, Ordering::Release);
+    result
+}
+
+pub fn start_tests(
+    app: AppHandle,
+    node_ids: Vec<String>,
+    mode: Option<String>,
+) -> Result<NodeTestStartResult, String> {
+    if TEST_RUNNING.swap(true, Ordering::AcqRel) {
+        return Err("V2ray??????".into());
+    }
+    let total = if node_ids.is_empty() {
+        match store::list_nodes(&app, None) {
+            Ok(nodes) => nodes.len(),
+            Err(error) => {
+                TEST_RUNNING.store(false, Ordering::Release);
+                return Err(error);
+            }
+        }
+    } else {
+        node_ids
+            .iter()
+            .filter(|id| store::get_node(&app, id).is_ok())
+            .count()
+    };
+    let worker_app = app.clone();
+    std::thread::spawn(move || {
+        let result = run_test_nodes(&worker_app, node_ids, mode);
+        match &result {
+            Ok(batch) => {
+                let _ = worker_app.emit("v2ray-test-complete", batch);
+            }
+            Err(error) => {
+                let _ = worker_app.emit("v2ray-test-error", error);
+            }
+        }
+        TEST_RUNNING.store(false, Ordering::Release);
+    });
+    Ok(NodeTestStartResult { total })
+}
+
+fn run_test_nodes(
     app: &AppHandle,
     node_ids: Vec<String>,
     mode: Option<String>,
@@ -699,7 +822,7 @@ pub fn test_nodes(
         mode.as_str(),
         "tcp" | "real" | "speed" | "udp" | "mixed" | "fast-real"
     ) {
-        return Err("未知的V2ray测速模式".into());
+        return Err("???V2ray????".into());
     }
     store::clear_test_metrics(
         app,
@@ -738,7 +861,7 @@ pub fn test_nodes(
             let result = address
                 .to_socket_addrs()
                 .map_err(|error| error.to_string())
-                .and_then(|mut values| values.next().ok_or_else(|| "DNS 未返回地址".to_string()))
+                .and_then(|mut values| values.next().ok_or_else(|| "DNS ?????".to_string()))
                 .and_then(|address| {
                     TcpStream::connect_timeout(&address, Duration::from_secs(4))
                         .map_err(|error| error.to_string())
@@ -753,9 +876,9 @@ pub fn test_nodes(
                                 .checked_div(1_000)
                                 .unwrap_or(1)
                                 .clamp(1, u32::MAX as u128) as u32;
-                            NodeTestResult { node_id: node.id.clone(), delay: Some(delay), speed: None, ip_info: None, mode: mode.clone(), message: "TCP可达".into() }
+                            NodeTestResult { node_id: node.id.clone(), delay: Some(delay), speed: None, ip_info: None, mode: mode.clone(), message: "TCP??".into() }
                         },
-                        Err(error) => NodeTestResult { node_id: node.id.clone(), delay: None, speed: None, ip_info: None, mode: mode.clone(), message: format!("TCP失败：{error}") },
+                        Err(error) => NodeTestResult { node_id: node.id.clone(), delay: None, speed: None, ip_info: None, mode: mode.clone(), message: format!("TCP???{error}") },
                     }
                 } else {
                     match available_test_port() {
@@ -777,9 +900,9 @@ pub fn test_nodes(
         }
     });
     let mut indexed = Arc::try_unwrap(results)
-        .map_err(|_| "读取测速结果失败")?
+        .map_err(|_| "????????")?
         .into_inner()
-        .map_err(|_| "读取测速结果失败")?;
+        .map_err(|_| "????????")?;
     indexed.sort_by_key(|(index, _)| *index);
     let output = indexed
         .into_iter()
@@ -839,7 +962,7 @@ fn query_exit(port: u16) -> Option<(String, String)> {
         value
             .get("country")
             .and_then(serde_json::Value::as_str)
-            .unwrap_or("未知")
+            .unwrap_or("??")
             .to_string(),
     ))
 }
@@ -852,16 +975,16 @@ pub fn start_connection(
 ) -> Result<V2rayRuntimeState, String> {
     let node = match node_id {
         Some(id) => store::set_active(&app, &id)?,
-        None => store::active_node(&app)?.ok_or("请先选择一个 V2ray 节点")?,
+        None => store::active_node(&app)?.ok_or("?????? V2ray ??")?,
     };
-    if store.state.lock().map_err(|_| "连接状态不可用")?.connecting {
-        return Err("已有连接任务正在执行".into());
+    if store.state.lock().map_err(|_| "???????")?.connecting {
+        return Err("??????????".into());
     }
     let settings = settings::load(&app);
     if settings.tun_enabled && !crate::process_utils::is_elevated() {
         crate::process_utils::relaunch_elevated()?;
         app.exit(0);
-        return Err("KiNGO 已请求管理员权限并重新启动，请在新窗口中再次连接".into());
+        return Err("KiNGO ????????????????????????".into());
     }
     let mut runtime_node = node.clone();
     if settings.tun_enabled {
@@ -869,7 +992,7 @@ pub fn start_connection(
     }
     services::cancel_connection(&app, store, runtime)?;
     {
-        let mut state = store.state.lock().map_err(|_| "连接状态不可用")?;
+        let mut state = store.state.lock().map_err(|_| "???????")?;
         state.mode = "v2ray".into();
         state.connecting = true;
         state.connected = false;
@@ -882,24 +1005,24 @@ pub fn start_connection(
         state.latency = node.delay;
     }
     let cancel = std::sync::Arc::new(AtomicBool::new(false));
-    *store.cancel.lock().map_err(|_| "连接控制不可用")? = Some(cancel.clone());
+    *store.cancel.lock().map_err(|_| "???????")? = Some(cancel.clone());
     services::emit_snapshot(&app, store);
     let result: Result<V2rayRuntimeState, String> = (|| -> Result<V2rayRuntimeState, String> {
         let (config_path, port) = config::generate(&app, &runtime_node)?;
         if cancel.load(Ordering::Relaxed) {
-            return Err("连接已取消".into());
+            return Err("?????".into());
         }
         {
-            let mut state = store.state.lock().map_err(|_| "连接状态不可用")?;
+            let mut state = store.state.lock().map_err(|_| "???????")?;
             state.stage = "starting-core".into();
         }
         services::emit_snapshot(&app, store);
         core_runtime::start(&app, runtime, runtime_node.core_id.clone(), config_path)?;
         if !wait_for_port(port, Duration::from_secs(8)) {
-            return Err("核心未能在 8 秒内启动本地代理端口，请检查节点参数".into());
+            return Err("????? 8 ??????????????????".into());
         }
         if cancel.load(Ordering::Relaxed) {
-            return Err("连接已取消".into());
+            return Err("?????".into());
         }
         if settings.tun_enabled {
             system_proxy::disable(&store.proxy)?;
@@ -909,7 +1032,7 @@ pub fn start_connection(
         }
         let exit = query_exit(port);
         {
-            let mut state = store.state.lock().map_err(|_| "连接状态不可用")?;
+            let mut state = store.state.lock().map_err(|_| "???????")?;
             state.connecting = false;
             state.connected = true;
             state.stage = "connected".into();
@@ -921,7 +1044,7 @@ pub fn start_connection(
             state.error = None;
         }
         services::emit_snapshot(&app, store);
-        let _ = app.emit("connection-log", serde_json::json!({ "level": "success", "message": format!("V2ray 节点已连接：{}（{}）", node.name, node.core_id) }));
+        let _ = app.emit("connection-log", serde_json::json!({ "level": "success", "message": format!("V2ray ??????{}?{}?", node.name, node.core_id) }));
         Ok(V2rayRuntimeState {
             active_node_id: Some(node.id.clone()),
             core_id: Some(runtime_node.core_id.clone()),
@@ -942,7 +1065,7 @@ pub fn start_connection(
         services::emit_snapshot(&app, store);
         let _ = app.emit(
             "connection-log",
-            serde_json::json!({ "level": "error", "message": format!("V2ray 连接失败：{error}") }),
+            serde_json::json!({ "level": "error", "message": format!("V2ray ?????{error}") }),
         );
     }
     result

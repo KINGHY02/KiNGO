@@ -40,12 +40,12 @@ fn update_tray_visual(app: &tauri::AppHandle, state: &AppConnectionState) {
         state
             .display_name
             .as_deref()
-            .map(|name| format!("KiNGO · 已连接 · {name}"))
-            .unwrap_or_else(|| "KiNGO · 已连接".into())
+            .map(|name| format!("KiNGO ? ??? ? {name}"))
+            .unwrap_or_else(|| "KiNGO ? ???".into())
     } else if state.connecting {
-        "KiNGO · 正在连接".into()
+        "KiNGO ? ????".into()
     } else {
-        "KiNGO · 未连接".into()
+        "KiNGO ? ???".into()
     };
     let _ = tray.set_tooltip(Some(tooltip));
 }
@@ -297,7 +297,7 @@ fn restart_clash_core(
         .into_iter()
         .find(|profile| profile.active)
         .map(|profile| profile.id)
-        .ok_or("没有可重启的 Clash 配置")?;
+        .ok_or("?????? Clash ??")?;
     services::cancel_connection(&app, &store, &runtime)?;
     services::start_clash_connection(app.clone(), &store, &runtime, &active_profile)?;
     Ok(services::snapshot(&store))
@@ -311,7 +311,7 @@ fn open_clash_core_dir(app: tauri::AppHandle) -> Result<(), String> {
     process_utils::hidden_command("explorer")
         .arg(dir)
         .spawn()
-        .map_err(|error| format!("打开内核目录失败：{error}"))?;
+        .map_err(|error| format!("?????????{error}"))?;
     Ok(())
 }
 
@@ -477,7 +477,7 @@ fn delete_clash_profile(
                 services::cancel_connection(&app, &store, &runtime)?;
             }
             services::start_clash_connection(app.clone(), &store, &runtime, &replacement.id)
-                .map_err(|error| format!("切换到下一份配置失败，未删除当前配置：{error}"))?;
+                .map_err(|error| format!("???????????????????{error}"))?;
         } else {
             services::cancel_connection(&app, &store, &runtime)?;
         }
@@ -520,7 +520,7 @@ fn delete_clash_profiles(
                 let _ = services::cancel_connection(&app, &store, &runtime);
             }
             services::start_clash_connection(app.clone(), &store, &runtime, &replacement.id)
-                .map_err(|error| format!("切换到未删除配置失败：{error}"))
+                .map_err(|error| format!("???????????{error}"))
         } else {
             services::cancel_connection(&app, &store, &runtime)
         };
@@ -602,7 +602,7 @@ fn delete_v2ray_nodes(
 ) -> Result<usize, String> {
     let state = services::snapshot(&store);
     if state.mode == "v2ray" && state.connecting {
-        return Err("V2ray 服务正在切换节点，请稍后再删除".into());
+        return Err("V2ray ???????????????".into());
     }
     let deleting_active = v2ray::list_nodes(&app, None)?
         .iter()
@@ -632,16 +632,16 @@ fn set_active_v2ray_node(
     let target = v2ray::list_nodes(&app, None)?
         .into_iter()
         .find(|node| node.id == node_id)
-        .ok_or("V2ray 节点不存在")?;
+        .ok_or("V2ray ?????")?;
     if state.mode == "v2ray" && state.connecting {
-        return Err("V2ray 服务正在切换节点，请稍后再试".into());
+        return Err("V2ray ??????????????".into());
     }
     if state.mode == "v2ray" && state.connected && !target.active {
         v2ray::start_connection(app.clone(), &store, &runtime, Some(node_id.clone()))?;
         return v2ray::list_nodes(&app, None)?
             .into_iter()
             .find(|node| node.id == node_id)
-            .ok_or_else(|| "切换后读取活动节点失败".to_string());
+            .ok_or_else(|| "???????????".to_string());
     }
     v2ray::set_active_node(&app, node_id)
 }
@@ -660,7 +660,7 @@ fn update_v2ray_node(
             .iter()
             .any(|node| node.id == node_id && node.active)
     {
-        return Err("当前活动节点正在运行，请先断开连接再编辑".into());
+        return Err("????????????????????".into());
     }
     v2ray::update_node(&app, node_id, input)
 }
@@ -740,7 +740,7 @@ fn set_v2ray_settings(
 ) -> Result<v2ray::V2raySettings, String> {
     let state = services::snapshot(&store);
     if state.mode == "v2ray" && (state.connected || state.connecting) {
-        return Err("请先断开 V2ray 连接，再修改运行设置".into());
+        return Err("???? V2ray ??????????".into());
     }
     v2ray::save_settings(&app, settings)
 }
@@ -779,7 +779,7 @@ fn update_v2ray_subscription(
 ) -> Result<v2ray::SubscriptionUpdateResult, String> {
     let state = services::snapshot(&store);
     if state.mode == "v2ray" && (state.connected || state.connecting) {
-        return Err("请先断开 V2ray 连接再更新订阅".into());
+        return Err("???? V2ray ???????".into());
     }
     v2ray::update_subscription(&app, subscription_id)
 }
@@ -791,7 +791,7 @@ fn update_all_v2ray_subscriptions(
 ) -> Result<v2ray::SubscriptionBatchResult, String> {
     let state = services::snapshot(&store);
     if state.mode == "v2ray" && (state.connected || state.connecting) {
-        return Err("请先断开 V2ray 连接再更新订阅".into());
+        return Err("???? V2ray ???????".into());
     }
     v2ray::update_all_subscriptions(&app)
 }
@@ -809,7 +809,7 @@ fn delete_v2ray_subscription(
             .iter()
             .any(|node| node.active && node.subscription_id.as_deref() == Some(&subscription_id))
     {
-        return Err("当前订阅中的活动节点正在运行，请先断开连接再删除订阅".into());
+        return Err("??????????????????????????".into());
     }
     v2ray::delete_subscription(&app, subscription_id)
 }
@@ -821,6 +821,15 @@ fn test_v2ray_nodes(
     mode: Option<String>,
 ) -> Result<v2ray::NodeTestBatchResult, String> {
     v2ray::test_nodes(&app, node_ids, mode)
+}
+
+#[tauri::command]
+fn start_v2ray_tests(
+    app: tauri::AppHandle,
+    node_ids: Vec<String>,
+    mode: Option<String>,
+) -> Result<v2ray::NodeTestStartResult, String> {
+    v2ray::start_tests(app, node_ids, mode)
 }
 
 #[tauri::command]
@@ -863,7 +872,7 @@ fn ensure_clash_connected(store: &ConnectionStore) -> Result<(), String> {
     {
         Ok(())
     } else {
-        Err("请先启动一个 Clash 配置".into())
+        Err("?????? Clash ??".into())
     }
 }
 
@@ -1062,9 +1071,9 @@ pub fn run() {
             v2ray::start_subscription_scheduler(app.handle().clone());
             clash_profiles::start_scheduler(app.handle().clone());
             let tray_menu = MenuBuilder::new(app)
-                .text("show", "显示 KiNGO")
+                .text("show", "?? KiNGO")
                 .separator()
-                .text("quit", "退出 KiNGO")
+                .text("quit", "?? KiNGO")
                 .build()?;
             let tray_icon = tauri::image::Image::from_bytes(include_bytes!("../icons/tray.png"))?;
             TrayIconBuilder::with_id("kingo-tray")
@@ -1209,6 +1218,7 @@ pub fn run() {
             update_all_v2ray_subscriptions,
             delete_v2ray_subscription,
             test_v2ray_nodes,
+            start_v2ray_tests,
             cancel_v2ray_tests,
             start_v2ray_connection,
             stop_v2ray_connection,

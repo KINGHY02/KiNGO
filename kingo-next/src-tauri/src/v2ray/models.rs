@@ -86,6 +86,12 @@ pub struct NodeTestBatchResult {
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct NodeTestStartResult {
+    pub total: usize,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct NodeShare {
     pub node_id: String,
     pub name: String,
