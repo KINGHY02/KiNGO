@@ -1,0 +1,26 @@
+{
+  "server": "[2001:bc8:32d7:17b::3]:22000",
+  "auth": "dongtaiwang.com",
+  "bandwidth": {
+    "up": "11 mbps",
+    "down": "55 mbps"
+  },
+  "tls": {
+    "sni": "www.microsoft.com",
+    "insecure": true
+  },
+  "quic": {
+    "initStreamReceiveWindow": 16777216,
+    "maxStreamReceiveWindow": 16777216,
+    "initConnReceiveWindow": 33554432,
+    "maxConnReceiveWindow": 33554432
+  },
+  "socks5": {
+    "listen": "127.0.0.1:1080"
+  },
+  "transport": {
+    "udp": {
+      "hopInterval": "30s"
+    }
+  }
+}

@@ -1,0 +1,18 @@
+{
+  "profiles": [
+    {
+      "profileName": "mieru-tcp",
+      "user": { "name": "tcp_yuyys0xg", "password": "8n2IZjc7vUJPPEqm" },
+      "servers": [{
+        "ipAddress": "156.225.88.93",
+        "domainName": "",
+        "portBindings": [{ "port": 19022, "protocol": "TCP" }]
+      }],
+      "mtu": 1375
+    }
+  ],
+  "activeProfile": "mieru-tcp",
+  "rpcPort": 8964,
+  "socks5Port": 3080,
+  "loggingLevel": "INFO"
+}

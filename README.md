@@ -1,116 +1,149 @@
-<h1 align="center">
-  <img src="./app/renderer/src/assets/KiNGO.png" alt="KiNGO" width="96" />
-  <br />
-  KiNGO
-</h1>
+<div align="center">
+  <img src="./kingo-next/src/assets/kingo-logo.png" alt="KiNGO Logo" width="112" />
+  <h1>KiNGO</h1>
+  <p>面向 Windows 的多核心网络连接与代理管理客户端</p>
 
-<h3 align="center">
-  面向 Windows 的多模式网络代理客户端
-</h3>
+  [![Release](https://img.shields.io/github/v/release/KINGHY02/KiNGO?display_name=tag&sort=semver)](https://github.com/KINGHY02/KiNGO/releases/latest)
+  [![Windows](https://img.shields.io/badge/Windows-x64-1677ff?logo=windows11)](https://github.com/KINGHY02/KiNGO/releases/latest)
+  [![Tauri 2](https://img.shields.io/badge/Tauri-2-24c8db?logo=tauri)](https://v2.tauri.app/)
 
-<p align="center">
-  公共线路 · Clash 模式 · V2rayN 模式 · mihomo · Xray · sing-box
-</p>
+  [下载最新版](https://github.com/KINGHY02/KiNGO/releases/latest) · [提交问题](https://github.com/KINGHY02/KiNGO/issues) · [Telegram](https://t.me/kingovpn)
+</div>
 
-<p align="center">
-  <a href="https://github.com/KINGHY02/KiNGO/releases">下载最新版</a>
-  ·
-  <a href="https://github.com/KINGHY02/KiNGO/issues">问题反馈</a>
-  ·
-  <a href="https://t.me/kingovpn">Telegram 交流群</a>
-</p>
+## 项目简介
 
-## KiNGO 是什么？
+KiNGO 2.0 已迁移到 **Tauri 2 + Rust + React + TypeScript**。当前正式构建来自 [`kingo-next`](./kingo-next)，仓库中的旧 Electron 工程仅用于历史参考，不参与 2.0 安装包构建。
 
-KiNGO 是一款面向 Windows 的网络代理客户端，提供公共线路、Clash 模式和 V2rayN 模式三种入口。
+KiNGO 提供三种彼此独立的使用入口：
 
-它的目标是让不同使用习惯的用户都能快速上手：
-
-- 新用户可以从首页一键连接公共线路，先体验 KiNGO 的基本流程。
-- Clash 用户可以进入 Clash 模式，导入订阅或 YAML 配置，管理代理组和节点。
-- v2rayN 用户可以进入 V2rayN 模式，按分组、订阅和节点列表的方式管理节点。
-
-KiNGO 只负责客户端连接、配置管理和本地代理控制，不运营、不销售、也不提供代理线路。
+| 模式 | 适用场景 | 主要能力 |
+| --- | --- | --- |
+| 全自动 | 希望快速选择并连接公共线路 | 批量测速、线路更新、自动优选、故障自动切换、出口 IP 与实时流量 |
+| Clash | 使用 Clash / Mihomo 订阅或 YAML | 订阅与本地配置、代理组、节点切换与测速、Provider、规则、连接、实时日志 |
+| V2ray | 使用 v2rayN 风格节点与订阅 | 分组与订阅、完整节点编辑、批量管理、去重排序、分享/二维码、真实代理测速 |
 
 ## 主要功能
 
-- 首页一键连接/断开，显示当前模式、节点/线路、延迟和连接状态。
-- 公共线路自动选择，支持快速体验 KiNGO 的连接流程。
-- Clash 模式支持 Clash YAML 和常见订阅链接，默认使用 mihomo 核心。
-- V2rayN 模式支持订阅分组、手动分组、批量导入、删除、排序和节点测速。
-- 支持系统代理开关，并提供 TUN 模式入口。
-- 托盘常驻，支持快速查看状态、打开主窗口和断开连接。
-- 提供连接日志，方便排查订阅更新、核心启动和系统代理问题。
-- 支持亮色、暗色、粉色、冰川蓝等界面主题。
-- 支持代理核心版本检测、下载更新、打开核心目录和恢复内置核心。
+### 全自动模式
 
-## 三种使用入口
+- 一键测试和选择公共线路，支持自定义测速地址、超时与并发数。
+- 连接失败或核心异常退出时恢复原 Windows 系统代理。
+- 可选线路故障自动切换，并记录每次检测与切换结果。
+- 展示当前线路、核心、延迟、出口 IP、国家/地区和实时流量。
 
-### 首页 / 公共线路
+### Clash / Mihomo 模式
 
-首页适合快速连接。点击主按钮后，KiNGO 会根据当前设置选择公共线路并尝试连接。
+- 导入远程订阅或本地 YAML，保存前执行 YAML 与 Mihomo 完整校验。
+- 编辑原始配置、查看只读运行配置、批量更新和批量删除。
+- 查看代理组，选择节点，执行单节点或整组延迟测试。
+- 管理 Proxy Provider，支持更新与健康检查。
+- 查看规则、活动连接、连接详情和本次运行的已关闭连接。
+- 通过 Mihomo WebSocket 接收流量、连接和日志，断线时自动降级与重连。
+- 管理局域网访问、IPv6、统一延迟和 Windows 系统代理状态。
 
-公共线路来自第三方公开项目，KiNGO 不运营或提供代理线路，其可用性和稳定性不受 KiNGO 控制。
+### V2ray 模式
 
-### Clash 模式
+- 导入常见分享链接，并通过 SQLite 在本机持久化节点、订阅和测速结果。
+- 支持节点新增、编辑、复制、分组移动、拖放排序、批量删除和去重。
+- 支持订阅新增、编辑、启停、更新计划、名称过滤和批量更新。
+- 支持 TCP 可达性测试与通过临时核心执行的真实代理测速。
+- 支持分享链接、批量导出和二维码展示。
+- 根据节点能力生成 Xray 或 sing-box 配置，端口就绪后再接管系统代理。
 
-适合 Clash Verge、Clash Party、Clash for Windows 等用户。
+### 桌面与运行安全
 
-- 导入 Clash 订阅或 YAML 配置。
-- 查看代理组和节点。
-- 切换代理组中的节点。
-- 使用规则、全局、直连等常见模式。
-- 通过 mihomo 核心提供 Clash 生态兼容能力。
-
-### V2rayN 模式
-
-适合 v2rayN 用户。
-
-- 支持订阅分组和手动分组。
-- 支持粘贴导入节点链接。
-- 支持批量删除、键盘 Delete 删除、表格排序和节点测速。
-- 以接近 v2rayN 的列表方式管理节点。
-
-## 核心管理
-
-KiNGO 内置常用代理核心，首次安装后即可使用。
-
-如果用户手动更新核心，KiNGO 会把更新后的核心保存到用户数据目录，并在启动时优先使用用户更新版核心：
-
-```text
-用户更新版核心 > 安装包内置核心 > 缺失提示
-```
-
-这样软件升级不会覆盖用户自己更新过的核心。
-
-如果更新后的核心出现问题，可以在设置中恢复内置核心。
+- 单实例运行，重复启动会唤醒已有窗口。
+- 关闭主窗口后驻留系统托盘，可从托盘重新打开或退出。
+- 所有代理核心、系统命令和探测命令均以隐藏窗口方式启动，不弹出控制台。
+- 正常退出、连接取消、核心崩溃和下次启动恢复共用系统代理清理链路。
+- 内置核心可检测版本、在线更新，也可以随时恢复安装包自带版本。
 
 ## 下载与安装
 
-请前往 GitHub Releases 下载最新 Windows 安装包：
+前往 [GitHub Releases](https://github.com/KINGHY02/KiNGO/releases/latest) 下载：
 
-[KiNGO Releases](https://github.com/KINGHY02/KiNGO/releases)
+```text
+KiNGO-Setup-<版本号>-x64.exe
+```
 
-安装后运行 KiNGO，根据需要选择首页公共线路、Clash 模式或 V2rayN 模式。
+安装器支持简体中文与英文，会自动跟随 Windows 显示语言。KiNGO 当前提供未签名的社区构建，因此 Windows 首次运行时可能显示 SmartScreen 提示；请只从本仓库的 Releases 页面下载安装包。
 
-## 使用提示
+系统要求：
 
-1. 如果只是想快速体验，可以在首页直接点击连接按钮。
-2. 如果你有 Clash 订阅，请进入「Clash 模式」导入订阅。
-3. 如果你有 v2rayN 节点或订阅，请进入「V2rayN 模式」管理分组和节点。
-4. 如果连接失败，请查看「连接日志」，日志中会显示订阅更新、核心启动和系统代理相关错误。
+- Windows 10 / 11 x64
+- Microsoft Edge WebView2 Runtime（多数受支持的 Windows 已预装）
+- 使用系统代理模式通常不需要管理员权限；部分高级网络能力可能需要提升权限
 
-## 重要声明
+## 快速使用
 
-KiNGO 是网络连接客户端，不运营、不销售、也不提供代理线路。
+1. 只想快速体验时，在“全自动”模式测试线路并选择可用项。
+2. 已有 Clash 订阅时，在“Clash → 订阅”中导入并启动配置。
+3. 已有节点或 v2rayN 订阅时，在“V2ray → 配置项 / 订阅分组”中导入。
+4. 遇到连接问题时，先查看“日志”以及当前核心、系统代理和出口状态。
 
-公共线路来自第三方公开项目，仅用于软件功能体验。其可用性、速度、稳定性和安全性不由 KiNGO 保证。
+## 数据与隐私
 
-请遵守所在国家或地区的法律法规，仅在合法场景中使用 KiNGO。
+- KiNGO 不要求注册账号，当前不提供云同步。
+- 订阅地址、私有节点、运行配置、SQLite 数据库和日志保存在本机应用数据目录。
+- KiNGO 会按用户操作访问订阅地址、连通性测试地址、GitHub Releases 和公共线路来源。
+- 公共线路由第三方公开来源提供，其可用性、速度、稳定性和安全性不由 KiNGO 保证。
+
+默认数据目录：
+
+```text
+%APPDATA%\com.kingo.client
+```
+
+## 从源码构建
+
+准备 Node.js 20、Rust stable（MSVC 工具链）、Microsoft C++ Build Tools 和 WebView2 开发环境，然后执行：
+
+```powershell
+cd kingo-next
+npm ci
+npm run check
+npm test
+npm run bundle
+```
+
+`npm ci` 会校验仓库中的核心资源分片并自动还原 `src-tauri\resources\cores`，无需手工下载核心。
+
+本地 NSIS 安装包输出到：
+
+```text
+kingo-next\src-tauri\target\release\bundle\nsis\
+```
+
+重新生成安装器素材和 Windows 图标：
+
+```powershell
+npm run assets:installer
+npm run tauri -- icon src-tauri/icons/app-icon-source.png
+```
+
+## 项目结构
+
+```text
+kingo-next/
+├─ core-assets/               内置核心压缩包分片与校验清单
+├─ src/                       React 用户界面
+├─ src-tauri/src/             Rust 服务、核心生命周期和系统代理
+├─ src-tauri/resources/       内置核心与公共线路配置
+├─ src-tauri/installer/       NSIS / WiX 文案与视觉素材
+└─ scripts/                   安装器素材生成脚本
+```
+
+GitHub Actions 会在拉取请求中验证 Windows 安装包构建，并在推送 `v*` tag 时创建 Release、构建 NSIS 安装包并上传产物。
+
+## 当前边界
+
+- 当前正式构建仅面向 Windows x64。
+- 2.0 以系统代理连接为主；完整 TUN、PAC 和高级 DNS 编辑能力仍在后续迭代中。
+- 软件功能不等同于代理服务。KiNGO 不运营、不销售、也不提供代理线路。
 
 ## 反馈
 
-如果遇到问题或希望提出建议，可以通过以下方式反馈：
+- [GitHub Issues](https://github.com/KINGHY02/KiNGO/issues)
+- [Telegram 交流](https://t.me/kingovpn)
 
-- GitHub Issues：[提交问题](https://github.com/KINGHY02/KiNGO/issues)
-- Telegram：[加入 KiNGO 交流群](https://t.me/kingovpn)
+请遵守所在国家或地区的法律法规，仅在合法场景中使用 KiNGO。
