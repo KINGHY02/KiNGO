@@ -742,6 +742,7 @@ fn proxy_test_node(
     result
 }
 
+#[rustfmt::skip]
 fn available_test_port() -> Result<u16, String> {
     let listener = TcpListener::bind(("127.0.0.1", 0))
         .map_err(|error| format!("?????????{error}"))?;
