@@ -14,6 +14,8 @@ npm test
 npm run bundle
 ```
 
+`npm ci` 会根据 `core-assets/manifest.json` 校验并还原构建所需的内置核心。
+
 `npm run bundle` 会构建 Windows x64 NSIS 安装包，输出目录为：
 
 ```text
@@ -31,6 +33,7 @@ npm run tauri -- icon src-tauri/icons/app-icon-source.png
 
 ```text
 src/                       React 用户界面
+core-assets/               内置核心压缩包分片与校验清单
 src-tauri/src/             Rust 后端与系统集成
 src-tauri/resources/       内置核心和线路配置
 src-tauri/installer/       安装器文案与视觉素材

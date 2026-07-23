@@ -138,6 +138,19 @@ fn start_public_connection(
 }
 
 #[tauri::command]
+fn get_auto_routing_settings(app: tauri::AppHandle) -> services::AutoRoutingSettings {
+    services::get_auto_routing_settings(&app)
+}
+
+#[tauri::command]
+fn set_auto_routing_settings(
+    app: tauri::AppHandle,
+    settings: services::AutoRoutingSettings,
+) -> Result<services::AutoRoutingSettings, String> {
+    services::set_auto_routing_settings(&app, settings)
+}
+
+#[tauri::command]
 fn cancel_connection(
     app: tauri::AppHandle,
     store: State<'_, ConnectionStore>,
@@ -824,6 +837,15 @@ fn test_v2ray_nodes(
 }
 
 #[tauri::command]
+fn start_v2ray_tests(
+    app: tauri::AppHandle,
+    node_ids: Vec<String>,
+    mode: Option<String>,
+) -> Result<v2ray::NodeTestStartResult, String> {
+    v2ray::start_tests(app, node_ids, mode)
+}
+
+#[tauri::command]
 fn cancel_v2ray_tests() {
     v2ray::cancel_tests();
 }
@@ -1125,6 +1147,8 @@ pub fn run() {
             get_public_route_update_status,
             select_public_route,
             start_public_connection,
+            get_auto_routing_settings,
+            set_auto_routing_settings,
             cancel_connection,
             disconnect,
             refresh_exit_info,
@@ -1209,6 +1233,7 @@ pub fn run() {
             update_all_v2ray_subscriptions,
             delete_v2ray_subscription,
             test_v2ray_nodes,
+            start_v2ray_tests,
             cancel_v2ray_tests,
             start_v2ray_connection,
             stop_v2ray_connection,

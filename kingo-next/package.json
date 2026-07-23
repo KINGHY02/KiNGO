@@ -4,6 +4,7 @@
   "version": "2.0.0",
   "type": "module",
   "scripts": {
+    "postinstall": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/restore-core-assets.ps1",
     "dev": "vite",
     "build": "tsc && vite build",
     "check": "npm run build && cargo check --manifest-path src-tauri/Cargo.toml",

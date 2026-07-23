@@ -67,7 +67,6 @@ jobs:
           releaseName: "KiNGO ${{ github.ref_name }}"
           releaseBody: |
             KiNGO 2.0 新架构 Windows x64 安装包。
-
             请下载 `KiNGO-Setup-*-x64.exe`。本版本为未签名构建，Windows 首次运行时可能显示 SmartScreen 提示。
           generateReleaseNotes: true
           releaseDraft: false

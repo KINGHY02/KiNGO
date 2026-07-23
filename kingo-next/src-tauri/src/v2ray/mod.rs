@@ -14,6 +14,7 @@ use std::{
     collections::VecDeque,
     io::{Read, Write},
     net::{SocketAddr, TcpListener, TcpStream, ToSocketAddrs, UdpSocket},
+    process::Stdio,
     sync::{
         atomic::{AtomicBool, AtomicUsize, Ordering},
         Arc, Mutex,
@@ -23,6 +24,7 @@ use std::{
 use tauri::{AppHandle, Emitter};
 
 static TEST_CANCELLED: AtomicBool = AtomicBool::new(false);
+static TEST_RUNNING: AtomicBool = AtomicBool::new(false);
 
 pub fn get_settings(app: &AppHandle) -> V2raySettings {
     settings::load(app)
@@ -369,6 +371,7 @@ pub fn delete_subscription(app: &AppHandle, subscription_id: String) -> Result<(
     store::delete_subscription(app, &subscription_id)
 }
 
+#[allow(dead_code)]
 fn curl_proxy_output(
     port: u16,
     url: &str,
@@ -400,10 +403,61 @@ fn curl_proxy_output(
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
+fn curl_proxy_output_cancelable(
+    port: u16,
+    url: &str,
+    timeout: u32,
+    write_out: Option<&str>,
+) -> Result<String, String> {
+    let timeout = timeout.to_string();
+    let proxy = format!("socks5h://127.0.0.1:{port}");
+    let mut command = hidden_command("curl.exe");
+    command.args([
+        "-fsS",
+        "--connect-timeout",
+        &timeout,
+        "--max-time",
+        &timeout,
+        "--proxy",
+        &proxy,
+    ]);
+    if let Some(format) = write_out {
+        command.args(["-o", "NUL", "-w", format]);
+    }
+    let mut child = command
+        .arg(url)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|error| format!("启动代理请求失败：{error}"))?;
+    loop {
+        if TEST_CANCELLED.load(Ordering::Relaxed) {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err("测速已取消".into());
+        }
+        if child
+            .try_wait()
+            .map_err(|error| format!("读取代理请求状态失败：{error}"))?
+            .is_some()
+        {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(80));
+    }
+    let output = child
+        .wait_with_output()
+        .map_err(|error| format!("读取代理请求结果失败：{error}"))?;
+    if !output.status.success() {
+        return Err(format!("代理请求失败：{}", output.status));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
 fn real_delay(port: u16, url: &str, timeout: u32) -> Result<u32, String> {
     let mut samples = Vec::new();
     for _ in 0..2 {
-        let seconds = curl_proxy_output(port, url, timeout, Some("%{time_total}"))?
+        let seconds = curl_proxy_output_cancelable(port, url, timeout, Some("%{time_total}"))?
             .parse::<f64>()
             .map_err(|_| "测速返回了无效耗时".to_string())?;
         samples.push((seconds * 1000.0).round().max(1.0) as u32);
@@ -413,7 +467,7 @@ fn real_delay(port: u16, url: &str, timeout: u32) -> Result<u32, String> {
 }
 
 fn exit_ip_info(port: u16, url: &str, timeout: u32) -> Option<String> {
-    let content = curl_proxy_output(port, url, timeout, None).ok()?;
+    let content = curl_proxy_output_cancelable(port, url, timeout, None).ok()?;
     let value = serde_json::from_str::<serde_json::Value>(&content).ok();
     if let Some(value) = value {
         let ip = value
@@ -438,7 +492,7 @@ fn exit_ip_info(port: u16, url: &str, timeout: u32) -> Option<String> {
 }
 
 fn download_speed(port: u16, url: &str, timeout: u32) -> Result<u64, String> {
-    let value = curl_proxy_output(port, url, timeout, Some("%{speed_download}"))?
+    let value = curl_proxy_output_cancelable(port, url, timeout, Some("%{speed_download}"))?
         .parse::<f64>()
         .map_err(|_| "下载测速返回了无效速度".to_string())?;
     if value <= 0.0 {
@@ -574,7 +628,16 @@ fn proxy_test_node(
             }
         }
     };
-    let result = if !wait_for_port(port, Duration::from_secs(6)) {
+    let result = if TEST_CANCELLED.load(Ordering::Relaxed) {
+        NodeTestResult {
+            node_id: node.id.clone(),
+            delay: None,
+            speed: None,
+            ip_info: None,
+            mode: mode.into(),
+            message: "测速已取消".into(),
+        }
+    } else if !wait_for_port(port, Duration::from_secs(6)) {
         NodeTestResult {
             node_id: node.id.clone(),
             delay: None,
@@ -582,6 +645,15 @@ fn proxy_test_node(
             ip_info: None,
             mode: mode.into(),
             message: "核心未能在6秒内启动测速代理".into(),
+        }
+    } else if TEST_CANCELLED.load(Ordering::Relaxed) {
+        NodeTestResult {
+            node_id: node.id.clone(),
+            delay: None,
+            speed: None,
+            ip_info: None,
+            mode: mode.into(),
+            message: "测速已取消".into(),
         }
     } else if child.try_wait().ok().flatten().is_some() {
         NodeTestResult {
@@ -680,6 +752,57 @@ fn available_test_port() -> Result<u16, String> {
 }
 
 pub fn test_nodes(
+    app: &AppHandle,
+    node_ids: Vec<String>,
+    mode: Option<String>,
+) -> Result<NodeTestBatchResult, String> {
+    if TEST_RUNNING.swap(true, Ordering::AcqRel) {
+        return Err("V2ray测速正在运行".into());
+    }
+    let result = run_test_nodes(app, node_ids, mode);
+    TEST_RUNNING.store(false, Ordering::Release);
+    result
+}
+
+pub fn start_tests(
+    app: AppHandle,
+    node_ids: Vec<String>,
+    mode: Option<String>,
+) -> Result<NodeTestStartResult, String> {
+    if TEST_RUNNING.swap(true, Ordering::AcqRel) {
+        return Err("V2ray测速正在运行".into());
+    }
+    let total = if node_ids.is_empty() {
+        match store::list_nodes(&app, None) {
+            Ok(nodes) => nodes.len(),
+            Err(error) => {
+                TEST_RUNNING.store(false, Ordering::Release);
+                return Err(error);
+            }
+        }
+    } else {
+        node_ids
+            .iter()
+            .filter(|id| store::get_node(&app, id).is_ok())
+            .count()
+    };
+    let worker_app = app.clone();
+    std::thread::spawn(move || {
+        let result = run_test_nodes(&worker_app, node_ids, mode);
+        match &result {
+            Ok(batch) => {
+                let _ = worker_app.emit("v2ray-test-complete", batch);
+            }
+            Err(error) => {
+                let _ = worker_app.emit("v2ray-test-error", error);
+            }
+        }
+        TEST_RUNNING.store(false, Ordering::Release);
+    });
+    Ok(NodeTestStartResult { total })
+}
+
+fn run_test_nodes(
     app: &AppHandle,
     node_ids: Vec<String>,
     mode: Option<String>,

@@ -106,6 +106,8 @@ npm test
 npm run bundle
 ```
 
+`npm ci` 会校验仓库中的核心资源分片并自动还原 `src-tauri\resources\cores`，无需手工下载核心。
+
 本地 NSIS 安装包输出到：
 
 ```text
@@ -123,6 +125,7 @@ npm run tauri -- icon src-tauri/icons/app-icon-source.png
 
 ```text
 kingo-next/
+├─ core-assets/               内置核心压缩包分片与校验清单
 ├─ src/                       React 用户界面
 ├─ src-tauri/src/             Rust 服务、核心生命周期和系统代理
 ├─ src-tauri/resources/       内置核心与公共线路配置

@@ -55,7 +55,9 @@ type ImportResult = {
   subscriptions: { subscription: Subscription; imported: number; skipped: number; errors: string[] }[];
 };
 type TestMode = "tcp" | "real" | "speed" | "udp" | "mixed" | "fast-real";
-type TestBatch = { results: { delay: number | null; speed: number | null; ipInfo: string | null; mode: string; message: string }[]; cancelled: boolean };
+type TestResult = { nodeId: string; delay: number | null; speed: number | null; ipInfo: string | null; mode: string; message: string };
+type TestBatch = { results: TestResult[]; cancelled: boolean };
+type TestStart = { total: number };
 type ResultFilter = "all" | "available" | "failed" | "untested";
 type ContextMenu = { x: number; y: number; node: NodeItem };
 type RuntimeSettings = { localPort: number; allowLan: boolean; systemProxy: boolean };
@@ -114,6 +116,24 @@ type TestProgress = {
   mode: string;
   message: string;
 };
+
+function testSummary(batch: TestBatch) {
+  const mode = batch.results[0]?.mode ?? "tcp";
+  const succeeded = mode === "speed" || mode === "mixed"
+    ? batch.results.filter((item) => item.speed != null).length
+    : batch.results.filter((item) => item.delay != null).length;
+  const veryLowTcpResults = mode === "tcp"
+    ? batch.results.filter((item) => item.delay != null && item.delay <= 2).length
+    : 0;
+  const tcpResultMayBeIntercepted = mode === "tcp"
+    && batch.results.length >= 10
+    && veryLowTcpResults >= Math.ceil(batch.results.length / 2);
+  if (batch.cancelled) return `测速已取消，已完成 ${batch.results.length} 个节点`;
+  if (tcpResultMayBeIntercepted) {
+    return `TCP 端口检查完成：${succeeded}/${batch.results.length}。大量结果为 1-2 ms，可能被本机其他代理或 TUN 接管，请关闭后重测或使用“真实延迟”。`;
+  }
+  return `测速完成：${succeeded}/${batch.results.length} 个节点成功`;
+}
 
 type DialogState =
   | { kind: "import"; text: string }
@@ -290,7 +310,9 @@ export function V2rayWorkspace({
   }, [refresh]);
 
   useEffect(() => {
-    let cleanup: (() => void) | undefined;
+    let cleanupProgress: (() => void) | undefined;
+    let cleanupComplete: (() => void) | undefined;
+    let cleanupError: (() => void) | undefined;
     void listen<TestProgress>("v2ray-test-progress", (event) => {
       setProgress(event.payload);
       setNodes((items) =>
@@ -307,10 +329,29 @@ export function V2rayWorkspace({
         ),
       );
     }).then((value) => {
-      cleanup = value;
+      cleanupProgress = value;
     });
-    return () => cleanup?.();
-  }, []);
+    void listen<TestBatch>("v2ray-test-complete", (event) => {
+      setBusy((value) => value?.startsWith("test-") ? null : value);
+      setProgress(null);
+      setNotice(testSummary(event.payload));
+      void refresh().catch((value) => setError(String(value)));
+    }).then((value) => {
+      cleanupComplete = value;
+    });
+    void listen<string>("v2ray-test-error", (event) => {
+      setBusy((value) => value?.startsWith("test-") ? null : value);
+      setProgress(null);
+      setError(String(event.payload));
+    }).then((value) => {
+      cleanupError = value;
+    });
+    return () => {
+      cleanupProgress?.();
+      cleanupComplete?.();
+      cleanupError?.();
+    };
+  }, [refresh]);
 
   useEffect(() => {
     const close = () => {
@@ -532,6 +573,30 @@ export function V2rayWorkspace({
   }
 
   async function testSelected(mode: TestMode, explicitIds?: string[]) {
+    if (busy?.startsWith("test-")) {
+      setNotice("V2ray测速正在运行");
+      return;
+    }
+    const allNodes = mode === "mixed" || mode === "fast-real";
+    const nodeIds = explicitIds ?? (allNodes ? nodes.map((item) => item.id) : selected.size ? selectedIds() : visibleNodes.map((item) => item.id));
+    setBusy(`test-${mode}`);
+    setError(null);
+    setNotice(null);
+    setProgress(null);
+    try {
+      const started = await invoke<TestStart>("start_v2ray_tests", { nodeIds, mode });
+      setProgress({ completed: 0, total: started.total, nodeId: "", delay: null, speed: null, ipInfo: null, mode, message: "测速已开始" });
+      if (started.total === 0) {
+        setBusy(null);
+        setProgress(null);
+        setNotice("没有可测速的节点");
+      }
+    } catch (value) {
+      setBusy(null);
+      setProgress(null);
+      setError(String(value));
+    }
+    return;
     setProgress(null);
     await run(`test-${mode}`, async () => {
       const allNodes = mode === "mixed" || mode === "fast-real";
@@ -818,19 +883,22 @@ export function V2rayWorkspace({
     });
   }
 
+  const testingBusy = busy?.startsWith("test-") === true;
+  const actionBusy = busy != null && !testingBusy;
+
   if (view === "subscriptions") {
     return (
       <div className="page v2ray-workspace v2ray-section-page">
         <section className="v2ray-section-heading">
           <div><h2>订阅分组</h2><p>管理订阅地址、过滤规则、User-Agent 与启用状态</p></div>
-          <div><button className="primary-button" onClick={() => void addSubscription()}><PlusOutlined /> 添加订阅</button><button onClick={() => void updateSubscriptions()} disabled={!subscriptions.length || busy != null}><ReloadOutlined /> 更新全部</button></div>
+          <div><button className="primary-button" onClick={() => void addSubscription()}><PlusOutlined /> 添加订阅</button><button onClick={() => void updateSubscriptions()} disabled={!subscriptions.length || actionBusy}><ReloadOutlined /> 更新全部</button></div>
         </section>
         <Messages notice={notice} error={error ?? state.error} />
         <section className="v2ray-subscription-list">
           {subscriptions.map((subscription) => (
             <article key={subscription.id}>
               <div className="v2ray-subscription-main"><span className={subscription.enabled ? "subscription-dot enabled" : "subscription-dot"} /><div><b>{subscription.name}</b><p>{subscription.url}</p><small>{subscription.nodeCount} 个节点 · User-Agent: {subscription.userAgent || "v2rayN/7.12.5"}{subscription.filter ? ` · 过滤：${subscription.filter}` : ""}</small>{subscription.lastError && <em>{subscription.lastError}</em>}</div></div>
-              <div className="v2ray-subscription-actions"><button onClick={() => void updateOneSubscription(subscription)} disabled={busy != null}><ReloadOutlined /> 更新</button><button onClick={() => void editSubscription(subscription)}><EditOutlined /> 编辑</button><button onClick={() => void toggleSubscription(subscription)}>{subscription.enabled ? "停用" : "启用"}</button><button className="danger-button" onClick={() => void removeSubscription(subscription)}><DeleteOutlined /></button></div>
+              <div className="v2ray-subscription-actions"><button onClick={() => void updateOneSubscription(subscription)} disabled={actionBusy}><ReloadOutlined /> 更新</button><button onClick={() => void editSubscription(subscription)}><EditOutlined /> 编辑</button><button onClick={() => void toggleSubscription(subscription)}>{subscription.enabled ? "停用" : "启用"}</button><button className="danger-button" onClick={() => void removeSubscription(subscription)}><DeleteOutlined /></button></div>
             </article>
           ))}
           {!subscriptions.length && <div className="v2ray-empty"><CloudDownloadOutlined /><b>还没有订阅分组</b><p>添加订阅后，节点会直接出现在“配置项”工作台。</p><button className="primary-button" onClick={() => void addSubscription()}><PlusOutlined /> 添加订阅</button></div>}
@@ -856,8 +924,8 @@ export function V2rayWorkspace({
     <div className="page v2ray-workspace">
       <section className="v2ray-commandbar">
         <div className="v2ray-import-split" onClick={(event) => event.stopPropagation()}>
-          <button onClick={() => void importClipboard()} disabled={busy != null} title="读取剪贴板并直接导入（Ctrl+V）"><PlusOutlined /> 添加节点</button>
-          <button className="v2ray-import-caret" onClick={() => setImportMenuOpen((open) => !open)} disabled={busy != null} aria-label="更多导入方式"><DownOutlined /></button>
+          <button onClick={() => void importClipboard()} disabled={actionBusy} title="读取剪贴板并直接导入（Ctrl+V）"><PlusOutlined /> 添加节点</button>
+          <button className="v2ray-import-caret" onClick={() => setImportMenuOpen((open) => !open)} disabled={actionBusy} aria-label="更多导入方式"><DownOutlined /></button>
           {importMenuOpen && <div className="v2ray-import-menu">
             <button onClick={() => void importClipboard()}><CopyOutlined /><span><b>从剪贴板导入</b><small>Ctrl+V</small></span></button>
             <button onClick={() => void scanScreenQr()}><ScanOutlined /><span><b>扫描屏幕二维码</b><small>自动隐藏主窗口</small></span></button>
@@ -869,24 +937,24 @@ export function V2rayWorkspace({
           <input ref={imageInputRef} hidden type="file" accept="image/png,image/jpeg,image/webp,image/bmp" onChange={(event) => { const file = event.target.files?.[0]; event.target.value = ""; if (file) void importImage(file); }} />
           <input ref={textFileInputRef} hidden type="file" accept=".txt,.conf,.list,text/plain" onChange={(event) => { const file = event.target.files?.[0]; event.target.value = ""; if (file) void importTextFile(file); }} />
         </div>
-        <button onClick={() => void testSelected("tcp")} disabled={!visibleNodes.length || busy != null}><FieldTimeOutlined /> TCP 延迟</button>
-        <button onClick={() => void testSelected("real")} disabled={!visibleNodes.length || busy != null}><RocketOutlined /> 真实延迟</button>
-        <button onClick={() => void testSelected("speed")} disabled={!visibleNodes.length || busy != null}><DownloadOutlined /> 下载测速</button>
-        <button onClick={() => void testSelected("mixed")} disabled={!nodes.length || busy != null}><RocketOutlined /> 一键多测</button>
+        <button onClick={() => void testSelected("tcp")} disabled={!visibleNodes.length || testingBusy}><FieldTimeOutlined /> TCP 延迟</button>
+        <button onClick={() => void testSelected("real")} disabled={!visibleNodes.length || testingBusy}><RocketOutlined /> 真实延迟</button>
+        <button onClick={() => void testSelected("speed")} disabled={!visibleNodes.length || testingBusy}><DownloadOutlined /> 下载测速</button>
+        <button onClick={() => void testSelected("mixed")} disabled={!nodes.length || testingBusy}><RocketOutlined /> 一键多测</button>
         <div className="v2ray-speedtest-more" onClick={(event) => event.stopPropagation()}>
-          <button onClick={() => setSpeedTestMenuOpen((open) => !open)} disabled={!nodes.length || busy != null}>更多测速 <DownOutlined /></button>
+          <button onClick={() => setSpeedTestMenuOpen((open) => !open)} disabled={!nodes.length || testingBusy}>更多测速 <DownOutlined /></button>
           {speedTestMenuOpen && <div className="v2ray-speedtest-menu">
             <button onClick={() => { setSpeedTestMenuOpen(false); void testSelected("udp"); }}><b>UDP 测试</b><small>验证节点 UDP 转发与往返延迟</small></button>
             <button onClick={() => { setSpeedTestMenuOpen(false); void testSelected("fast-real"); }}><b>快速真实延迟</b><small>并发测试全部节点并查询出口</small></button>
           </div>}
         </div>
-        {busy?.startsWith("test-") && <button className="danger-button" onClick={() => void cancelTests()}>取消测速</button>}
-        <button onClick={() => void copyShares()} disabled={!visibleNodes.length || busy != null}><CopyOutlined /> 复制分享</button>
-        <button onClick={() => void exportNodes()} disabled={!visibleNodes.length || busy != null}><DownloadOutlined /> 导出</button>
+        {testingBusy && <button className="danger-button" onClick={() => void cancelTests()}>取消测速</button>}
+        <button onClick={() => void copyShares()} disabled={!visibleNodes.length || actionBusy}><CopyOutlined /> 复制分享</button>
+        <button onClick={() => void exportNodes()} disabled={!visibleNodes.length || actionBusy}><DownloadOutlined /> 导出</button>
         {state.mode === "v2ray" && (state.connected || state.connecting) ? (
-          <button className="danger-button" disabled={busy != null} onClick={() => void run("disconnect", () => invoke("stop_v2ray_connection"))}><DisconnectOutlined /> 关闭</button>
+          <button className="danger-button" disabled={actionBusy} onClick={() => void run("disconnect", () => invoke("stop_v2ray_connection"))}><DisconnectOutlined /> 关闭</button>
         ) : (
-          <button className="primary-button" disabled={!nodes.length || busy != null} onClick={() => void connectNode()}><RocketOutlined /> 启动服务</button>
+          <button className="primary-button" disabled={!nodes.length || actionBusy} onClick={() => void connectNode()}><RocketOutlined /> 启动服务</button>
         )}
       </section>
       <section className="v2ray-group-tabs">
@@ -918,13 +986,13 @@ export function V2rayWorkspace({
               </select>
             </div>
             <div>
-              <button onClick={() => void moveSelected("up")} disabled={!selected.size || busy != null} title="上移"><ArrowUpOutlined /></button>
-              <button onClick={() => void moveSelected("down")} disabled={!selected.size || busy != null} title="下移"><ArrowDownOutlined /></button>
-              <button onClick={() => void moveSelected("top")} disabled={!selected.size || busy != null} title="移到顶部"><VerticalAlignTopOutlined /></button>
-              <button onClick={() => void moveSelected("bottom")} disabled={!selected.size || busy != null} title="移到底部"><VerticalAlignBottomOutlined /></button>
-              <button onClick={() => void removeDuplicates()} disabled={!nodes.length || busy != null} title="清理重复节点">去重</button>
-              <button className="danger-button" onClick={() => { const ids = nodes.filter((node) => node.lastTestedAt != null && node.delay == null).map((node) => node.id); if (ids.length) setDialog({ kind: "delete-nodes", nodeIds: ids }); else setNotice("没有测试失败的节点"); }} disabled={busy != null} title="删除测试失败的节点">删失效</button>
-              <button className="danger-button" onClick={() => void removeSelected()} disabled={!selected.size || busy != null}><DeleteOutlined /></button>
+              <button onClick={() => void moveSelected("up")} disabled={!selected.size || actionBusy} title="上移"><ArrowUpOutlined /></button>
+              <button onClick={() => void moveSelected("down")} disabled={!selected.size || actionBusy} title="下移"><ArrowDownOutlined /></button>
+              <button onClick={() => void moveSelected("top")} disabled={!selected.size || actionBusy} title="移到顶部"><VerticalAlignTopOutlined /></button>
+              <button onClick={() => void moveSelected("bottom")} disabled={!selected.size || actionBusy} title="移到底部"><VerticalAlignBottomOutlined /></button>
+              <button onClick={() => void removeDuplicates()} disabled={!nodes.length || actionBusy} title="清理重复节点">去重</button>
+              <button className="danger-button" onClick={() => { const ids = nodes.filter((node) => node.lastTestedAt != null && node.delay == null).map((node) => node.id); if (ids.length) setDialog({ kind: "delete-nodes", nodeIds: ids }); else setNotice("没有测试失败的节点"); }} disabled={actionBusy} title="删除测试失败的节点">删失效</button>
+              <button className="danger-button" onClick={() => void removeSelected()} disabled={!selected.size || actionBusy}><DeleteOutlined /></button>
             </div>
           </div>
           {progress && <div className="v2ray-test-progress"><LoadingOutlined spin /> 测速进度 {progress.completed}/{progress.total} · {progress.message}{progress.speed ? ` · ${speedText(progress.speed)}` : ""}</div>}

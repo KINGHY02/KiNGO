@@ -1,0 +1,40 @@
+{
+  "version": "2.0.0",
+  "archive": "cores-v2.0.0.zip",
+  "sha256": "208F6CAE44C4B33481F8B3A82D3550B7478737B265C22B1FAD19482BC94B0192",
+  "parts": [
+    "cores-v2.0.0.zip.part001",
+    "cores-v2.0.0.zip.part002",
+    "cores-v2.0.0.zip.part003",
+    "cores-v2.0.0.zip.part004",
+    "cores-v2.0.0.zip.part005",
+    "cores-v2.0.0.zip.part006",
+    "cores-v2.0.0.zip.part007",
+    "cores-v2.0.0.zip.part008",
+    "cores-v2.0.0.zip.part009",
+    "cores-v2.0.0.zip.part010",
+    "cores-v2.0.0.zip.part011",
+    "cores-v2.0.0.zip.part012",
+    "cores-v2.0.0.zip.part013",
+    "cores-v2.0.0.zip.part014",
+    "cores-v2.0.0.zip.part015",
+    "cores-v2.0.0.zip.part016",
+    "cores-v2.0.0.zip.part017",
+    "cores-v2.0.0.zip.part018",
+    "cores-v2.0.0.zip.part019",
+    "cores-v2.0.0.zip.part020"
+  ],
+  "requiredFiles": [
+    "hy2/hysteria2.exe",
+    "hysteria/hysteria-tun-windows-6.0-386.exe",
+    "juicity/juicity-client.exe",
+    "mieru/mieru.exe",
+    "mihomo/mihomo.exe",
+    "naiveproxy/naive.exe",
+    "shadowquic/shadowquic.exe",
+    "sing-box/sing-box.exe",
+    "xray/geoip.dat",
+    "xray/geosite.dat",
+    "xray/xray.exe"
+  ]
+}
