@@ -6,7 +6,9 @@ use serde::{Deserialize, Serialize};
 use std::{
     collections::{HashMap, VecDeque},
     fs,
+    net::IpAddr,
     net::TcpStream,
+    path::PathBuf,
     sync::{
         atomic::{AtomicBool, AtomicUsize, Ordering},
         Arc, Mutex, OnceLock,
@@ -119,6 +121,31 @@ pub struct RouteMetric {
 #[serde(rename_all = "camelCase")]
 struct ConnectionSettings {
     auto_failover: bool,
+}
+
+#[derive(Clone, Debug, Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AutoRoutingRule {
+    pub id: String,
+    pub target: String,
+    pub action: String,
+    pub enabled: bool,
+}
+
+#[derive(Clone, Debug, Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AutoRoutingSettings {
+    pub mode: String,
+    pub rules: Vec<AutoRoutingRule>,
+}
+
+impl Default for AutoRoutingSettings {
+    fn default() -> Self {
+        Self {
+            mode: "rule".into(),
+            rules: Vec::new(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, serde::Deserialize)]
@@ -1524,6 +1551,103 @@ fn monitor_connection(
     }
 }
 
+fn auto_routing_settings_path(app: &AppHandle) -> Result<PathBuf, String> {
+    let data_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|error| format!("data directory unavailable: {error}"))?;
+    Ok(data_dir.join("auto-routing-settings.json"))
+}
+
+fn normalize_rule_target(input: &str) -> Result<String, String> {
+    let mut value = input.trim().to_ascii_lowercase();
+    if value.is_empty() {
+        return Err("请输入要匹配的网站或 IP".into());
+    }
+    if let Some(rest) = value
+        .strip_prefix("http://")
+        .or_else(|| value.strip_prefix("https://"))
+    {
+        value = rest.into();
+    }
+    if let Some((host, _)) = value.split_once('/') {
+        value = host.into();
+    }
+    if let Some((host, _)) = value.split_once('?') {
+        value = host.into();
+    }
+    if value.starts_with("*.") {
+        value = value.trim_start_matches("*.").into();
+    }
+    value = value.trim_matches('.').into();
+    if value.is_empty()
+        || value.contains('*')
+        || value.contains(' ')
+        || value.contains('\\')
+        || value.contains('@')
+    {
+        return Err("规则格式无效，请输入 baidu.com、*.example.com 或 1.1.1.1".into());
+    }
+    Ok(value)
+}
+
+fn normalize_auto_routing_settings(
+    settings: AutoRoutingSettings,
+) -> Result<AutoRoutingSettings, String> {
+    if !matches!(settings.mode.as_str(), "rule" | "global" | "direct") {
+        return Err("不支持的全自动代理模式".into());
+    }
+    let mut rules = Vec::new();
+    for (index, rule) in settings.rules.into_iter().enumerate() {
+        if !matches!(rule.action.as_str(), "direct" | "proxy" | "block") {
+            return Err("不支持的规则动作".into());
+        }
+        let target = normalize_rule_target(&rule.target)?;
+        let id = if rule.id.trim().is_empty() {
+            format!("rule-{}-{target}", index + 1)
+        } else {
+            rule.id.trim().to_string()
+        };
+        rules.push(AutoRoutingRule {
+            id,
+            target,
+            action: rule.action,
+            enabled: rule.enabled,
+        });
+    }
+    Ok(AutoRoutingSettings {
+        mode: settings.mode,
+        rules,
+    })
+}
+
+pub fn get_auto_routing_settings(app: &AppHandle) -> AutoRoutingSettings {
+    let Ok(path) = auto_routing_settings_path(app) else {
+        return AutoRoutingSettings::default();
+    };
+    let Ok(content) = fs::read_to_string(path) else {
+        return AutoRoutingSettings::default();
+    };
+    let Ok(settings) = serde_json::from_str::<AutoRoutingSettings>(&content) else {
+        return AutoRoutingSettings::default();
+    };
+    normalize_auto_routing_settings(settings).unwrap_or_default()
+}
+
+pub fn set_auto_routing_settings(
+    app: &AppHandle,
+    settings: AutoRoutingSettings,
+) -> Result<AutoRoutingSettings, String> {
+    let settings = normalize_auto_routing_settings(settings)?;
+    let path = auto_routing_settings_path(app)?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|error| format!("创建自动规则目录失败：{error}"))?;
+    }
+    let content = serde_json::to_string_pretty(&settings).map_err(|error| error.to_string())?;
+    fs::write(path, content).map_err(|error| format!("保存自动规则失败：{error}"))?;
+    Ok(settings)
+}
+
 pub fn set_auto_failover(
     app: &AppHandle,
     store: &ConnectionStore,
@@ -1733,7 +1857,7 @@ fn probe_route(
 ) -> Result<(u32, Option<String>), String> {
     prepare_route(app, route)?;
     core_runtime::stop_all(runtime)?;
-    let original_config = cached_config(app, route)?;
+    let original_config = runtime_config(app, route)?;
     let (config, temporary) = probe_config_for_port(route, &original_config, test_port)?;
     core_runtime::start(app, runtime, route.core_id.clone(), config.clone())?;
     let result = (|| {
@@ -1820,7 +1944,7 @@ fn connect_route(
     if !already_prepared {
         prepare_route(app, route)?;
     }
-    let config = cached_config(app, route)?;
+    let config = runtime_config(app, route)?;
     if let Ok(mut current) = state.lock() {
         current.stage = "connecting".into();
         current.display_name = Some(route.name.clone());
@@ -2151,6 +2275,174 @@ fn cached_config(app: &AppHandle, route: &PublicRoute) -> Result<String, String>
     } else {
         Err("route cache is missing".into())
     }
+}
+
+fn rule_outbound(action: &str) -> &str {
+    match action {
+        "direct" => "direct",
+        "block" => "block",
+        _ => "proxy",
+    }
+}
+
+fn mihomo_rule_target(target: &str) -> String {
+    if target.parse::<IpAddr>().is_ok() || target.contains('/') {
+        format!("IP-CIDR,{target},")
+    } else {
+        format!("DOMAIN-SUFFIX,{target},")
+    }
+}
+
+fn inject_mihomo_routing(
+    mut value: serde_yaml::Value,
+    settings: &AutoRoutingSettings,
+) -> Result<serde_yaml::Value, String> {
+    use serde_yaml::{Mapping, Value};
+
+    let proxy_name = value
+        .get("proxy-groups")
+        .and_then(Value::as_sequence)
+        .and_then(|groups| groups.first())
+        .and_then(|group| group.get("name"))
+        .and_then(Value::as_str)
+        .unwrap_or("PROXY")
+        .to_string();
+    let final_policy = match settings.mode.as_str() {
+        "direct" => "DIRECT".to_string(),
+        _ => proxy_name.clone(),
+    };
+    let mut rules = Vec::new();
+    if settings.mode == "rule" {
+        for rule in settings.rules.iter().filter(|rule| rule.enabled) {
+            let outbound = match rule.action.as_str() {
+                "direct" => "DIRECT",
+                "block" => "REJECT",
+                _ => &proxy_name,
+            };
+            rules.push(Value::String(format!(
+                "{}{outbound}",
+                mihomo_rule_target(&rule.target)
+            )));
+        }
+        rules.push(Value::String("IP-CIDR,10.0.0.0/8,DIRECT,no-resolve".into()));
+        rules.push(Value::String(
+            "IP-CIDR,172.16.0.0/12,DIRECT,no-resolve".into(),
+        ));
+        rules.push(Value::String(
+            "IP-CIDR,192.168.0.0/16,DIRECT,no-resolve".into(),
+        ));
+        rules.push(Value::String("GEOIP,CN,DIRECT".into()));
+    }
+    rules.push(Value::String(format!("MATCH,{final_policy}")));
+    if let Value::Mapping(map) = &mut value {
+        map.insert(Value::String("rules".into()), Value::Sequence(rules));
+        map.entry(Value::String("mode".into()))
+            .or_insert(Value::String("rule".into()));
+    } else {
+        let mut map = Mapping::new();
+        map.insert(Value::String("rules".into()), Value::Sequence(rules));
+        value = Value::Mapping(map);
+    }
+    Ok(value)
+}
+
+fn xray_rule(target: &str, outbound: &str) -> serde_json::Value {
+    if target.parse::<IpAddr>().is_ok() || target.contains('/') {
+        serde_json::json!({ "type": "field", "ip": [target], "outboundTag": outbound })
+    } else {
+        serde_json::json!({ "type": "field", "domain": [format!("domain:{target}")], "outboundTag": outbound })
+    }
+}
+
+fn singbox_rule(target: &str, outbound: &str) -> serde_json::Value {
+    if target.parse::<IpAddr>().is_ok() || target.contains('/') {
+        serde_json::json!({ "ip_cidr": [target], "outbound": outbound })
+    } else {
+        serde_json::json!({ "domain_suffix": [target], "outbound": outbound })
+    }
+}
+
+fn inject_json_routing(
+    route: &PublicRoute,
+    mut value: serde_json::Value,
+    settings: &AutoRoutingSettings,
+) -> Result<serde_json::Value, String> {
+    let final_outbound = if settings.mode == "direct" {
+        "direct"
+    } else {
+        "proxy"
+    };
+    if route.core_id == "sing-box" {
+        let mut rules = Vec::new();
+        if settings.mode == "rule" {
+            for rule in settings.rules.iter().filter(|rule| rule.enabled) {
+                rules.push(singbox_rule(&rule.target, rule_outbound(&rule.action)));
+            }
+            rules.push(serde_json::json!({ "ip_is_private": true, "outbound": "direct" }));
+            rules.push(serde_json::json!({ "domain_suffix": [".cn"], "outbound": "direct" }));
+        }
+        value["route"] = serde_json::json!({
+            "rules": rules,
+            "final": final_outbound,
+            "auto_detect_interface": true
+        });
+        return Ok(value);
+    }
+    if route.core_id == "xray" {
+        let mut rules = Vec::new();
+        if settings.mode == "rule" {
+            for rule in settings.rules.iter().filter(|rule| rule.enabled) {
+                rules.push(xray_rule(&rule.target, rule_outbound(&rule.action)));
+            }
+            rules.push(serde_json::json!({ "type": "field", "ip": ["geoip:private"], "outboundTag": "direct" }));
+            rules.push(serde_json::json!({ "type": "field", "domain": ["geosite:private"], "outboundTag": "direct" }));
+            rules.push(serde_json::json!({ "type": "field", "domain": ["geosite:cn"], "outboundTag": "direct" }));
+            rules.push(
+                serde_json::json!({ "type": "field", "ip": ["geoip:cn"], "outboundTag": "direct" }),
+            );
+        } else if settings.mode == "direct" {
+            rules.push(serde_json::json!({ "type": "field", "network": "tcp,udp", "outboundTag": "direct" }));
+        }
+        value["routing"] = serde_json::json!({
+            "domainStrategy": "IPIfNonMatch",
+            "rules": rules
+        });
+    }
+    Ok(value)
+}
+
+fn runtime_config(app: &AppHandle, route: &PublicRoute) -> Result<String, String> {
+    let source = cached_config(app, route)?;
+    if !matches!(route.core_id.as_str(), "mihomo" | "xray" | "sing-box") {
+        return Ok(source);
+    }
+    let settings = get_auto_routing_settings(app);
+    let source_path = PathBuf::from(&source);
+    let runtime = source_path.with_file_name(format!(
+        "config.runtime.{}",
+        if route.config_format == "yaml" {
+            "yaml"
+        } else {
+            "json"
+        }
+    ));
+    if route.config_format == "yaml" {
+        let content = fs::read_to_string(&source_path)
+            .map_err(|error| format!("读取线路配置失败：{error}"))?;
+        let value = serde_yaml::from_str::<serde_yaml::Value>(&content)
+            .map_err(|error| format!("解析线路 YAML 失败：{error}"))?;
+        let value = inject_mihomo_routing(value, &settings)?;
+        let content = serde_yaml::to_string(&value).map_err(|error| error.to_string())?;
+        fs::write(&runtime, content).map_err(|error| format!("写入运行时规则失败：{error}"))?;
+    } else {
+        let data = fs::read(&source_path).map_err(|error| format!("读取线路配置失败：{error}"))?;
+        let value = serde_json::from_slice::<serde_json::Value>(&data)
+            .map_err(|error| format!("解析线路 JSON 失败：{error}"))?;
+        let value = inject_json_routing(route, value, &settings)?;
+        let content = serde_json::to_vec_pretty(&value).map_err(|error| error.to_string())?;
+        fs::write(&runtime, content).map_err(|error| format!("写入运行时规则失败：{error}"))?;
+    }
+    Ok(runtime.to_string_lossy().into_owned())
 }
 
 fn proxy_port(route: &PublicRoute) -> u16 {

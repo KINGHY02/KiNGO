@@ -118,6 +118,18 @@ type RouteUpdateSummary = {
   failed: number;
   errors: { routeId: string; message: string }[];
 };
+type AutoRoutingMode = "rule" | "global" | "direct";
+type AutoRoutingAction = "direct" | "proxy" | "block";
+type AutoRoutingRule = {
+  id: string;
+  target: string;
+  action: AutoRoutingAction;
+  enabled: boolean;
+};
+type AutoRoutingSettings = {
+  mode: AutoRoutingMode;
+  rules: AutoRoutingRule[];
+};
 type CoreVersionInfo = {
   coreId: string;
   name: string;
@@ -958,6 +970,10 @@ function Workspace({
   const [v2raySettings, setV2raySettings] = useState<V2raySettings>({ localPort: 10808, allowLan: false, systemProxy: true, bypassLan: true, routingMode: "bypass-cn", logLevel: "warning", subscriptionUpdateMinutes: 0, latencyTestUrl: "https://www.gstatic.com/generate_204", speedTestUrl: "https://speed.cloudflare.com/__down?bytes=10000000", ipInfoUrl: "https://api.ip.sb/geoip", udpTestTarget: "1.1.1.1:53", speedTestTimeoutSeconds: 15, mixedConcurrency: 5, tunEnabled: false, tunStack: "system", tunMtu: 1500, tunStrictRoute: true, tunIpv6: false, tunRouteExclude: ["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"] });
   const [v2raySettingsMessage, setV2raySettingsMessage] = useState<string | null>(null);
   const [loopbackMessage, setLoopbackMessage] = useState<string | null>(null);
+  const [autoRouting, setAutoRouting] = useState<AutoRoutingSettings>({ mode: "rule", rules: [] });
+  const [autoRuleTarget, setAutoRuleTarget] = useState("");
+  const [autoRuleAction, setAutoRuleAction] = useState<AutoRoutingAction>("direct");
+  const [autoRoutingMessage, setAutoRoutingMessage] = useState<string | null>(null);
   useEffect(() => {
     if (page !== "settings") return;
     void invoke<SpeedTestSettings>("get_speed_test_settings").then(setSpeedSettings).catch(() => undefined);
@@ -974,6 +990,9 @@ function Workspace({
     void invoke<RouteUpdateProgress | null>("get_public_route_update_status")
       .then(setUpdateProgress)
       .catch(() => undefined);
+    void invoke<AutoRoutingSettings>("get_auto_routing_settings")
+      .then(setAutoRouting)
+      .catch((error) => setAutoRoutingMessage(String(error)));
   }, [mode]);
   useEffect(() => {
     if (mode !== "auto") return;
@@ -1042,6 +1061,55 @@ function Workspace({
         ? routeDisplayName(selectedRoute)
         : "指定线路";
   const ownsConnection = state.mode === mode;
+  const saveAutoRouting = async (settings: AutoRoutingSettings) => {
+    setAutoRoutingMessage(null);
+    try {
+      const saved = await invoke<AutoRoutingSettings>(
+        "set_auto_routing_settings",
+        { settings },
+      );
+      setAutoRouting(saved);
+      setAutoRoutingMessage(
+        state.mode === "auto" && (state.connected || state.connecting)
+          ? "已保存，重启全自动连接后生效"
+          : "已保存",
+      );
+    } catch (error) {
+      setAutoRoutingMessage(`保存失败：${String(error)}`);
+    }
+  };
+  const addAutoRule = () => {
+    const target = autoRuleTarget.trim();
+    if (!target) {
+      setAutoRoutingMessage("请输入网址或域名");
+      return;
+    }
+    const rule: AutoRoutingRule = {
+      id: `rule-${Date.now()}`,
+      target,
+      action: autoRuleAction,
+      enabled: true,
+    };
+    setAutoRuleTarget("");
+    void saveAutoRouting({
+      ...autoRouting,
+      rules: [rule, ...autoRouting.rules],
+    });
+  };
+  const updateAutoRule = (rule: AutoRoutingRule) => {
+    void saveAutoRouting({
+      ...autoRouting,
+      rules: autoRouting.rules.map((item) =>
+        item.id === rule.id ? rule : item,
+      ),
+    });
+  };
+  const removeAutoRule = (id: string) => {
+    void saveAutoRouting({
+      ...autoRouting,
+      rules: autoRouting.rules.filter((rule) => rule.id !== id),
+    });
+  };
   const checkCoreUpdates = async () => {
     setCheckingCores(true);
     setCoreMessage(null);
@@ -1547,6 +1615,92 @@ function Workspace({
         </div>
       </div>
       {mode === "auto" ? (
+        <>
+        <section className="auto-routing-panel">
+          <div className="auto-routing-header">
+            <div>
+              <h3>全自动路由策略</h3>
+              <p className="muted">规则模式默认“国外走代理、国内直连”，也可以自己添加网站规则。</p>
+            </div>
+            {autoRoutingMessage && <span className="route-message">{autoRoutingMessage}</span>}
+          </div>
+          <div className="auto-mode-grid">
+            {[
+              ["rule", "规则模式", "推荐：国内直连，其他走代理，可叠加自定义网站规则"],
+              ["global", "全局代理", "所有流量都走当前全自动线路"],
+              ["direct", "直连模式", "关闭代理转发，仅保留直连"],
+            ].map(([value, title, desc]) => (
+              <button
+                className={autoRouting.mode === value ? "auto-mode-card active" : "auto-mode-card"}
+                key={value}
+                onClick={() =>
+                  void saveAutoRouting({
+                    ...autoRouting,
+                    mode: value as AutoRoutingMode,
+                  })
+                }
+              >
+                <b>{title}</b>
+                <small>{desc}</small>
+              </button>
+            ))}
+          </div>
+          <div className="auto-rule-form">
+            <input
+              value={autoRuleTarget}
+              onChange={(event) => setAutoRuleTarget(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === "Enter") addAutoRule();
+              }}
+              placeholder="输入网址或域名，例如 baidu.com / https://google.com"
+            />
+            <select
+              value={autoRuleAction}
+              onChange={(event) =>
+                setAutoRuleAction(event.target.value as AutoRoutingAction)
+              }
+            >
+              <option value="direct">走直连</option>
+              <option value="proxy">走代理</option>
+              <option value="block">拦截</option>
+            </select>
+            <button onClick={addAutoRule}>添加规则</button>
+          </div>
+          <div className="auto-rule-list">
+            {autoRouting.rules.length === 0 ? (
+              <span className="muted">还没有自定义规则。普通用户只要填域名并选择走直连或走代理即可。</span>
+            ) : (
+              autoRouting.rules.map((rule) => (
+                <div className="auto-rule-row" key={rule.id}>
+                  <label>
+                    <input
+                      type="checkbox"
+                      checked={rule.enabled}
+                      onChange={(event) =>
+                        updateAutoRule({ ...rule, enabled: event.target.checked })
+                      }
+                    />
+                    <b>{rule.target}</b>
+                  </label>
+                  <select
+                    value={rule.action}
+                    onChange={(event) =>
+                      updateAutoRule({
+                        ...rule,
+                        action: event.target.value as AutoRoutingAction,
+                      })
+                    }
+                  >
+                    <option value="direct">走直连</option>
+                    <option value="proxy">走代理</option>
+                    <option value="block">拦截</option>
+                  </select>
+                  <button onClick={() => removeAutoRule(rule.id)}>删除</button>
+                </div>
+              ))
+            )}
+          </div>
+        </section>
         <div className="route-list">
           <div
             className={
@@ -1626,6 +1780,7 @@ function Workspace({
             );
           })}
         </div>
+        </>
       ) : (
         <div className="empty-state">
           <span>◌</span>
