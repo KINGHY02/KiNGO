@@ -3,18 +3,16 @@ import { invoke } from "@tauri-apps/api/core";
 import { getVersion } from "@tauri-apps/api/app";
 import { listen } from "@tauri-apps/api/event";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { getCurrentWindow } from "@tauri-apps/api/window";
+import { relaunch } from "@tauri-apps/plugin-process";
+import { check, type Update } from "@tauri-apps/plugin-updater";
 import {
-  ApartmentOutlined,
   CheckCircleOutlined,
   CloudDownloadOutlined,
   CloudOutlined,
   CloudServerOutlined,
   DashboardOutlined,
   DisconnectOutlined,
-  EnvironmentOutlined,
   ExclamationCircleOutlined,
-  FieldTimeOutlined,
   FileTextOutlined,
   GithubOutlined,
   HeartOutlined,
@@ -22,39 +20,28 @@ import {
   LoadingOutlined,
   LeftOutlined,
   MoonOutlined,
-  NodeIndexOutlined,
   PoweroffOutlined,
-  ProfileOutlined,
   ReloadOutlined,
   RightOutlined,
   RollbackOutlined,
   SettingOutlined,
-  SwapOutlined,
   SunOutlined,
   TeamOutlined,
 } from "@ant-design/icons";
 import "./App.css";
-import { ClashWorkspace, type ClashConnection, type ClashPage, type ClashRealtimeChannels } from "./ClashWorkspace";
-import { V2rayWorkspace } from "./V2rayWorkspace";
+import "./Home.css";
 import kingoLogo from "./assets/kingo-logo.png";
 
-type Mode = "auto" | "clash" | "v2ray";
+type Mode = "auto";
 type Theme = "light" | "dark" | "pink" | "blue";
 type Page =
   | "home"
   | "routes"
-  | "proxy"
-  | "subscriptions"
-  | "groups"
-  | "tests"
   | "connections"
-  | "rules"
   | "logs"
-  | "help"
-  | "about"
   | "settings";
 export type AppState = {
-  mode: Mode;
+  mode: string;
   connected: boolean;
   connecting: boolean;
   stage: string;
@@ -85,11 +72,11 @@ type Route = {
   lastError: string | null;
   latency: number | null;
   country: string | null;
+  successRate: number | null;
+  jitter: number | null;
+  quality: string;
 };
 type LogEntry = { at: string; level: string; message: string };
-type ClashTrafficEvent = { uploadBps: number; downloadBps: number };
-type ClashConnectionsEvent = { connections: ClashConnection[]; uploadTotal: number; downloadTotal: number };
-type ClashRealtimeStatusEvent = { channel: keyof ClashRealtimeChannels; connected: boolean; error: string | null };
 type RouteProgress = {
   completed: number;
   total: number;
@@ -130,6 +117,12 @@ type AutoRoutingSettings = {
   mode: AutoRoutingMode;
   rules: AutoRoutingRule[];
 };
+type AutoRoutingApplyResult = {
+  settings: AutoRoutingSettings;
+  applied: boolean;
+  restarted: boolean;
+  message: string;
+};
 type CoreVersionInfo = {
   coreId: string;
   name: string;
@@ -143,35 +136,48 @@ type CoreVersionInfo = {
   assetSize: number | null;
   error: string | null;
 };
-type AppUpdateInfo = { currentVersion: string; latestVersion: string | null; outdated: boolean; releaseUrl: string };
-type SpeedTestSettings = { url: string; timeoutSeconds: number; concurrency: number };
-type V2raySettings = {
-  localPort: number;
-  allowLan: boolean;
-  systemProxy: boolean;
-  bypassLan: boolean;
-  routingMode: "global" | "bypass-cn" | "direct";
-  logLevel: "debug" | "info" | "warning" | "error";
-  subscriptionUpdateMinutes: number;
-  latencyTestUrl: string;
-  speedTestUrl: string;
-  ipInfoUrl: string;
-  udpTestTarget: string;
-  speedTestTimeoutSeconds: number;
-  mixedConcurrency: number;
-  tunEnabled: boolean;
-  tunStack: "system" | "gvisor" | "mixed";
-  tunMtu: number;
-  tunStrictRoute: boolean;
-  tunIpv6: boolean;
-  tunRouteExclude: string[];
+type AppUpdateInfo = {
+  currentVersion: string;
+  latestVersion: string | null;
+  outdated: boolean;
+  releaseUrl: string;
+  notes?: string | null;
+  installable?: boolean;
+};
+type AppUpdateProgress = {
+  stage: "downloading" | "preparing" | "installing";
+  downloaded: number;
+  total: number | null;
+  percent: number | null;
+};
+type SpeedTestSettings = {
+  url: string;
+  fallbackUrls: string[];
+  downloadUrl: string;
+  timeoutSeconds: number;
+  concurrency: number;
+};
+type SpeedTestUrlResult = { url: string; status: number; latencyMs: number };
+
+const LATENCY_URL_PRESETS = [
+  { label: "Gstatic 204", url: "https://www.gstatic.com/generate_204" },
+  { label: "Cloudflare 204", url: "http://cp.cloudflare.com/generate_204" },
+  { label: "Microsoft 连通性", url: "http://www.msftconnecttest.com/connecttest.txt" },
+  { label: "Apple 连通性", url: "https://www.apple.com/library/test/success.html" },
+] as const;
+const DOWNLOAD_URL_PRESETS = [
+  { label: "Cloudflare 10 MB", url: "https://speed.cloudflare.com/__down?bytes=10000000" },
+  { label: "Cloudflare 50 MB", url: "https://speed.cloudflare.com/__down?bytes=50000000" },
+  { label: "CacheFly 10 MB", url: "https://cachefly.cachefly.net/10mb.test" },
+] as const;
+const DEFAULT_SPEED_TEST_SETTINGS: SpeedTestSettings = {
+  url: LATENCY_URL_PRESETS[0].url,
+  fallbackUrls: [LATENCY_URL_PRESETS[1].url, LATENCY_URL_PRESETS[2].url],
+  downloadUrl: DOWNLOAD_URL_PRESETS[0].url,
+  timeoutSeconds: 4,
+  concurrency: 6,
 };
 
-const labels: Record<Mode, string> = {
-  auto: "全自动",
-  clash: "Clash",
-  v2ray: "V2ray",
-};
 const emptyState: AppState = {
   mode: "auto",
   connected: false,
@@ -214,24 +220,10 @@ function formatRouteTime(timestamp: number) {
   });
 }
 
-function routeDescription(route: Route, selected: boolean) {
-  if (route.active) return `正在使用 · ${route.protocolLabel}`;
-  if (route.lastError) return route.lastError;
-  if (selected)
-    return route.lastSuccessAt
-      ? `当前选中 · 最近可用 ${formatRouteTime(route.lastSuccessAt)}`
-      : "当前选中 · 等待测速";
-  if (route.lastSuccessAt)
-    return `最近可用 ${formatRouteTime(route.lastSuccessAt)} · 配置就绪`;
-  return route.downloaded
-    ? `${route.protocolLabel} · 配置就绪，尚未测速`
-    : `${route.protocolLabel} · 配置未就绪`;
-}
-
-function routeDisplayName(route: Route) {
-  const country = route.country?.split(" · ")[0] ?? "未知地区";
-  const number = route.name.match(/\d+/)?.[0];
-  return number ? `${country} ${number}` : country;
+function routeDisplayName(route: Route, index?: number) {
+  const country = route.country?.split(" · ")[0] ?? "公共";
+  const number = index == null ? route.slot || null : index + 1;
+  return number ? `${country} ${String(number).padStart(2, "0")}` : country;
 }
 
 function latencyColor(latency: number | null, failed: boolean) {
@@ -355,16 +347,14 @@ function TrafficChart({
 }
 
 function App() {
-  const [mode, setMode] = useState<Mode>("auto");
+  const mode: Mode = "auto";
   const [page, setPage] = useState<Page>("home");
   const [state, setState] = useState<AppState>(emptyState);
   const [routeId, setRouteId] = useState<string | null>(
     () => localStorage.getItem("kingo-auto-route") || null,
   );
   const [logs, setLogs] = useState<LogEntry[]>([]);
-  const [clashConnections, setClashConnections] = useState<ClashConnection[]>([]);
-  const [clashRealtimeChannels, setClashRealtimeChannels] = useState<ClashRealtimeChannels>({ traffic: false, connections: false, logs: false });
-  const [appVersion, setAppVersion] = useState("2.0.0");
+  const [appVersion, setAppVersion] = useState("2.0.3");
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [motionEnabled, setMotionEnabled] = useState(() => localStorage.getItem("kingo-motion") !== "off");
   const [theme, setTheme] = useState<Theme>(() => (localStorage.getItem("kingo-theme") as Theme) || "light");
@@ -374,46 +364,6 @@ function App() {
   useEffect(() => {
     void getVersion().then(setAppVersion).catch(() => undefined);
   }, []);
-
-  useEffect(() => {
-    const cleanups: Array<() => void> = [];
-    void Promise.all([
-      listen<ClashTrafficEvent>("clash-realtime-traffic", (event) => {
-        setState((current) => current.mode === "clash"
-          ? { ...current, uploadBps: event.payload.uploadBps, downloadBps: event.payload.downloadBps }
-          : current);
-      }),
-      listen<ClashConnectionsEvent>("clash-realtime-connections", (event) => {
-        setClashConnections(event.payload.connections);
-        setState((current) => current.mode === "clash"
-          ? { ...current, uploadTotal: event.payload.uploadTotal, downloadTotal: event.payload.downloadTotal }
-          : current);
-      }),
-      listen<ClashRealtimeStatusEvent>("clash-realtime-status", (event) => {
-        setClashRealtimeChannels((current) => ({ ...current, [event.payload.channel]: event.payload.connected }));
-        if (event.payload.channel === "connections" && !event.payload.connected) {
-          void invoke<ClashConnection[]>("list_clash_connections").then(setClashConnections).catch(() => undefined);
-        }
-      }),
-    ]).then((values) => cleanups.push(...values));
-    return () => cleanups.forEach((cleanup) => cleanup());
-  }, []);
-
-  const clashRealtimeActive = state.connected && state.mode === "clash" && state.coreId === "mihomo";
-
-  useEffect(() => {
-    if (clashRealtimeActive) {
-      void invoke<ClashConnection[]>("list_clash_connections").then(setClashConnections).catch(() => undefined);
-      void invoke("start_clash_realtime").catch((error) => {
-        setState((current) => ({ ...current, error: String(error) }));
-        void invoke<ClashConnection[]>("list_clash_connections").then(setClashConnections).catch(() => undefined);
-      });
-      return () => { void invoke("stop_clash_realtime"); };
-    }
-    setClashConnections([]);
-    setClashRealtimeChannels({ traffic: false, connections: false, logs: false });
-    void invoke("stop_clash_realtime").catch(() => undefined);
-  }, [clashRealtimeActive]);
 
   useEffect(() => {
     void invoke<AppState>("get_app_state")
@@ -462,7 +412,7 @@ function App() {
   }, []);
 
   useEffect(() => {
-    if (!state.connected || (state.mode === "clash" && state.coreId === "mihomo")) return;
+    if (!state.connected) return;
     const timer = window.setInterval(() => {
       void invoke("get_traffic").catch(() => undefined);
     }, 1000);
@@ -491,63 +441,22 @@ function App() {
     }
   }
 
-  const nav = useMemo(() => {
-    if (mode === "auto")
-      return [
+  const nav = useMemo(
+    () =>
+      [
         ["home", "首页", <DashboardOutlined />],
         ["routes", "线路", <CloudServerOutlined />],
         ["logs", "日志", <FileTextOutlined />],
         ["settings", "设置", <SettingOutlined />],
-      ] as const;
-    if (mode === "clash")
-      return [
-        ["home", "首页", <DashboardOutlined />],
-        ["proxy", "代理", <ApartmentOutlined />],
-        ["subscriptions", "订阅", <ProfileOutlined />],
-        ["connections", "连接", <SwapOutlined />],
-        ["rules", "规则", <NodeIndexOutlined />],
-        ["logs", "日志", <FileTextOutlined />],
-        ["tests", "测试", <FieldTimeOutlined />],
-        ["settings", "设置", <SettingOutlined />],
-      ] as const;
-    return [
-      ["home", "配置项", <ProfileOutlined />],
-      ["subscriptions", "订阅分组", <CloudDownloadOutlined />],
-      ["settings", "设置", <SettingOutlined />],
-      ["help", "帮助", <InfoCircleOutlined />],
-      ["restart-v2ray", "重启服务", <ReloadOutlined />],
-      ["about", "关于 KiNGO", <HeartOutlined />],
-      ["close-window", "关闭", <DisconnectOutlined />],
-    ] as const;
-  }, [mode]);
+      ] as const,
+    [],
+  );
 
   async function handleNav(id: string) {
-    if (mode === "v2ray" && id === "restart-v2ray") {
-      try {
-        if (state.mode !== "v2ray" || (!state.connected && !state.connecting)) {
-          throw new Error("请先选择节点并启动 V2ray 服务");
-        }
-        await invoke("stop_v2ray_connection");
-        await invoke("start_v2ray_connection", { nodeId: null });
-        setPage("home");
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        setState((current) => ({ ...current, error: message }));
-      }
-      return;
-    }
-    if (mode === "v2ray" && id === "close-window") {
-      await getCurrentWindow().hide();
-      return;
-    }
     setPage(id as Page);
   }
 
   async function connectToggle() {
-    if ((state.connected || state.connecting) && state.mode !== "auto") {
-      setState((value) => ({ ...value, error: `${labels[state.mode as Mode]} 模式正在运行，请先在对应模式中断开连接` }));
-      return;
-    }
     const command = state.connecting
       ? "cancel_connection"
       : state.connected
@@ -566,15 +475,7 @@ function App() {
     }
   }
 
-  const autoViewState: AppState = state.mode === "auto"
-    ? state
-    : {
-        ...emptyState,
-        autoFailover: state.autoFailover,
-        error: state.connected || state.connecting
-          ? `${labels[state.mode as Mode]} 模式正在${state.connecting ? "连接" : "运行"}，全自动模式当前未接管系统代理`
-          : null,
-      };
+  const autoViewState: AppState = state;
 
   async function refreshExit() {
     try {
@@ -590,20 +491,6 @@ function App() {
         <div className="brand">
           <img className="brand-logo" src={kingoLogo} alt="KiNGO" />
           <span>KiNGO</span>
-        </div>
-        <div className="mode-switch">
-          {(Object.keys(labels) as Mode[]).map((item) => (
-            <button
-              key={item}
-              className={mode === item ? "mode active" : "mode"}
-              onClick={() => {
-                setMode(item);
-                setPage("home");
-              }}
-            >
-            <span className="mode-full">{labels[item]}</span><span className="mode-short">{item === "auto" ? "自" : item === "clash" ? "C" : "V"}</span>
-            </button>
-          ))}
         </div>
         <nav className="nav">
           {nav.map(([id, label, icon]) => (
@@ -622,57 +509,35 @@ function App() {
           <span className="version">v{appVersion}</span>
         </div>
       </aside>
-      <main className={mode === "v2ray" && page === "home" ? "content v2ray-main-content" : "content"}>
+      <main className="content">
         <header className="topbar">
           <div>
             <h1>
-              {mode === "v2ray"
-                ? (nav.find((item) => item[0] === page)?.[1] ?? "配置项")
-                : page === "home"
+              {page === "home"
                 ? "首页"
                 : (nav.find((item) => item[0] === page)?.[1] ?? "KiNGO")}
             </h1>
           </div>
-          <span className="proxy-badge">
-            {mode === "v2ray"
-              ? state.mode === "v2ray" && state.connected
-                ? "V2ray 服务已连接"
-                : state.mode === "v2ray" && state.connecting
-                  ? "V2ray 服务启动中"
-                  : state.mode !== "v2ray" && (state.connected || state.connecting)
-                    ? `${labels[state.mode as Mode]} 模式运行中`
-                    : "V2ray 服务未启动"
-              : mode === "auto" && state.mode !== "auto" && (state.connected || state.connecting)
-                ? `${labels[state.mode as Mode]} 模式运行中`
-                : state.connected ? "系统代理已开启" : "系统代理未开启"}
+          <span className={`proxy-badge ${state.connected ? "active" : state.connecting ? "working" : ""}`}>
+            <i aria-hidden="true" />
+            {state.connecting
+              ? "正在连接"
+              : state.connected && state.tunEnabled
+                ? "TUN 已开启"
+                : state.connected
+                  ? "系统代理已开启"
+                  : state.tunEnabled
+                    ? "TUN 待连接"
+                    : "系统代理未开启"}
           </span>
         </header>
-        {mode === "v2ray" && page !== "settings" ? (
-          <V2rayWorkspace
-            view={page === "subscriptions" ? "subscriptions" : page === "help" ? "help" : page === "about" ? "about" : "profiles"}
-            state={state}
-            logs={logs}
+        {page === "home" ? (
+          <Home
+            state={autoViewState}
+            onToggle={connectToggle}
+            onRefresh={refreshExit}
+            onNavigate={setPage}
           />
-        ) : mode === "clash" ? (
-          <ClashWorkspace
-            page={page as ClashPage}
-            state={state}
-            logs={logs}
-            connections={clashConnections}
-            realtime={clashRealtimeChannels}
-            onPage={(value) => setPage(value as Page)}
-          />
-        ) : page === "home" ? (
-          mode === "auto" ? (
-            <Home
-              state={autoViewState}
-              onToggle={connectToggle}
-              onRefresh={refreshExit}
-              onNavigate={setPage}
-            />
-          ) : (
-            <ModeHome mode={mode} state={state} onNavigate={setPage} />
-          )
         ) : (
           <Workspace
             mode={mode}
@@ -702,21 +567,118 @@ function Home({
   onRefresh: () => void;
   onNavigate: (page: Page) => void;
 }) {
+  const [routing, setRouting] = useState<AutoRoutingSettings>({ mode: "rule", rules: [] });
+  const [routingSaving, setRoutingSaving] = useState(false);
+  useEffect(() => {
+    let active = true;
+    void invoke<AutoRoutingSettings>("get_auto_routing_settings")
+      .then(async (settings) => {
+        if (!active) return;
+        if (settings.mode !== "direct") {
+          setRouting(settings);
+          return;
+        }
+        const result = await invoke<AutoRoutingApplyResult>(
+          "set_auto_routing_settings",
+          { settings: { ...settings, mode: "rule" } },
+        );
+        if (active) setRouting(result.settings);
+      })
+      .catch((error) => console.error("读取代理模式失败", error));
+    return () => {
+      active = false;
+    };
+  }, []);
+  const changeRoutingMode = async (mode: "rule" | "global") => {
+    if (routingSaving || routing.mode === mode) return;
+    setRoutingSaving(true);
+    try {
+      const result = await invoke<AutoRoutingApplyResult>(
+        "set_auto_routing_settings",
+        { settings: { ...routing, mode } },
+      );
+      setRouting(result.settings);
+    } catch (error) {
+      console.error("切换代理模式失败", error);
+    } finally {
+      setRoutingSaving(false);
+    }
+  };
   const button = state.connecting
-    ? state.stage === "switching" ? "正在切换" : "正在连接"
+    ? state.stage === "switching" ? "切换中" : "连接中"
     : state.connected
-      ? "断开连接"
-      : "一键连接";
+      ? "断开"
+      : "连接";
   const title = state.connecting
-    ? (state.displayName ?? (state.stage === "switching" ? "正在切换线路" : "正在准备连接"))
+    ? (state.stage === "switching" ? "正在切换线路" : "正在建立连接")
     : state.connected
       ? state.displayName
       : state.error
         ? "连接失败"
-        : "未连接";
+        : "选择线路并连接";
+  const phaseText = state.stage === "preparing"
+    ? "正在准备线路与核心"
+    : state.stage === "probing"
+      ? "正在并行快速筛选可用线路"
+    : state.stage === "switching"
+      ? "正在验证并切换新线路"
+      : state.stage === "applying-routing"
+        ? "正在应用代理模式"
+        : state.stage === "failover"
+          ? "当前线路异常，正在自动重选"
+          : state.displayName ?? "正在启动核心并验证代理";
   return (
     <div className="page home-page">
       <section className="hero-card auto-hero-card">
+        <div className="hero-info">
+          <div className="home-heading-row">
+            <div>
+              <h2>{title}</h2>
+              {(state.error || state.connected || state.connecting) && (
+                <p className="muted">
+                  {state.error ?? (state.connected ? "当前线路运行正常，KiNGO 会持续监测并在异常时自动保护连接。" : phaseText)}
+                </p>
+              )}
+            </div>
+            <div className="home-routing-mode" aria-label="代理模式">
+              <div className="home-routing-switch">
+                <button
+                  className={routing.mode === "rule" ? "active" : ""}
+                  disabled={routingSaving}
+                  onClick={() => void changeRoutingMode("rule")}
+                >
+                  规则
+                </button>
+                <button
+                  className={routing.mode === "global" ? "active" : ""}
+                  disabled={routingSaving}
+                  onClick={() => void changeRoutingMode("global")}
+                >
+                  全局
+                </button>
+              </div>
+            </div>
+          </div>
+          <div className={`home-route-summary ${state.connected ? "connected" : ""}`}>
+            <span className="home-route-icon"><CloudServerOutlined /></span>
+            <div className="home-route-main">
+              <small>{state.connected ? "当前线路" : state.connecting ? "连接进度" : "连接线路"}</small>
+              <b>{state.connecting ? phaseText : state.displayName ?? "自动选择最佳线路"}</b>
+            </div>
+            {state.connected ? (
+              <div className="home-live-metrics">
+                <span><small>延迟</small><b>{state.latency ? `${state.latency} ms` : "检测中"}</b></span>
+                <span><small>地区</small><b>{state.country ?? "未知"}</b></span>
+                <span><small>出口 IP</small><b>{state.exitIp ?? "获取中"}</b></span>
+              </div>
+            ) : null}
+            <button className="home-route-action" onClick={() => onNavigate("routes")}>{state.connected ? "更换" : "选择"}</button>
+          </div>
+          {state.connected && <div className="small-actions">
+            {state.connected && <button onClick={onRefresh} disabled={state.connecting}>刷新出口 IP</button>}
+            {state.connected && <button onClick={() => onNavigate("connections")}>连接详情</button>}
+          </div>}
+        </div>
         <div
           className={
             state.connecting
@@ -741,189 +703,37 @@ function Home({
               {state.connecting
                 ? state.stage === "switching" ? "正在验证新线路 · 点击取消" : "点击取消"
                 : state.connected
-                  ? (state.displayName ?? "公共线路")
-                  : "自动选择公共线路"}
+                  ? "点击断开"
+                  : "自动选择最佳线路"}
             </small>
           </button>
         </div>
-        <div className="hero-info">
-          <div className="eyebrow">
-            <span
-              className={
-                state.connected
-                  ? "pill success"
-                  : state.error
-                    ? "pill error"
-                    : "pill"
-              }
-            >
-              {state.connected
-                ? "已连接"
-                : state.error
-                  ? "连接失败"
-                  : state.connecting
-                    ? state.stage === "switching" ? "正在切换" : "正在连接"
-                    : "待连接"}
-            </span>
-            <span className="pill">全自动</span>
-          </div>
-          <h2>{title}</h2>
-          <p className="muted">
-            {state.error ?? (state.connected ? "公共线路 · 连接已建立" : "")}
-          </p>
-          <div className="metrics">
-            <span>
-              <FieldTimeOutlined /> 延迟：
-              {state.latency ? `${state.latency}ms` : "未测试"}
-            </span>
-            <span>
-              <EnvironmentOutlined /> 地区：{state.country ?? "-"}
-            </span>
-            <span>IP：{state.exitIp ?? "-"}</span>
-          </div>
-          <div className="small-actions">
-            <button onClick={() => onNavigate("connections")}>连接详情</button>
-            <button
-              onClick={onRefresh}
-              disabled={!state.connected || state.connecting}
-            >
-              刷新出口 IP
-            </button>
-            <button onClick={() => onNavigate("routes")}>选择线路</button>
-          </div>
-        </div>
       </section>
-      <section className="traffic-card">
-        <div className="section-title">
-          <span>流量统计</span>
-          <b>{state.connected ? "当前 KiNGO 连接" : "暂无连接数据"}</b>
-        </div>
-        <div className="traffic-values">
-          <div>
-            <small>下载</small>
-            <strong className="download">
-              {formatBytes(state.downloadBps, true)}
-            </strong>
-            <small>累计 {formatBytes(state.downloadTotal)}</small>
-          </div>
-          <div>
-            <small>上传</small>
-            <strong className="upload">
-              {formatBytes(state.uploadBps, true)}
-            </strong>
-            <small>累计 {formatBytes(state.uploadTotal)}</small>
-          </div>
-          <TrafficChart
-            up={state.uploadBps}
-            down={state.downloadBps}
-            connected={state.connected}
-          />
-        </div>
-      </section>
-    </div>
-  );
-}
-
-function ModeHome({
-  mode,
-  state,
-  onNavigate,
-}: {
-  mode: Exclude<Mode, "auto">;
-  state: AppState;
-  onNavigate: (page: Page) => void;
-}) {
-  const clash = mode === "clash";
-  const title = clash ? "Clash 控制中心" : "V2ray 控制中心";
-  const subtitle = clash
-    ? "管理 Mihomo 订阅、代理组和活动连接"
-    : "管理 Xray / sing-box 节点、分组和测速";
-  const cards: {
-    page: Page;
-    icon: string;
-    title: string;
-    description: string;
-  }[] = clash
-    ? [
-        {
-          page: "proxy",
-          icon: "◈",
-          title: "代理",
-          description: "查看并切换 Mihomo 代理组",
-        },
-        {
-          page: "subscriptions",
-          icon: "▣",
-          title: "订阅",
-          description: "管理 Clash 订阅与配置",
-        },
-        {
-          page: "connections",
-          icon: "↔",
-          title: "连接",
-          description: "查看当前活动连接",
-        },
-      ]
-    : [
-        {
-          page: "groups",
-          icon: "▦",
-          title: "分组与节点",
-          description: "管理 Xray / sing-box 节点",
-        },
-        {
-          page: "tests",
-          icon: "◉",
-          title: "测速",
-          description: "测试节点延迟与可用性",
-        },
-        {
-          page: "connections",
-          icon: "↔",
-          title: "连接",
-          description: "查看当前核心连接状态",
-        },
-      ];
-  return (
-    <div className="page mode-home-page">
-      <section className={`mode-hero ${clash ? "clash-hero" : "v2ray-hero"}`}>
-        <div>
-          <span className="mode-kicker">
-            {clash ? "MIHOMO" : "XRAY · SING-BOX"}
-          </span>
-          <h2>{title}</h2>
-          <p>{subtitle}</p>
-        </div>
-        <div
-          className={state.connected ? "mode-state connected" : "mode-state"}
-        >
-          <i />
-          {state.connected
-            ? `已连接 · ${state.displayName ?? "运行中"}`
-            : "当前未连接"}
-        </div>
-      </section>
-      <section className="mode-action-grid">
-        {cards.map((card) => (
-          <button
-            className="mode-action-card"
-            key={card.page}
-            onClick={() => onNavigate(card.page)}
-          >
-            <span>{card.icon}</span>
+      <section className={`traffic-card ${state.connected ? "" : "traffic-card-empty"}`}>
+        {state.connected ? (<>
+          <div className="section-title"><b>实时流量</b><span>当前连接</span></div>
+          <div className="traffic-values">
             <div>
-              <b>{card.title}</b>
-              <small>{card.description}</small>
+              <small>下载</small>
+              <strong className="download">{formatBytes(state.downloadBps, true)}</strong>
+              <small>累计 {formatBytes(state.downloadTotal)}</small>
             </div>
-            <em>进入</em>
-          </button>
-        ))}
-      </section>
-      <section className="mode-note">
-        <b>{clash ? "Clash 工作区" : "V2ray 工作区"}</b>
-        <p>
-          该模式与全自动公共线路相互独立，具体功能请从上方入口或左侧导航进入。
-        </p>
+            <div>
+              <small>上传</small>
+              <strong className="upload">{formatBytes(state.uploadBps, true)}</strong>
+              <small>累计 {formatBytes(state.uploadTotal)}</small>
+            </div>
+            <TrafficChart up={state.uploadBps} down={state.downloadBps} connected />
+          </div>
+        </>) : (
+          <div className="traffic-empty-state">
+            <DashboardOutlined />
+            <div>
+              <b>{state.connecting ? "正在建立连接" : "连接后显示实时流量"}</b>
+              <small>下载、上传与累计用量将在这里实时更新</small>
+            </div>
+          </div>
+        )}
       </section>
     </div>
   );
@@ -965,23 +775,18 @@ function Workspace({
   const [appUpdate, setAppUpdate] = useState<AppUpdateInfo | null>(null);
   const [checkingAppUpdate, setCheckingAppUpdate] = useState(false);
   const [appUpdateError, setAppUpdateError] = useState<string | null>(null);
-  const [speedSettings, setSpeedSettings] = useState<SpeedTestSettings>({ url: "https://www.gstatic.com/generate_204", timeoutSeconds: 4, concurrency: 6 });
+  const [installingAppUpdate, setInstallingAppUpdate] = useState(false);
+  const [appUpdateProgress, setAppUpdateProgress] = useState<AppUpdateProgress | null>(null);
+  const pendingAppUpdate = useRef<Update | null>(null);
+  const [speedSettings, setSpeedSettings] = useState<SpeedTestSettings>(DEFAULT_SPEED_TEST_SETTINGS);
   const [speedSettingsMessage, setSpeedSettingsMessage] = useState<string | null>(null);
-  const [v2raySettings, setV2raySettings] = useState<V2raySettings>({ localPort: 10808, allowLan: false, systemProxy: true, bypassLan: true, routingMode: "bypass-cn", logLevel: "warning", subscriptionUpdateMinutes: 0, latencyTestUrl: "https://www.gstatic.com/generate_204", speedTestUrl: "https://speed.cloudflare.com/__down?bytes=10000000", ipInfoUrl: "https://api.ip.sb/geoip", udpTestTarget: "1.1.1.1:53", speedTestTimeoutSeconds: 15, mixedConcurrency: 5, tunEnabled: false, tunStack: "system", tunMtu: 1500, tunStrictRoute: true, tunIpv6: false, tunRouteExclude: ["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"] });
-  const [v2raySettingsMessage, setV2raySettingsMessage] = useState<string | null>(null);
+  const [testingSpeedUrl, setTestingSpeedUrl] = useState<"latency" | "download" | null>(null);
   const [loopbackMessage, setLoopbackMessage] = useState<string | null>(null);
-  const [autoRouting, setAutoRouting] = useState<AutoRoutingSettings>({ mode: "rule", rules: [] });
-  const [autoRuleTarget, setAutoRuleTarget] = useState("");
-  const [autoRuleAction, setAutoRuleAction] = useState<AutoRoutingAction>("direct");
-  const [autoRoutingMessage, setAutoRoutingMessage] = useState<string | null>(null);
+  const [tunMessage, setTunMessage] = useState<string | null>(null);
   useEffect(() => {
     if (page !== "settings") return;
     void invoke<SpeedTestSettings>("get_speed_test_settings").then(setSpeedSettings).catch(() => undefined);
   }, [page]);
-  useEffect(() => {
-    if (page !== "settings" || mode !== "v2ray") return;
-    void invoke<V2raySettings>("get_v2ray_settings").then(setV2raySettings).catch((error) => setV2raySettingsMessage(String(error)));
-  }, [mode, page]);
   useEffect(() => {
     if (mode !== "auto") return;
     void invoke<Route[]>("list_public_routes")
@@ -990,9 +795,6 @@ function Workspace({
     void invoke<RouteUpdateProgress | null>("get_public_route_update_status")
       .then(setUpdateProgress)
       .catch(() => undefined);
-    void invoke<AutoRoutingSettings>("get_auto_routing_settings")
-      .then(setAutoRouting)
-      .catch((error) => setAutoRoutingMessage(String(error)));
   }, [mode]);
   useEffect(() => {
     if (mode !== "auto") return;
@@ -1056,60 +858,14 @@ function Workspace({
   const selectedRoute = routes.find((route) => route.id === routeId);
   const selectedRouteName =
     routeId == null
-      ? "自动选择最近可用线路"
+      ? "推荐线路优先"
       : selectedRoute
-        ? routeDisplayName(selectedRoute)
+        ? routeDisplayName(selectedRoute, routes.findIndex((route) => route.id === selectedRoute.id))
         : "指定线路";
   const ownsConnection = state.mode === mode;
-  const saveAutoRouting = async (settings: AutoRoutingSettings) => {
-    setAutoRoutingMessage(null);
-    try {
-      const saved = await invoke<AutoRoutingSettings>(
-        "set_auto_routing_settings",
-        { settings },
-      );
-      setAutoRouting(saved);
-      setAutoRoutingMessage(
-        state.mode === "auto" && (state.connected || state.connecting)
-          ? "已保存，重启全自动连接后生效"
-          : "已保存",
-      );
-    } catch (error) {
-      setAutoRoutingMessage(`保存失败：${String(error)}`);
-    }
-  };
-  const addAutoRule = () => {
-    const target = autoRuleTarget.trim();
-    if (!target) {
-      setAutoRoutingMessage("请输入网址或域名");
-      return;
-    }
-    const rule: AutoRoutingRule = {
-      id: `rule-${Date.now()}`,
-      target,
-      action: autoRuleAction,
-      enabled: true,
-    };
-    setAutoRuleTarget("");
-    void saveAutoRouting({
-      ...autoRouting,
-      rules: [rule, ...autoRouting.rules],
-    });
-  };
-  const updateAutoRule = (rule: AutoRoutingRule) => {
-    void saveAutoRouting({
-      ...autoRouting,
-      rules: autoRouting.rules.map((item) =>
-        item.id === rule.id ? rule : item,
-      ),
-    });
-  };
-  const removeAutoRule = (id: string) => {
-    void saveAutoRouting({
-      ...autoRouting,
-      rules: autoRouting.rules.filter((rule) => rule.id !== id),
-    });
-  };
+  const usableRoutes = routes.filter((route) => route.lastError == null);
+  const failedRoutes = routes.length - usableRoutes.length;
+  const latestSuccessAt = Math.max(0, ...routes.map((route) => route.lastSuccessAt ?? 0));
   const checkCoreUpdates = async () => {
     setCheckingCores(true);
     setCoreMessage(null);
@@ -1162,27 +918,111 @@ function Workspace({
   const checkAppUpdate = async () => {
     setCheckingAppUpdate(true);
     setAppUpdateError(null);
-    try { setAppUpdate(await invoke<AppUpdateInfo>("check_app_update")); }
-    catch (error) { setAppUpdateError(`检查软件更新失败：${String(error)}`); }
+    try {
+      if (pendingAppUpdate.current) {
+        await pendingAppUpdate.current.close().catch(() => undefined);
+        pendingAppUpdate.current = null;
+      }
+      const update = await check({ timeout: 30_000 });
+      pendingAppUpdate.current = update;
+      if (update) {
+        setAppUpdate({
+          currentVersion: update.currentVersion,
+          latestVersion: update.version,
+          outdated: true,
+          releaseUrl: "https://github.com/KINGHY02/KiNGO/releases/latest",
+          notes: update.body ?? null,
+          installable: true,
+        });
+      } else {
+        const fallback = await invoke<AppUpdateInfo>("check_app_update");
+        setAppUpdate({ ...fallback, installable: false });
+      }
+    } catch (error) {
+      try {
+        const fallback = await invoke<AppUpdateInfo>("check_app_update");
+        setAppUpdate({ ...fallback, installable: false });
+        setAppUpdateError(
+          fallback.outdated
+            ? "检测到新版本，但该版本没有可验证的软件内更新包，请等待发布方补齐更新文件。"
+            : null,
+        );
+      } catch {
+        setAppUpdateError(`检查软件更新失败：${String(error)}`);
+      }
+    }
     finally { setCheckingAppUpdate(false); }
   };
+  const installAppUpdate = async () => {
+    const update = pendingAppUpdate.current;
+    if (!update || installingAppUpdate) return;
+    setInstallingAppUpdate(true);
+    setAppUpdateError(null);
+    let downloaded = 0;
+    let total: number | null = null;
+    try {
+      await update.download((event) => {
+        if (event.event === "Started") {
+          total = event.data.contentLength ?? null;
+          setAppUpdateProgress({ stage: "downloading", downloaded: 0, total, percent: 0 });
+        } else if (event.event === "Progress") {
+          downloaded += event.data.chunkLength;
+          setAppUpdateProgress({
+            stage: "downloading",
+            downloaded,
+            total,
+            percent: total ? Math.min(100, Math.round(downloaded * 100 / total)) : null,
+          });
+        } else {
+          setAppUpdateProgress({ stage: "preparing", downloaded, total, percent: 100 });
+        }
+      });
+      setAppUpdateProgress({ stage: "preparing", downloaded, total, percent: 100 });
+      await invoke("prepare_app_update");
+      setAppUpdateProgress({ stage: "installing", downloaded, total, percent: 100 });
+      await update.install();
+      await relaunch();
+    } catch (error) {
+      setAppUpdateError(`软件更新失败：${String(error)}`);
+      setAppUpdateProgress(null);
+      setInstallingAppUpdate(false);
+    }
+  };
+  useEffect(() => {
+    if (page === "settings" && appUpdate == null && !checkingAppUpdate) {
+      void checkAppUpdate();
+    }
+  }, [page]);
   const saveSpeedSettings = async (settings = speedSettings) => {
     setSpeedSettingsMessage(null);
     try { const saved = await invoke<SpeedTestSettings>("set_speed_test_settings", { settings }); setSpeedSettings(saved); setSpeedSettingsMessage("测速设置已保存"); }
     catch (error) { setSpeedSettingsMessage(`保存失败：${String(error)}`); }
   };
   const resetSpeedSettings = () => {
-    const defaults = { url: "https://www.gstatic.com/generate_204", timeoutSeconds: 4, concurrency: 6 };
+    const defaults = {
+      ...DEFAULT_SPEED_TEST_SETTINGS,
+      fallbackUrls: [...DEFAULT_SPEED_TEST_SETTINGS.fallbackUrls],
+    };
     setSpeedSettings(defaults); void saveSpeedSettings(defaults);
   };
-  const saveV2raySettings = async () => {
-    setV2raySettingsMessage(null);
+  const testSpeedEndpoint = async (kind: "latency" | "download") => {
+    setSpeedSettingsMessage(null);
+    setTestingSpeedUrl(kind);
+    const url = kind === "latency" ? speedSettings.url : speedSettings.downloadUrl;
     try {
-      const saved = await invoke<V2raySettings>("set_v2ray_settings", { settings: v2raySettings });
-      setV2raySettings(saved);
-      setV2raySettingsMessage("V2ray 运行设置已保存，下次启动服务时生效");
+      const result = await invoke<SpeedTestUrlResult>("test_speed_test_url", {
+        url,
+        timeoutSeconds: speedSettings.timeoutSeconds,
+      });
+      setSpeedSettingsMessage(
+        `${kind === "latency" ? "延迟" : "下载"}地址可用：HTTP ${result.status} · ${result.latencyMs} ms`,
+      );
     } catch (error) {
-      setV2raySettingsMessage(`保存失败：${String(error)}`);
+      setSpeedSettingsMessage(
+        `${kind === "latency" ? "延迟" : "下载"}地址不可用：${String(error)}`,
+      );
+    } finally {
+      setTestingSpeedUrl(null);
     }
   };
   const setupUwpLoopback = async () => {
@@ -1193,60 +1033,75 @@ function Workspace({
       setLoopbackMessage(`设置失败：${String(error)}`);
     }
   };
+  const toggleTun = async () => {
+    setTunMessage(null);
+    try {
+      await invoke<AppState>("set_auto_tun", { enabled: !state.tunEnabled });
+    } catch (error) {
+      setTunMessage(String(error));
+    }
+  };
   if ((page as Page) === "settings")
     return (
       <div className="page workspace settings-page">
         <div className="settings-section">
           <div className="settings-section-heading"><div><b>界面与动效</b></div></div>
           <div className="settings-list">
-            <section className="settings-card"><div><b>界面动效</b><p className="muted">开启轻微位移、颜色渐变和按压回弹；关闭后所有界面过渡立即停用。</p></div><button className={motionEnabled ? "toggle on" : "toggle"} onClick={() => onMotionEnabled(!motionEnabled)} aria-label="界面动效"><i /></button></section>
-            <section className="settings-card"><div><b>Windows 应用代理兼容</b><p className="muted">解除 Microsoft Store 版 ChatGPT/OpenAI 应用访问本地代理的回环限制，与 Clash Verge、V2rayN 的处理方式一致。</p>{loopbackMessage && <small className="muted">{loopbackMessage}</small>}</div><button className="settings-action" onClick={() => void setupUwpLoopback()}>解除回环限制</button></section>
+            <section className="settings-card"><div><b>界面动效</b>{motionEnabled ? <p className="muted">按钮、主题和侧边栏使用轻微动效。</p> : <p className="muted">界面动效已关闭。</p>}</div><button className={motionEnabled ? "toggle on" : "toggle"} onClick={() => onMotionEnabled(!motionEnabled)} aria-label="界面动效"><i /></button></section>
+            <section className="settings-card"><div><b>Windows 应用代理兼容</b><p className="muted">允许 Microsoft Store 应用访问本地代理。</p>{loopbackMessage && <small className="muted">{loopbackMessage}</small>}</div><button className="settings-action" onClick={() => void setupUwpLoopback()}>解除限制</button></section>
           </div>
         </div>
-        {mode === "v2ray" && <div className="settings-section speed-settings-section">
-          <div className="settings-section-heading"><div><b>V2ray 运行设置</b></div><div className="settings-heading-actions"><button className="settings-action primary-button" disabled={state.connected || state.connecting} onClick={() => void saveV2raySettings()}>保存设置</button></div></div>
-          <div className="speed-settings-grid v2ray-settings-grid">
-            <label><span>本地代理端口</span><input type="number" min="1024" max="65535" value={v2raySettings.localPort} onChange={(event) => setV2raySettings(value => ({ ...value, localPort: Number(event.target.value) }))}/><small>Xray 与 sing-box 统一使用此端口。</small></label>
-            <label><span>路由模式</span><select value={v2raySettings.routingMode} onChange={(event) => setV2raySettings(value => ({ ...value, routingMode: event.target.value as V2raySettings["routingMode"] }))}><option value="bypass-cn">绕过大陆与局域网</option><option value="global">全局代理</option><option value="direct">全部直连</option></select><small>保存后重新启动服务生效。</small></label>
-            <label><span>日志级别</span><select value={v2raySettings.logLevel} onChange={(event) => setV2raySettings(value => ({ ...value, logLevel: event.target.value as V2raySettings["logLevel"] }))}><option value="error">错误</option><option value="warning">警告</option><option value="info">信息</option><option value="debug">调试</option></select><small>调试级别会产生更多核心日志。</small></label>
-            <label><span>订阅自动更新</span><select value={v2raySettings.subscriptionUpdateMinutes} onChange={(event) => setV2raySettings(value => ({ ...value, subscriptionUpdateMinutes: Number(event.target.value) }))}><option value="0">关闭</option><option value="15">每 15 分钟</option><option value="60">每小时</option><option value="360">每 6 小时</option><option value="720">每 12 小时</option><option value="1440">每天</option></select><small>仅更新已启用的订阅。</small></label>
-          </div>
-          <div className="settings-list v2ray-setting-toggles">
-            <section className="settings-card"><div><b>接管系统代理</b><p className="muted">连接成功后自动设置 Windows 系统代理，断开时恢复。</p></div><button className={v2raySettings.systemProxy ? "toggle on" : "toggle"} onClick={() => setV2raySettings(value => ({ ...value, systemProxy: !value.systemProxy }))}><i /></button></section>
-            <section className="settings-card"><div><b>允许局域网连接</b><p className="muted">监听 0.0.0.0，使同一局域网设备可使用本机代理端口。</p></div><button className={v2raySettings.allowLan ? "toggle on" : "toggle"} onClick={() => setV2raySettings(value => ({ ...value, allowLan: !value.allowLan }))}><i /></button></section>
-            <section className="settings-card"><div><b>绕过局域网地址</b><p className="muted">私有地址保持直连，并写入系统代理绕过列表。</p></div><button className={v2raySettings.bypassLan ? "toggle on" : "toggle"} onClick={() => setV2raySettings(value => ({ ...value, bypassLan: !value.bypassLan }))}><i /></button></section>
-          </div>
-          <div className="settings-section-heading v2ray-test-settings-heading"><div><b>TUN 模式</b></div></div>
-          <div className="settings-list v2ray-setting-toggles">
-            <section className="settings-card"><div><b>接管全部应用流量</b><p className="muted">通过 sing-box 创建 kingo_tun 虚拟网卡，适用于 ChatGPT、Store 应用、游戏和不读取系统代理的软件。首次启动会请求管理员权限。</p></div><button className={v2raySettings.tunEnabled ? "toggle on" : "toggle"} onClick={() => setV2raySettings(value => ({ ...value, tunEnabled: !value.tunEnabled, systemProxy: value.tunEnabled ? value.systemProxy : false }))}><i /></button></section>
-            <section className="settings-card"><div><b>严格路由与 DNS 防泄漏</b><p className="muted">阻止流量从其他网络接口绕过 TUN；可能影响 VirtualBox 等虚拟网络软件。</p></div><button className={v2raySettings.tunStrictRoute ? "toggle on" : "toggle"} onClick={() => setV2raySettings(value => ({ ...value, tunStrictRoute: !value.tunStrictRoute }))}><i /></button></section>
-            <section className="settings-card"><div><b>TUN IPv6</b><p className="muted">同时接管 IPv6 流量；网络或节点不支持 IPv6 时建议关闭。</p></div><button className={v2raySettings.tunIpv6 ? "toggle on" : "toggle"} onClick={() => setV2raySettings(value => ({ ...value, tunIpv6: !value.tunIpv6 }))}><i /></button></section>
-          </div>
-          <div className="speed-settings-grid v2ray-settings-grid">
-            <label><span>网络栈</span><select value={v2raySettings.tunStack} onChange={(event) => setV2raySettings(value => ({ ...value, tunStack: event.target.value as V2raySettings["tunStack"] }))}><option value="system">System（推荐）</option><option value="mixed">Mixed</option><option value="gvisor">gVisor</option></select><small>System性能最好；Mixed兼顾 UDP兼容；gVisor隔离性更强。</small></label>
-            <label><span>MTU</span><select value={v2raySettings.tunMtu} onChange={(event) => setV2raySettings(value => ({ ...value, tunMtu: Number(event.target.value) }))}>{[1280, 1408, 1500, 4064, 9000].map(value => <option value={value} key={value}>{value}</option>)}</select><small>默认1500；移动网络或丢包时可尝试1280或1408。</small></label>
-            <label className="speed-url-field"><span>路由排除网段</span><input value={v2raySettings.tunRouteExclude.join(", ")} onChange={(event) => setV2raySettings(value => ({ ...value, tunRouteExclude: event.target.value.split(/[;,\s]+/).filter(Boolean) }))}/><small>这些网段不进入 TUN，使用逗号分隔；默认排除局域网。</small></label>
-          </div>
-          <div className="settings-section-heading v2ray-test-settings-heading"><div><b>V2ray 测速设置</b></div></div>
-          <div className="speed-settings-grid v2ray-settings-grid">
-            <label className="speed-url-field"><span>真实延迟地址</span><input value={v2raySettings.latencyTestUrl} onChange={(event) => setV2raySettings(value => ({ ...value, latencyTestUrl: event.target.value }))}/><small>通过节点连续请求两次并取较低耗时。</small></label>
-            <label className="speed-url-field"><span>下载测速地址</span><input value={v2raySettings.speedTestUrl} onChange={(event) => setV2raySettings(value => ({ ...value, speedTestUrl: event.target.value }))}/><small>默认下载 Cloudflare 10MB 测速内容，会消耗节点流量。</small></label>
-            <label className="speed-url-field"><span>出口信息地址</span><input value={v2raySettings.ipInfoUrl} onChange={(event) => setV2raySettings(value => ({ ...value, ipInfoUrl: event.target.value }))}/><small>用于获取节点出口 IP 与国家信息。</small></label>
-            <label><span>UDP 测试目标</span><input value={v2raySettings.udpTestTarget} onChange={(event) => setV2raySettings(value => ({ ...value, udpTestTarget: event.target.value }))}/><small>必须使用 IP:端口，例如 1.1.1.1:53。</small></label>
-            <label><span>下载测速超时</span><select value={v2raySettings.speedTestTimeoutSeconds} onChange={(event) => setV2raySettings(value => ({ ...value, speedTestTimeoutSeconds: Number(event.target.value) }))}>{[5, 10, 15, 20, 30, 60, 120].map(value => <option value={value} key={value}>{value} 秒</option>)}</select><small>时间越长测速结果越稳定，但消耗流量更多。</small></label>
-            <label><span>混合测速并发</span><select value={v2raySettings.mixedConcurrency} onChange={(event) => setV2raySettings(value => ({ ...value, mixedConcurrency: Number(event.target.value) }))}>{[1, 2, 3, 4, 5, 6, 8, 10, 12, 16].map(value => <option value={value} key={value}>{value} 个节点</option>)}</select><small>同时运行的临时核心数量，默认 5。</small></label>
-          </div>
-          {state.connected && <div className="settings-notice"><ExclamationCircleOutlined /> 请先断开 V2ray 服务再修改运行设置。</div>}
-          {v2raySettingsMessage && <div className={v2raySettingsMessage.startsWith("保存失败") ? "settings-notice" : "settings-notice info"}>{v2raySettingsMessage}</div>}
-        </div>}
         <div className="settings-section speed-settings-section">
           <div className="settings-section-heading"><div><b>测速设置</b></div><div className="settings-heading-actions"><button className="settings-action" onClick={resetSpeedSettings}>恢复默认</button><button className="settings-action primary-button" onClick={() => void saveSpeedSettings()}>保存设置</button></div></div>
+          <div className="speed-endpoint-list">
+            <section className="speed-endpoint-card">
+              <div className="speed-endpoint-heading"><div><b>延迟测速地址</b><small>用于线路延迟、可用性检测和自动选优。</small></div><button className="settings-action" disabled={testingSpeedUrl !== null} onClick={() => void testSpeedEndpoint("latency")}>{testingSpeedUrl === "latency" ? "测试中…" : "测试地址"}</button></div>
+              <div className="speed-endpoint-row">
+                <select
+                  aria-label="延迟测速地址预设"
+                  value={LATENCY_URL_PRESETS.some(item => item.url === speedSettings.url) ? speedSettings.url : "__custom__"}
+                  onChange={(event) => {
+                    if (event.target.value !== "__custom__") setSpeedSettings(value => ({ ...value, url: event.target.value }));
+                  }}
+                >
+                  {LATENCY_URL_PRESETS.map(item => <option value={item.url} key={item.url}>{item.label}</option>)}
+                  <option value="__custom__">自定义地址</option>
+                </select>
+                <input value={speedSettings.url} placeholder="https://www.gstatic.com/generate_204" onChange={(event) => setSpeedSettings(value => ({ ...value, url: event.target.value }))}/>
+              </div>
+              <div className="speed-fallback-block">
+                <span>整批失败时依次备用</span>
+                <div className="speed-fallbacks">
+                  {LATENCY_URL_PRESETS.filter(item => item.url !== speedSettings.url).map(item => {
+                    const checked = speedSettings.fallbackUrls.includes(item.url);
+                    return <label key={item.url}><input type="checkbox" checked={checked} onChange={() => setSpeedSettings(value => ({ ...value, fallbackUrls: checked ? value.fallbackUrls.filter(url => url !== item.url) : [...value.fallbackUrls, item.url] }))}/><span>{item.label}</span></label>;
+                  })}
+                </div>
+                <small>仅当本轮所有线路都失败时，才会让全部线路统一改用下一个地址重测，保证延迟排序公平。</small>
+              </div>
+            </section>
+            <section className="speed-endpoint-card">
+              <div className="speed-endpoint-heading"><div><b>下载测速地址</b><small>用于下载速度测试，与延迟选优互不影响。</small></div><button className="settings-action" disabled={testingSpeedUrl !== null} onClick={() => void testSpeedEndpoint("download")}>{testingSpeedUrl === "download" ? "测试中…" : "测试地址"}</button></div>
+              <div className="speed-endpoint-row">
+                <select
+                  aria-label="下载测速地址预设"
+                  value={DOWNLOAD_URL_PRESETS.some(item => item.url === speedSettings.downloadUrl) ? speedSettings.downloadUrl : "__custom__"}
+                  onChange={(event) => {
+                    if (event.target.value !== "__custom__") setSpeedSettings(value => ({ ...value, downloadUrl: event.target.value }));
+                  }}
+                >
+                  {DOWNLOAD_URL_PRESETS.map(item => <option value={item.url} key={item.url}>{item.label}</option>)}
+                  <option value="__custom__">自定义地址</option>
+                </select>
+                <input value={speedSettings.downloadUrl} placeholder="https://speed.cloudflare.com/__down?bytes=10000000" onChange={(event) => setSpeedSettings(value => ({ ...value, downloadUrl: event.target.value }))}/>
+              </div>
+            </section>
+          </div>
           <div className="speed-settings-grid">
-            <label className="speed-url-field"><span>测速 URL</span><input value={speedSettings.url} placeholder="https://www.gstatic.com/generate_204" onChange={(event) => setSpeedSettings(value => ({ ...value, url: event.target.value }))}/><small>支持 HTTP 或 HTTPS，建议使用返回快速且文件很小的 204 地址。</small></label>
             <label><span>超时时间</span><select value={speedSettings.timeoutSeconds} onChange={(event) => setSpeedSettings(value => ({ ...value, timeoutSeconds: Number(event.target.value) }))}>{[2, 3, 4, 5, 8, 10, 15, 20, 30].map(value => <option value={value} key={value}>{value} 秒</option>)}</select><small>包括代理连接和目标地址响应时间。</small></label>
             <label><span>并发数量</span><select value={speedSettings.concurrency} onChange={(event) => setSpeedSettings(value => ({ ...value, concurrency: Number(event.target.value) }))}>{[1, 2, 3, 4, 6, 8, 10, 12].map(value => <option value={value} key={value}>{value} 个任务</option>)}</select><small>并发越高测速越快，但会占用更多核心进程和网络资源。</small></label>
           </div>
-          {speedSettingsMessage && <div className={speedSettingsMessage.startsWith("保存失败") ? "settings-notice" : "settings-notice info"}>{speedSettingsMessage}</div>}
+          {speedSettingsMessage && <div className={speedSettingsMessage.includes("失败") || speedSettingsMessage.includes("不可用") ? "settings-notice" : "settings-notice info"}>{speedSettingsMessage}</div>}
         </div>
         <div className="settings-section">
           <div className="settings-section-heading">
@@ -1257,10 +1112,30 @@ function Workspace({
           <div className="settings-list">
             <section className="settings-card">
               <div>
+                <b>TUN 虚拟网卡</b>
+                <p className="muted">接管不遵循系统代理的应用，并统一处理 DNS。</p>
+                {tunMessage && (
+                  <small className="settings-error">
+                    {tunMessage}
+                    {tunMessage.includes("管理员") && (
+                      <button className="inline-admin-action" onClick={() => void invoke("restart_as_admin")}>管理员重启</button>
+                    )}
+                  </small>
+                )}
+              </div>
+              <button
+                className={state.tunEnabled ? "toggle on" : "toggle"}
+                disabled={state.connecting}
+                onClick={() => void toggleTun()}
+                aria-label="TUN 虚拟网卡"
+              >
+                <i />
+              </button>
+            </section>
+            <section className="settings-card">
+              <div>
                 <b>线路故障自动切换</b>
-                <p className="muted">
-                  连续三次健康检查失败或核心退出后，自动尝试其他可用线路。
-                </p>
+                <p className="muted">连接异常后自动尝试其他可用线路。</p>
               </div>
               <button
                 className={state.autoFailover ? "toggle on" : "toggle"}
@@ -1277,9 +1152,7 @@ function Workspace({
             <section className="settings-card">
               <div>
                 <b>系统代理保护</b>
-                <p className="muted">
-                  连接前备份 Windows 代理和 PAC 设置，断开或失败后自动恢复。
-                </p>
+                <p className="muted">断开或失败后恢复原 Windows 代理设置。</p>
               </div>
               <span
                 className={
@@ -1292,9 +1165,7 @@ function Workspace({
             <section className="settings-card">
               <div>
                 <b>连接健康检查</b>
-                <p className="muted">
-                  每 10 秒验证一次真实代理请求，连续失败三次判定线路异常。
-                </p>
+                <p className="muted">后台持续验证代理请求是否可用。</p>
               </div>
               <span className="setting-status active">已启用</span>
             </section>
@@ -1426,20 +1297,38 @@ function Workspace({
             <div>
               <b>软件更新</b>
             </div>
-            <button className="settings-action" disabled={checkingAppUpdate} onClick={() => void checkAppUpdate()}>
+            <button className="settings-action" disabled={checkingAppUpdate || installingAppUpdate} onClick={() => void checkAppUpdate()}>
               {checkingAppUpdate ? <><LoadingOutlined spin /> 检查中</> : <><CloudDownloadOutlined /> 检查更新</>}
             </button>
           </div>
           <div className="app-version-row">
-            <div><small>当前版本</small><b>v{appUpdate?.currentVersion ?? "2.0.0"}</b></div>
+            <div><small>当前版本</small><b>v{appUpdate?.currentVersion ?? "2.0.3"}</b></div>
             <div><small>最新版本</small><b>{appUpdate?.latestVersion ? `v${appUpdate.latestVersion}` : "尚未检查"}</b></div>
             <span className={appUpdate?.outdated ? "core-status update" : "core-status ok"}>{appUpdate ? appUpdate.outdated ? "发现新版本" : "已是最新版本" : "等待检查"}</span>
-            {appUpdate?.outdated && <button className="primary-button release-button" onClick={() => void openUrl(appUpdate.releaseUrl)}>前往下载</button>}
+            {appUpdate?.outdated && appUpdate.installable && (
+              <button className="primary-button release-button" disabled={installingAppUpdate} onClick={() => void installAppUpdate()}>
+                {installingAppUpdate ? <><LoadingOutlined spin /> 更新中</> : "立即更新"}
+              </button>
+            )}
+            {appUpdate?.outdated && !appUpdate.installable && (
+              <button className="release-button" onClick={() => void openUrl(appUpdate.releaseUrl)}>查看发布页</button>
+            )}
           </div>
+          {appUpdateProgress && (
+            <div className="app-update-progress">
+              <div>
+                <span>{appUpdateProgress.stage === "downloading" ? "正在下载更新" : appUpdateProgress.stage === "preparing" ? "正在安全断开并准备安装" : "正在安装，KiNGO 将自动重启"}</span>
+                <b>{appUpdateProgress.percent == null ? formatBytes(appUpdateProgress.downloaded) : `${appUpdateProgress.percent}%`}</b>
+              </div>
+              <progress max={100} value={appUpdateProgress.percent ?? undefined} />
+              {appUpdateProgress.total != null && <small>{formatBytes(appUpdateProgress.downloaded)} / {formatBytes(appUpdateProgress.total)}</small>}
+            </div>
+          )}
+          {appUpdate?.notes && <div className="app-update-notes"><b>更新说明</b><p>{appUpdate.notes}</p></div>}
           {appUpdateError && <div className="settings-notice">{appUpdateError}</div>}
         </div>
         <div className="settings-section about-card">
-          <div className="about-heading"><img src={kingoLogo} alt="KiNGO"/><div><b>KiNGO</b><p>轻量、多核心的网络代理管理桌面客户端</p></div></div>
+          <div className="about-heading"><img src={kingoLogo} alt="KiNGO"/><div><b>KiNGO</b><p>轻量网络连接桌面客户端</p></div></div>
           <div className="about-links">
             <button onClick={() => void openUrl("https://github.com/KINGHY02/KiNGO")}><GithubOutlined/><span>GitHub 项目主页</span></button>
             <button onClick={() => void openUrl("https://github.com/KINGHY02/KiNGO/releases")}><CloudDownloadOutlined/><span>版本发布与更新日志</span></button>
@@ -1484,7 +1373,7 @@ function Workspace({
               ← 返回首页
             </button>
             <h2>连接详情</h2>
-            <p className="muted">当前全自动连接的实时状态</p>
+            <p className="muted">当前连接的实时状态</p>
           </div>
         </div>
         <section className="detail-grid">
@@ -1616,131 +1505,70 @@ function Workspace({
       </div>
       {mode === "auto" ? (
         <>
-        <section className="auto-routing-panel">
-          <div className="auto-routing-header">
-            <div>
-              <h3>全自动路由策略</h3>
-              <p className="muted">规则模式默认“国外走代理、国内直连”，也可以自己添加网站规则。</p>
-            </div>
-            {autoRoutingMessage && <span className="route-message">{autoRoutingMessage}</span>}
+        <section className="route-overview route-overview-primary">
+          <div>
+            <span>当前策略</span>
+            <b>{selectedRouteName}</b>
           </div>
-          <div className="auto-mode-grid">
-            {[
-              ["rule", "规则模式", "推荐：国内直连，其他走代理，可叠加自定义网站规则"],
-              ["global", "全局代理", "所有流量都走当前全自动线路"],
-              ["direct", "直连模式", "关闭代理转发，仅保留直连"],
-            ].map(([value, title, desc]) => (
-              <button
-                className={autoRouting.mode === value ? "auto-mode-card active" : "auto-mode-card"}
-                key={value}
-                onClick={() =>
-                  void saveAutoRouting({
-                    ...autoRouting,
-                    mode: value as AutoRoutingMode,
-                  })
-                }
-              >
-                <b>{title}</b>
-                <small>{desc}</small>
-              </button>
-            ))}
+          <div>
+            <span>线路总数</span>
+            <b>{routes.length || 0}</b>
           </div>
-          <div className="auto-rule-form">
-            <input
-              value={autoRuleTarget}
-              onChange={(event) => setAutoRuleTarget(event.target.value)}
-              onKeyDown={(event) => {
-                if (event.key === "Enter") addAutoRule();
-              }}
-              placeholder="输入网址或域名，例如 baidu.com / https://google.com"
-            />
-            <select
-              value={autoRuleAction}
-              onChange={(event) =>
-                setAutoRuleAction(event.target.value as AutoRoutingAction)
-              }
-            >
-              <option value="direct">走直连</option>
-              <option value="proxy">走代理</option>
-              <option value="block">拦截</option>
-            </select>
-            <button onClick={addAutoRule}>添加规则</button>
+          <div>
+            <span>可用 / 失败</span>
+            <b>{usableRoutes.length} 可用 · {failedRoutes} 失败</b>
           </div>
-          <div className="auto-rule-list">
-            {autoRouting.rules.length === 0 ? (
-              <span className="muted">还没有自定义规则。普通用户只要填域名并选择走直连或走代理即可。</span>
-            ) : (
-              autoRouting.rules.map((rule) => (
-                <div className="auto-rule-row" key={rule.id}>
-                  <label>
-                    <input
-                      type="checkbox"
-                      checked={rule.enabled}
-                      onChange={(event) =>
-                        updateAutoRule({ ...rule, enabled: event.target.checked })
-                      }
-                    />
-                    <b>{rule.target}</b>
-                  </label>
-                  <select
-                    value={rule.action}
-                    onChange={(event) =>
-                      updateAutoRule({
-                        ...rule,
-                        action: event.target.value as AutoRoutingAction,
-                      })
-                    }
-                  >
-                    <option value="direct">走直连</option>
-                    <option value="proxy">走代理</option>
-                    <option value="block">拦截</option>
-                  </select>
-                  <button onClick={() => removeAutoRule(rule.id)}>删除</button>
-                </div>
-              ))
-            )}
+          <div>
+            <span>最近测试</span>
+            <b>{latestSuccessAt ? formatRouteTime(latestSuccessAt) : "尚未测试"}</b>
           </div>
+          <button disabled={state.connecting || routeId == null} onClick={() => onRoute("")}>
+            使用推荐线路
+          </button>
         </section>
-        <div className="route-list">
-          <div
-            className={
-              routeId == null ? "route-row route-selected" : "route-row"
-            }
-          >
-            <span className="route-index">自动</span>
-            <b>自动选择</b>
-            <span className="muted">
-              优先最近成功且延迟较低的线路，失败后继续尝试
-            </span>
-            <span className="delay">{routeId == null ? "当前" : "推荐"}</span>
-            <div className="route-actions auto-route-actions">
-              <button disabled={state.connecting || routeId == null} onClick={() => onRoute("")}>
-                {routeId == null ? (state.connected && state.mode === "auto" ? "自动模式" : "已选择") : state.connected && state.mode === "auto" ? "切换" : "选择"}
-              </button>
-            </div>
+        <div className="route-list modern-route-list">
+          <div className="route-table-head">
+            <span>#</span>
+            <span>线路</span>
+            <span>状态</span>
+            <span>延迟</span>
+            <span>操作</span>
           </div>
           {routes.map((route, index) => {
             const testing = progress?.routeId === route.id && state.connecting;
             const selected = routeId === route.id;
+            const failed = route.lastError != null;
+            const tunCompatible = route.coreId === "mihomo" || route.coreId === "sing-box";
+            const status = testing
+              ? "测速中"
+              : failed
+                ? route.lastError?.includes("核心") ? "核心失败" : "连接失败"
+                : route.active
+                  ? "正在使用"
+                  : route.lastSuccessAt
+                    ? route.successRate != null
+                      ? `${route.quality} · ${route.successRate}%`
+                      : `可用 · ${formatRouteTime(route.lastSuccessAt)}`
+                    : "待测试";
             return (
               <div
-                className={route.active ? "route-row route-selected route-active" : selected ? "route-row route-selected" : "route-row"}
+                className={route.active ? "route-row route-selected route-active" : selected ? "route-row route-selected" : failed ? "route-row route-failed" : "route-row"}
                 key={route.id}
-                title={route.lastError ?? undefined}
+                title={route.lastError ?? (state.tunEnabled && !tunCompatible
+                  ? "该线路核心暂不支持原生 TUN"
+                  : route.jitter != null
+                    ? `延迟波动约 ${route.jitter} ms · 最近成功率 ${route.successRate ?? 0}% · 最近可用 ${route.lastSuccessAt ? formatRouteTime(route.lastSuccessAt) : "未知"}`
+                    : undefined)}
               >
                 <span className="route-index">
                   {String(index + 1).padStart(2, "0")}
                 </span>
-                <b>{routeDisplayName(route)}</b>
-                <span
-                  className={route.lastError ? "route-message error" : "muted"}
-                >
-                  {testing
-                    ? `正在启动 ${route.protocolLabel} 核心并验证线路`
-                    : routeDescription(route, selected)}
+                <b>{routeDisplayName(route, index)}</b>
+                <span className={failed ? "route-status failed" : testing ? "route-status testing" : "route-status ok"}>
+                  {status}
                 </span>
                 <span
-                  className="delay"
+                  className={failed ? "delay-pill failed" : "delay-pill"}
                   style={{
                     color: testing
                       ? "#4b6ff0"
@@ -1772,13 +1600,14 @@ function Workspace({
                   >
                     {testing ? "取消" : "测速"}
                   </button>
-                  <button disabled={state.connecting || route.active} onClick={() => onRoute(route.id)}>
-                    {route.active ? "正在使用" : selected ? "已选择" : state.connected && state.mode === "auto" ? "切换" : "选择"}
+                  <button disabled={state.connecting || route.active || (state.tunEnabled && !tunCompatible)} onClick={() => onRoute(route.id)}>
+                    {state.tunEnabled && !tunCompatible ? "不支持" : route.active ? "当前" : selected ? "已选" : state.connected && state.mode === "auto" ? "切换" : "使用"}
                   </button>
                 </div>
               </div>
             );
           })}
+          {failedRoutes > 0 && <div className="route-list-footer">有 {failedRoutes} 条线路不可用，鼠标悬停失败线路可查看完整原因。</div>}
         </div>
         </>
       ) : (

@@ -1,17 +1,16 @@
 use crate::{
-    clash_controller, clash_profiles, core_runtime, paths, process_utils::hidden_command,
-    system_proxy,
+    clash_controller, clash_profiles, core_runtime, geo_rules, paths,
+    process_utils::hidden_command, system_proxy,
 };
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{HashMap, VecDeque},
     fs,
-    net::IpAddr,
     net::TcpStream,
     path::PathBuf,
     sync::{
-        atomic::{AtomicBool, AtomicUsize, Ordering},
-        Arc, Mutex, OnceLock,
+        atomic::{AtomicBool, Ordering},
+        mpsc, Arc, Mutex, OnceLock,
     },
     time::{Duration, Instant},
 };
@@ -74,6 +73,9 @@ pub struct PublicRoute {
     pub last_error: Option<String>,
     pub latency: Option<u32>,
     pub country: Option<String>,
+    pub success_rate: Option<u8>,
+    pub jitter: Option<u32>,
+    pub quality: String,
 }
 
 #[derive(Clone, Debug, serde::Deserialize)]
@@ -95,10 +97,12 @@ pub struct ConnectionStore {
     pub proxy: system_proxy::ProxyState,
     pub route_metrics: Arc<Mutex<HashMap<String, RouteMetric>>>,
     pub active_route: Arc<Mutex<Option<PublicRoute>>>,
+    pub active_proxy_port: Arc<Mutex<Option<u16>>>,
     pub traffic_sample: Arc<Mutex<Option<TrafficSample>>>,
     pub route_update_running: Arc<AtomicBool>,
     pub route_update_cancel: Arc<AtomicBool>,
     pub route_update_progress: Arc<Mutex<Option<RouteUpdateProgress>>>,
+    pub routing_apply_in_progress: Arc<AtomicBool>,
 }
 
 #[derive(Clone, Debug)]
@@ -115,15 +119,26 @@ pub struct RouteMetric {
     pub last_success_at: Option<u64>,
     #[serde(default)]
     pub country: Option<String>,
+    #[serde(default)]
+    pub latency_samples: Vec<u32>,
+    #[serde(default)]
+    pub recent_results: Vec<bool>,
+    #[serde(default)]
+    pub consecutive_failures: u8,
+    #[serde(default)]
+    pub last_failure_at: Option<u64>,
 }
 
 #[derive(Default, Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct ConnectionSettings {
+    #[serde(default)]
     auto_failover: bool,
+    #[serde(default)]
+    tun_enabled: bool,
 }
 
-#[derive(Clone, Debug, Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AutoRoutingRule {
     pub id: String,
@@ -132,11 +147,20 @@ pub struct AutoRoutingRule {
     pub enabled: bool,
 }
 
-#[derive(Clone, Debug, Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AutoRoutingSettings {
     pub mode: String,
     pub rules: Vec<AutoRoutingRule>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AutoRoutingApplyResult {
+    pub settings: AutoRoutingSettings,
+    pub applied: bool,
+    pub restarted: bool,
+    pub message: String,
 }
 
 impl Default for AutoRoutingSettings {
@@ -152,14 +176,44 @@ impl Default for AutoRoutingSettings {
 #[serde(rename_all = "camelCase")]
 pub struct SpeedTestSettings {
     pub url: String,
+    #[serde(default = "default_speed_test_fallback_urls")]
+    pub fallback_urls: Vec<String>,
+    #[serde(default = "default_download_test_url")]
+    pub download_url: String,
     pub timeout_seconds: u64,
     pub concurrency: usize,
+}
+
+fn default_speed_test_fallback_urls() -> Vec<String> {
+    vec![
+        "http://cp.cloudflare.com/generate_204".into(),
+        "http://www.msftconnecttest.com/connecttest.txt".into(),
+    ]
+}
+
+fn default_download_test_url() -> String {
+    "https://speed.cloudflare.com/__down?bytes=10000000".into()
+}
+
+impl SpeedTestSettings {
+    fn latency_urls(&self) -> Vec<String> {
+        let mut urls = Vec::with_capacity(self.fallback_urls.len() + 1);
+        for url in std::iter::once(&self.url).chain(self.fallback_urls.iter()) {
+            let url = url.trim();
+            if !url.is_empty() && !urls.iter().any(|current| current == url) {
+                urls.push(url.to_string());
+            }
+        }
+        urls
+    }
 }
 
 impl Default for SpeedTestSettings {
     fn default() -> Self {
         Self {
             url: "https://www.gstatic.com/generate_204".into(),
+            fallback_urls: default_speed_test_fallback_urls(),
+            download_url: default_download_test_url(),
             timeout_seconds: 4,
             concurrency: 6,
         }
@@ -206,10 +260,12 @@ impl Default for ConnectionStore {
             proxy: system_proxy::ProxyState::default(),
             route_metrics: Arc::new(Mutex::new(HashMap::new())),
             active_route: Arc::new(Mutex::new(None)),
+            active_proxy_port: Arc::new(Mutex::new(None)),
             traffic_sample: Arc::new(Mutex::new(None)),
             route_update_running: Arc::new(AtomicBool::new(false)),
             route_update_cancel: Arc::new(AtomicBool::new(false)),
             route_update_progress: Arc::new(Mutex::new(None)),
+            routing_apply_in_progress: Arc::new(AtomicBool::new(false)),
         }
     }
 }
@@ -492,8 +548,110 @@ pub fn default_public_routes() -> Vec<PublicRoute> {
             last_error: None,
             latency: None,
             country: None,
+            success_rate: None,
+            jitter: None,
+            quality: "待测试".into(),
         })
         .collect()
+}
+
+fn metric_median(samples: &[u32]) -> Option<u32> {
+    if samples.is_empty() {
+        return None;
+    }
+    let mut values = samples.to_vec();
+    values.sort_unstable();
+    let middle = values.len() / 2;
+    Some(if values.len().is_multiple_of(2) {
+        ((values[middle - 1] as u64 + values[middle] as u64) / 2) as u32
+    } else {
+        values[middle]
+    })
+}
+
+fn metric_jitter(metric: &RouteMetric) -> Option<u32> {
+    let median = metric_median(&metric.latency_samples)?;
+    let deviation = metric
+        .latency_samples
+        .iter()
+        .map(|value| value.abs_diff(median) as u64)
+        .sum::<u64>()
+        / metric.latency_samples.len() as u64;
+    Some(deviation as u32)
+}
+
+fn metric_success_rate(metric: &RouteMetric) -> Option<u8> {
+    if metric.recent_results.is_empty() {
+        return None;
+    }
+    let successes = metric.recent_results.iter().filter(|value| **value).count();
+    Some(((successes * 100) / metric.recent_results.len()) as u8)
+}
+
+fn metric_quality(metric: &RouteMetric) -> &'static str {
+    if metric.consecutive_failures >= 2 {
+        return "暂不可用";
+    }
+    if metric.recent_results.len() < 3 || metric.latency_samples.len() < 3 {
+        return if metric.last_success_at.is_some() {
+            "可用"
+        } else {
+            "待测试"
+        };
+    }
+    let Some(success_rate) = metric_success_rate(metric) else {
+        return "待测试";
+    };
+    let jitter = metric_jitter(metric).unwrap_or_default();
+    if success_rate >= 90 && jitter <= 80 {
+        "稳定"
+    } else if success_rate >= 70 && jitter <= 180 {
+        "一般"
+    } else {
+        "波动"
+    }
+}
+
+fn current_unix_seconds() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|value| value.as_secs())
+        .unwrap_or_default()
+}
+
+fn metric_candidate_score(metric: Option<&RouteMetric>) -> i64 {
+    let Some(metric) = metric else {
+        return 4_000;
+    };
+    let latency = metric.latency.unwrap_or(2_500) as i64;
+    let jitter = metric_jitter(metric).unwrap_or(500) as i64;
+    let failure_rate = 100 - metric_success_rate(metric).unwrap_or(50) as i64;
+    let mut score = latency + jitter * 2 + failure_rate * 8;
+    score += metric.consecutive_failures as i64 * 600;
+    if metric.error.is_some() {
+        score += 2_000;
+    }
+    let cooldown_seconds = if metric.consecutive_failures >= 3 {
+        30 * 60
+    } else if metric.consecutive_failures >= 2 {
+        10 * 60
+    } else {
+        0
+    };
+    if cooldown_seconds > 0
+        && metric
+            .last_failure_at
+            .is_some_and(|at| current_unix_seconds().saturating_sub(at) < cooldown_seconds)
+    {
+        score += 10_000;
+    }
+    if metric
+        .last_success_at
+        .is_some_and(|at| current_unix_seconds().saturating_sub(at) < 30 * 60)
+    {
+        score -= 80;
+    }
+    score
 }
 
 pub fn public_routes_snapshot(app: &AppHandle, store: &ConnectionStore) -> Vec<PublicRoute> {
@@ -516,6 +674,9 @@ pub fn public_routes_snapshot(app: &AppHandle, store: &ConnectionStore) -> Vec<P
                     metric.latency
                 };
                 route.country = metric.country.clone();
+                route.success_rate = metric_success_rate(metric);
+                route.jitter = metric_jitter(metric);
+                route.quality = metric_quality(metric).into();
             }
             route.connection_state = if route.active {
                 "connected".into()
@@ -602,8 +763,6 @@ fn test_routes(
     let metrics = store.route_metrics.clone();
     std::thread::spawn(move || {
         let total = routes.len();
-        let completed = Arc::new(AtomicUsize::new(0));
-        let succeeded = Arc::new(AtomicUsize::new(0));
         let mut groups: HashMap<u16, Vec<(PublicRoute, u16)>> = HashMap::new();
         let mut socks_lane = 0_u16;
         for route in routes {
@@ -621,72 +780,104 @@ fn test_routes(
                 .push((route, test_port));
         }
         let settings = current_speed_test_settings();
-        let queue = Arc::new(Mutex::new(VecDeque::from_iter(groups.into_values())));
-        let worker_count = settings
-            .concurrency
-            .min(queue.lock().map(|value| value.len()).unwrap_or(1))
-            .max(1);
-        let mut workers = Vec::with_capacity(worker_count);
-        for _ in 0..worker_count {
-            let app = app.clone();
-            let state = state.clone();
-            let metrics = metrics.clone();
-            let cancel = cancel.clone();
-            let completed = completed.clone();
-            let succeeded = succeeded.clone();
-            let queue = queue.clone();
-            workers.push(std::thread::spawn(move || {
-                let runtime = core_runtime::CoreRuntime::default();
-                while let Some(group) = queue.lock().ok().and_then(|mut value| value.pop_front()) {
-                    for (route, test_port) in group {
+        let groups: Vec<_> = groups.into_values().collect();
+        let test_urls = settings.latency_urls();
+        let mut succeeded = 0;
+        for (attempt, test_url) in test_urls.iter().enumerate() {
+            let attempt_results = Arc::new(Mutex::new(Vec::<(
+                PublicRoute,
+                Result<(u32, Option<String>), String>,
+            )>::with_capacity(total)));
+            let queue = Arc::new(Mutex::new(VecDeque::from_iter(groups.clone())));
+            let worker_count = settings
+                .concurrency
+                .min(queue.lock().map(|value| value.len()).unwrap_or(1))
+                .max(1);
+            let mut workers = Vec::with_capacity(worker_count);
+            for _ in 0..worker_count {
+                let app = app.clone();
+                let cancel = cancel.clone();
+                let attempt_results = attempt_results.clone();
+                let queue = queue.clone();
+                let test_url = test_url.clone();
+                workers.push(std::thread::spawn(move || {
+                    let runtime = core_runtime::CoreRuntime::default();
+                    while let Some(group) =
+                        queue.lock().ok().and_then(|mut value| value.pop_front())
+                    {
+                        for (route, test_port) in group {
+                            if cancel.load(Ordering::Relaxed) {
+                                break;
+                            }
+                            let result =
+                                probe_route(&app, &runtime, &route, test_port, &cancel, &test_url);
+                            if cancel.load(Ordering::Relaxed) {
+                                break;
+                            }
+                            if let Ok(mut values) = attempt_results.lock() {
+                                values.push((route, result));
+                            }
+                        }
                         if cancel.load(Ordering::Relaxed) {
                             break;
-                        }
-                        let result = probe_route(&app, &runtime, &route, test_port, &cancel);
-                        if cancel.load(Ordering::Relaxed) {
-                            break;
-                        }
-                        let current = completed.fetch_add(1, Ordering::SeqCst) + 1;
-                        match result {
-                            Ok((latency, country)) => {
-                                succeeded.fetch_add(1, Ordering::SeqCst);
-                                record_metric(&metrics, &route.id, Some(latency), None);
-                                record_route_country(&metrics, &route.id, country);
-                                emit_probe_progress(
-                                    &app,
-                                    &state,
-                                    current,
-                                    total,
-                                    &route,
-                                    Some(latency),
-                                    None,
-                                );
-                            }
-                            Err(error) => {
-                                record_metric(&metrics, &route.id, None, Some(error.clone()));
-                                emit_probe_progress(
-                                    &app,
-                                    &state,
-                                    current,
-                                    total,
-                                    &route,
-                                    None,
-                                    Some(error),
-                                );
-                            }
                         }
                     }
-                    if cancel.load(Ordering::Relaxed) {
-                        break;
+                    let _ = core_runtime::stop_all(&runtime);
+                }));
+            }
+            for worker in workers {
+                let _ = worker.join();
+            }
+            let mut results = attempt_results
+                .lock()
+                .map(|mut values| std::mem::take(&mut *values))
+                .unwrap_or_default();
+            succeeded = results.iter().filter(|(_, result)| result.is_ok()).count();
+            let is_final_attempt = succeeded > 0 || attempt + 1 >= test_urls.len();
+            if !cancel.load(Ordering::Relaxed) && is_final_attempt {
+                results.sort_by(|(left, _), (right, _)| left.id.cmp(&right.id));
+                for (index, (route, result)) in results.into_iter().enumerate() {
+                    match result {
+                        Ok((latency, country)) => {
+                            record_metric(&metrics, &route.id, Some(latency), None);
+                            record_route_country(&metrics, &route.id, country);
+                            emit_probe_progress(
+                                &app,
+                                &state,
+                                index + 1,
+                                total,
+                                &route,
+                                Some(latency),
+                                None,
+                            );
+                        }
+                        Err(error) => {
+                            record_metric(&metrics, &route.id, None, Some(error.clone()));
+                            emit_probe_progress(
+                                &app,
+                                &state,
+                                index + 1,
+                                total,
+                                &route,
+                                None,
+                                Some(error),
+                            );
+                        }
                     }
                 }
-                let _ = core_runtime::stop_all(&runtime);
-            }));
+            }
+            if cancel.load(Ordering::Relaxed) || is_final_attempt {
+                break;
+            }
+            let next_url = &test_urls[attempt + 1];
+            let _ = app.emit(
+                "connection-log",
+                serde_json::json!({
+                    "level": "warning",
+                    "message": format!("测速地址整体不可用，整批切换备用地址：{next_url}")
+                }),
+            );
         }
-        for worker in workers {
-            let _ = worker.join();
-        }
-        let succeeded = succeeded.load(Ordering::SeqCst);
         let cancelled = cancel.load(Ordering::Relaxed);
         if let Ok(mut current) = state.lock() {
             current.connecting = false;
@@ -752,7 +943,18 @@ pub fn load_connection_settings(app: &AppHandle, store: &ConnectionStore) {
     };
     if let Ok(mut state) = store.state.lock() {
         state.auto_failover = settings.auto_failover;
+        state.tun_enabled = settings.tun_enabled;
     }
+}
+
+fn get_connection_tun_enabled(app: &AppHandle) -> bool {
+    let Ok(data_dir) = app.path().app_data_dir() else {
+        return false;
+    };
+    fs::read_to_string(data_dir.join("connection-settings.json"))
+        .ok()
+        .and_then(|content| serde_json::from_str::<ConnectionSettings>(&content).ok())
+        .is_some_and(|settings| settings.tun_enabled)
 }
 
 pub fn load_speed_test_settings(app: &AppHandle) {
@@ -776,10 +978,25 @@ pub fn get_speed_test_settings() -> SpeedTestSettings {
     current_speed_test_settings()
 }
 
+fn validate_speed_test_url(label: &str, url: &str) -> Result<(), String> {
+    let url = url.trim();
+    if url.is_empty()
+        || url.len() > 2048
+        || !(url.starts_with("https://") || url.starts_with("http://"))
+    {
+        return Err(format!("{label}必须是有效的 HTTP 或 HTTPS URL"));
+    }
+    Ok(())
+}
+
 fn validate_speed_test_settings(value: &SpeedTestSettings) -> Result<(), String> {
-    let url = value.url.trim();
-    if url.len() > 2048 || !(url.starts_with("https://") || url.starts_with("http://")) {
-        return Err("测速地址必须是有效的 HTTP 或 HTTPS URL".into());
+    validate_speed_test_url("延迟测试地址", &value.url)?;
+    validate_speed_test_url("下载测速地址", &value.download_url)?;
+    if value.fallback_urls.len() > 6 {
+        return Err("备用延迟地址最多允许 6 个".into());
+    }
+    for url in &value.fallback_urls {
+        validate_speed_test_url("备用延迟地址", url)?;
     }
     if !(2..=30).contains(&value.timeout_seconds) {
         return Err("测速超时必须在 2 到 30 秒之间".into());
@@ -795,6 +1012,16 @@ pub fn set_speed_test_settings(
     mut value: SpeedTestSettings,
 ) -> Result<SpeedTestSettings, String> {
     value.url = value.url.trim().to_string();
+    value.download_url = value.download_url.trim().to_string();
+    let primary_url = value.url.clone();
+    let mut fallback_urls = Vec::with_capacity(value.fallback_urls.len());
+    for url in value.fallback_urls {
+        let url = url.trim().to_string();
+        if url != primary_url && !fallback_urls.contains(&url) {
+            fallback_urls.push(url);
+        }
+    }
+    value.fallback_urls = fallback_urls;
     validate_speed_test_settings(&value)?;
     let data_dir = app
         .path()
@@ -810,14 +1037,83 @@ pub fn set_speed_test_settings(
     Ok(value)
 }
 
-fn persist_connection_settings(app: &AppHandle, enabled: bool) -> Result<(), String> {
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SpeedTestUrlResult {
+    pub url: String,
+    pub status: u16,
+    pub latency_ms: u32,
+}
+
+pub fn test_speed_test_url(
+    url: String,
+    timeout_seconds: u64,
+) -> Result<SpeedTestUrlResult, String> {
+    validate_speed_test_url("测速地址", &url)?;
+    if !(2..=30).contains(&timeout_seconds) {
+        return Err("测速超时必须在 2 到 30 秒之间".into());
+    }
+    let timeout = timeout_seconds.to_string();
+    let output = hidden_command("curl.exe")
+        .args([
+            "-sS",
+            "-o",
+            "NUL",
+            "-w",
+            "%{http_code}|%{time_total}",
+            "--connect-timeout",
+            &timeout,
+            "--max-time",
+            &timeout,
+            "--range",
+            "0-65535",
+            "--ssl-no-revoke",
+            url.trim(),
+        ])
+        .output()
+        .map_err(|error| format!("无法启动测速地址检测：{error}"))?;
+    if !output.status.success() {
+        let detail = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(if detail.is_empty() {
+            "测速地址请求失败或超时".into()
+        } else {
+            format!("测速地址请求失败：{detail}")
+        });
+    }
+    let result = String::from_utf8_lossy(&output.stdout);
+    let (status, seconds) = result
+        .trim()
+        .split_once('|')
+        .ok_or_else(|| "测速地址返回了无法识别的结果".to_string())?;
+    let status = status
+        .parse::<u16>()
+        .map_err(|_| "测速地址没有返回有效的 HTTP 状态".to_string())?;
+    if !(200..400).contains(&status) {
+        return Err(format!("测速地址返回 HTTP {status}"));
+    }
+    let seconds = seconds
+        .parse::<f32>()
+        .map_err(|_| "测速地址没有返回有效耗时".to_string())?;
+    Ok(SpeedTestUrlResult {
+        url: url.trim().to_string(),
+        status,
+        latency_ms: (seconds * 1000.0).round() as u32,
+    })
+}
+
+fn persist_connection_settings(
+    app: &AppHandle,
+    auto_failover: bool,
+    tun_enabled: bool,
+) -> Result<(), String> {
     let data_dir = app
         .path()
         .app_data_dir()
         .map_err(|error| error.to_string())?;
     fs::create_dir_all(&data_dir).map_err(|error| error.to_string())?;
     let content = serde_json::to_string_pretty(&ConnectionSettings {
-        auto_failover: enabled,
+        auto_failover,
+        tun_enabled,
     })
     .map_err(|error| error.to_string())?;
     fs::write(data_dir.join("connection-settings.json"), content).map_err(|error| error.to_string())
@@ -1067,6 +1363,9 @@ pub fn start_clash_connection(
         last_error: None,
         latency: None,
         country: None,
+        success_rate: None,
+        jitter: None,
+        quality: "待测试".into(),
     };
     *store
         .active_route
@@ -1195,6 +1494,9 @@ pub fn start_public_connection(
     runtime: &core_runtime::CoreRuntime,
     route_id: Option<String>,
 ) -> Result<(), String> {
+    if store.routing_apply_in_progress.load(Ordering::Acquire) {
+        return Err("正在切换线路或应用连接设置，请稍候".into());
+    }
     if store.route_update_running.load(Ordering::SeqCst) {
         return Err("请先等待线路更新完成或取消更新".into());
     }
@@ -1220,12 +1522,15 @@ pub fn start_public_connection(
             return Err("已有连接或测速任务正在执行".into());
         }
         if state.connected && state.mode != "auto" {
-            return Err("其他模式正在连接，请先断开后再启动全自动模式".into());
+            return Err("已有连接正在运行，请先断开后再重新连接".into());
         }
         state.connected && state.mode == "auto"
     };
     if switching {
         cancel_connection(&app, store, runtime)?;
+    }
+    if let Ok(mut port) = store.active_proxy_port.lock() {
+        *port = None;
     }
     {
         let mut state = store
@@ -1259,7 +1564,7 @@ pub fn start_public_connection(
     if switching {
         let _ = app.emit("connection-log", serde_json::json!({
             "level": "info",
-            "message": selected.as_ref().map(|route| format!("正在切换到 {}", route.name)).unwrap_or_else(|| "正在切换到自动选择线路".into())
+            "message": selected.as_ref().map(|route| format!("正在切换到 {}", route.name)).unwrap_or_else(|| "正在切换到推荐线路".into())
         }));
     }
     let state = store.state.clone();
@@ -1267,8 +1572,10 @@ pub fn start_public_connection(
     let proxy = store.proxy.clone();
     let route_metrics = store.route_metrics.clone();
     let active_route = store.active_route.clone();
+    let active_proxy_port = store.active_proxy_port.clone();
     let selected_route = store.selected_route.clone();
     let traffic_sample = store.traffic_sample.clone();
+    let routing_apply_in_progress = store.routing_apply_in_progress.clone();
     let runtime = runtime.clone();
     std::thread::spawn(move || {
         let result = connect_auto_or_selected(
@@ -1281,6 +1588,7 @@ pub fn start_public_connection(
             &cancel,
             &route_metrics,
             &active_route,
+            &active_proxy_port,
         );
         if result.is_ok() {
             let committed_selection = selected.as_ref().map(|route| route.id.clone());
@@ -1288,6 +1596,21 @@ pub fn start_public_connection(
                 *current = committed_selection.clone();
             }
             let _ = app.emit("public-route-selection", committed_selection);
+            let tun_enabled = state.lock().map(|value| value.tun_enabled).unwrap_or(false);
+            if selected.is_none() && !tun_enabled {
+                spawn_background_route_optimizer(
+                    app.clone(),
+                    state.clone(),
+                    runtime.clone(),
+                    proxy.clone(),
+                    routes.clone(),
+                    route_metrics.clone(),
+                    active_route.clone(),
+                    active_proxy_port.clone(),
+                    routing_apply_in_progress.clone(),
+                    cancel.clone(),
+                );
+            }
             monitor_connection(
                 &app,
                 &state,
@@ -1296,8 +1619,10 @@ pub fn start_public_connection(
                 &active_route,
                 &traffic_sample,
                 &cancel,
+                &routing_apply_in_progress,
                 &routes,
                 &route_metrics,
+                &active_proxy_port,
             );
         } else if let Err(error) = result {
             let _ = core_runtime::stop_all(&runtime);
@@ -1338,8 +1663,10 @@ pub fn start_public_connection(
                     &active_route,
                     &traffic_sample,
                     &cancel,
+                    &routing_apply_in_progress,
                     &routes,
                     &route_metrics,
+                    &active_proxy_port,
                 );
                 if let Ok(mut slot) = cancel_slot.lock() {
                     if slot
@@ -1353,6 +1680,9 @@ pub fn start_public_connection(
             }
             if let Ok(mut route) = active_route.lock() {
                 *route = None;
+            }
+            if let Ok(mut port) = active_proxy_port.lock() {
+                *port = None;
             }
             if let Ok(mut sample) = traffic_sample.lock() {
                 *sample = None;
@@ -1402,8 +1732,10 @@ fn monitor_connection(
     active_route: &Arc<Mutex<Option<PublicRoute>>>,
     traffic_sample: &Arc<Mutex<Option<TrafficSample>>>,
     cancel: &Arc<AtomicBool>,
+    routing_apply_in_progress: &Arc<AtomicBool>,
     routes: &[PublicRoute],
     route_metrics: &Arc<Mutex<HashMap<String, RouteMetric>>>,
+    active_proxy_port: &Arc<Mutex<Option<u16>>>,
 ) {
     let mut last_health_check = Instant::now();
     let mut health_failures = 0_u8;
@@ -1414,6 +1746,9 @@ fn monitor_connection(
         std::thread::sleep(Duration::from_secs(1));
         if cancel.load(Ordering::Relaxed) {
             return;
+        }
+        if routing_apply_in_progress.load(Ordering::Acquire) {
+            continue;
         }
         let core_id = state.lock().ok().and_then(|value| value.core_id.clone());
         let Some(core_id) = core_id else { return };
@@ -1429,7 +1764,12 @@ fn monitor_connection(
             last_health_check = Instant::now();
             let route = active_route.lock().ok().and_then(|value| value.clone());
             if let Some(route) = route {
-                match proxy_request_latency(&route) {
+                let port = active_proxy_port
+                    .lock()
+                    .ok()
+                    .and_then(|value| *value)
+                    .unwrap_or_else(|| proxy_port(&route));
+                match proxy_request_latency_on_port(&route, port) {
                     Ok(_) => health_failures = 0,
                     Err(_) => {
                         health_failures = health_failures.saturating_add(1);
@@ -1441,11 +1781,17 @@ fn monitor_connection(
         if !unhealthy {
             continue;
         }
+        let Ok(_recovery_guard) = RoutingApplyGuard::acquire(routing_apply_in_progress) else {
+            continue;
+        };
         let failed_route = active_route.lock().ok().and_then(|route| route.clone());
         let _ = core_runtime::stop_all(runtime);
         let _ = system_proxy::disable(proxy);
         if let Ok(mut route) = active_route.lock() {
             *route = None;
+        }
+        if let Ok(mut port) = active_proxy_port.lock() {
+            *port = None;
         }
         if let Ok(mut sample) = traffic_sample.lock() {
             *sample = None;
@@ -1488,10 +1834,12 @@ fn monitor_connection(
                     "message": if running { "当前公共线路链路不可用，开始自动切换" } else { "当前公共线路核心意外退出，开始自动切换" }
                 }),
             );
+            let tun_enabled = state.lock().map(|value| value.tun_enabled).unwrap_or(false);
             let candidates = ordered_candidates(
                 routes,
                 route_metrics,
                 failed_route.as_ref().map(|route| route.id.as_str()),
+                tun_enabled,
             );
             for route in &candidates {
                 if cancel.load(Ordering::Relaxed) {
@@ -1559,65 +1907,20 @@ fn auto_routing_settings_path(app: &AppHandle) -> Result<PathBuf, String> {
     Ok(data_dir.join("auto-routing-settings.json"))
 }
 
-fn normalize_rule_target(input: &str) -> Result<String, String> {
-    let mut value = input.trim().to_ascii_lowercase();
-    if value.is_empty() {
-        return Err("请输入要匹配的网站或 IP".into());
-    }
-    if let Some(rest) = value
-        .strip_prefix("http://")
-        .or_else(|| value.strip_prefix("https://"))
-    {
-        value = rest.into();
-    }
-    if let Some((host, _)) = value.split_once('/') {
-        value = host.into();
-    }
-    if let Some((host, _)) = value.split_once('?') {
-        value = host.into();
-    }
-    if value.starts_with("*.") {
-        value = value.trim_start_matches("*.").into();
-    }
-    value = value.trim_matches('.').into();
-    if value.is_empty()
-        || value.contains('*')
-        || value.contains(' ')
-        || value.contains('\\')
-        || value.contains('@')
-    {
-        return Err("规则格式无效，请输入 baidu.com、*.example.com 或 1.1.1.1".into());
-    }
-    Ok(value)
-}
-
 fn normalize_auto_routing_settings(
     settings: AutoRoutingSettings,
 ) -> Result<AutoRoutingSettings, String> {
     if !matches!(settings.mode.as_str(), "rule" | "global" | "direct") {
-        return Err("不支持的全自动代理模式".into());
-    }
-    let mut rules = Vec::new();
-    for (index, rule) in settings.rules.into_iter().enumerate() {
-        if !matches!(rule.action.as_str(), "direct" | "proxy" | "block") {
-            return Err("不支持的规则动作".into());
-        }
-        let target = normalize_rule_target(&rule.target)?;
-        let id = if rule.id.trim().is_empty() {
-            format!("rule-{}-{target}", index + 1)
-        } else {
-            rule.id.trim().to_string()
-        };
-        rules.push(AutoRoutingRule {
-            id,
-            target,
-            action: rule.action,
-            enabled: rule.enabled,
-        });
+        return Err("不支持的代理模式".into());
     }
     Ok(AutoRoutingSettings {
-        mode: settings.mode,
-        rules,
+        mode: if settings.mode == "global" {
+            "global"
+        } else {
+            "rule"
+        }
+        .into(),
+        rules: Vec::new(),
     })
 }
 
@@ -1631,21 +1934,267 @@ pub fn get_auto_routing_settings(app: &AppHandle) -> AutoRoutingSettings {
     let Ok(settings) = serde_json::from_str::<AutoRoutingSettings>(&content) else {
         return AutoRoutingSettings::default();
     };
-    normalize_auto_routing_settings(settings).unwrap_or_default()
+    let normalized = normalize_auto_routing_settings(settings.clone()).unwrap_or_default();
+    if normalized != settings {
+        let _ = persist_auto_routing_settings(app, &normalized);
+    }
+    normalized
 }
 
-pub fn set_auto_routing_settings(
+fn persist_auto_routing_settings(
     app: &AppHandle,
-    settings: AutoRoutingSettings,
-) -> Result<AutoRoutingSettings, String> {
-    let settings = normalize_auto_routing_settings(settings)?;
+    settings: &AutoRoutingSettings,
+) -> Result<(), String> {
     let path = auto_routing_settings_path(app)?;
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|error| format!("创建自动规则目录失败：{error}"))?;
     }
-    let content = serde_json::to_string_pretty(&settings).map_err(|error| error.to_string())?;
-    fs::write(path, content).map_err(|error| format!("保存自动规则失败：{error}"))?;
-    Ok(settings)
+    let content = serde_json::to_string_pretty(settings).map_err(|error| error.to_string())?;
+    fs::write(path, content).map_err(|error| format!("保存自动规则失败：{error}"))
+}
+
+fn bridge_routing_rules(settings: &AutoRoutingSettings) -> Vec<(String, String)> {
+    let _ = settings;
+    Vec::new()
+}
+
+fn update_bridge_routing(
+    proxy: &system_proxy::ProxyState,
+    settings: &AutoRoutingSettings,
+) -> Result<(), String> {
+    proxy.update_routing(&settings.mode, bridge_routing_rules(settings))
+}
+
+fn requires_core_routing_reload(route: &PublicRoute) -> bool {
+    matches!(route.core_id.as_str(), "mihomo" | "xray" | "sing-box")
+}
+
+struct RoutingApplyGuard {
+    flag: Arc<AtomicBool>,
+}
+
+impl RoutingApplyGuard {
+    fn acquire(flag: &Arc<AtomicBool>) -> Result<Self, String> {
+        flag.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .map_err(|_| "正在应用上一项分流设置，请稍候".to_string())?;
+        Ok(Self { flag: flag.clone() })
+    }
+}
+
+impl Drop for RoutingApplyGuard {
+    fn drop(&mut self) {
+        self.flag.store(false, Ordering::Release);
+    }
+}
+
+pub fn set_auto_routing_settings(
+    app: &AppHandle,
+    store: &ConnectionStore,
+    runtime: &core_runtime::CoreRuntime,
+    settings: AutoRoutingSettings,
+) -> Result<AutoRoutingApplyResult, String> {
+    let settings = normalize_auto_routing_settings(settings)?;
+    let previous = get_auto_routing_settings(app);
+    let current = snapshot(store);
+    if current.mode == "auto" && current.connecting {
+        return Err("正在连接或测速，请完成后再修改分流设置".into());
+    }
+    let active_route = if current.mode == "auto" && current.connected {
+        Some(
+            store
+                .active_route
+                .lock()
+                .map_err(|_| "活动线路状态不可用")?
+                .clone()
+                .ok_or_else(|| "当前连接缺少活动线路，无法应用分流设置".to_string())?,
+        )
+    } else {
+        None
+    };
+    let requires_reload = active_route
+        .as_ref()
+        .is_some_and(requires_core_routing_reload);
+    let _apply_guard = if active_route.is_some() {
+        Some(RoutingApplyGuard::acquire(
+            &store.routing_apply_in_progress,
+        )?)
+    } else {
+        None
+    };
+
+    if settings == previous {
+        return Ok(AutoRoutingApplyResult {
+            settings,
+            applied: active_route.is_some(),
+            restarted: false,
+            message: if active_route.is_some() {
+                "分流设置未变化，当前连接已在使用".into()
+            } else {
+                "分流设置未变化".into()
+            },
+        });
+    }
+
+    let reload_cancel = if requires_reload {
+        Some(
+            store
+                .cancel
+                .lock()
+                .map_err(|_| "连接控制状态不可用")?
+                .as_ref()
+                .cloned()
+                .ok_or_else(|| "当前连接监控状态不可用，无法自动重载".to_string())?,
+        )
+    } else {
+        None
+    };
+
+    persist_auto_routing_settings(app, &settings)?;
+    if let Some(route) = active_route.as_ref() {
+        if route.core_id != "mihomo" {
+            if let Err(error) = update_bridge_routing(&store.proxy, &settings) {
+                let rollback = persist_auto_routing_settings(app, &previous);
+                return Err(match rollback {
+                    Ok(()) => format!("应用分流设置失败：{error}；已恢复原设置"),
+                    Err(rollback_error) => {
+                        format!("应用分流设置失败：{error}；恢复原设置失败：{rollback_error}")
+                    }
+                });
+            }
+        }
+    }
+
+    let Some(route) = active_route else {
+        let mode_name = match settings.mode.as_str() {
+            "global" => "全局",
+            "direct" => "直连",
+            _ => "规则",
+        };
+        return Ok(AutoRoutingApplyResult {
+            settings,
+            applied: false,
+            restarted: false,
+            message: format!("已切换为{mode_name}模式"),
+        });
+    };
+
+    if !requires_reload {
+        let _ = app.emit(
+            "connection-log",
+            serde_json::json!({
+                "level": "success",
+                "message": "分流规则已即时应用到当前线路，无需重启"
+            }),
+        );
+        return Ok(AutoRoutingApplyResult {
+            settings,
+            applied: true,
+            restarted: false,
+            message: "已即时生效，无需重启".into(),
+        });
+    }
+
+    let cancel = reload_cancel.expect("reload cancellation state exists");
+    set_stage(
+        app,
+        &store.state,
+        "applying-routing",
+        Some(format!("正在应用分流 · {}", route.name)),
+    );
+    let _ = app.emit(
+        "connection-log",
+        serde_json::json!({
+            "level": "info",
+            "message": format!("正在自动重载 {} 以应用分流设置", route.name)
+        }),
+    );
+    match connect_route(
+        app,
+        &store.state,
+        runtime,
+        &store.proxy,
+        &route,
+        &cancel,
+        false,
+        &store.active_route,
+    ) {
+        Ok(()) => {
+            if let Ok(mut port) = store.active_proxy_port.lock() {
+                *port = Some(proxy_port(&route));
+            }
+            let _ = app.emit(
+                "connection-log",
+                serde_json::json!({
+                    "level": "success",
+                    "message": "分流设置已生效，核心重载完成"
+                }),
+            );
+            Ok(AutoRoutingApplyResult {
+                settings,
+                applied: true,
+                restarted: true,
+                message: "已生效，KiNGO 已自动完成核心重载".into(),
+            })
+        }
+        Err(apply_error) => {
+            let settings_rollback = persist_auto_routing_settings(app, &previous);
+            if route.core_id != "mihomo" {
+                let _ = update_bridge_routing(&store.proxy, &previous);
+            }
+            let rollback = if settings_rollback.is_ok() {
+                connect_route(
+                    app,
+                    &store.state,
+                    runtime,
+                    &store.proxy,
+                    &route,
+                    &cancel,
+                    false,
+                    &store.active_route,
+                )
+            } else {
+                Err(settings_rollback
+                    .err()
+                    .unwrap_or_else(|| "恢复原分流设置失败".into()))
+            };
+            match rollback {
+                Ok(()) => {
+                    if let Ok(mut port) = store.active_proxy_port.lock() {
+                        *port = Some(proxy_port(&route));
+                    }
+                    if let Ok(mut state) = store.state.lock() {
+                        state.error =
+                            Some(format!("新分流设置应用失败，已恢复原连接：{apply_error}"));
+                    }
+                    emit_snapshot(app, store);
+                    Err(format!("应用失败，已自动恢复原连接：{apply_error}"))
+                }
+                Err(rollback_error) => {
+                    let _ = core_runtime::stop_all(runtime);
+                    let _ = system_proxy::disable(&store.proxy);
+                    if let Ok(mut port) = store.active_proxy_port.lock() {
+                        *port = None;
+                    }
+                    if let Ok(mut active) = store.active_route.lock() {
+                        *active = None;
+                    }
+                    if let Ok(mut state) = store.state.lock() {
+                        state.connected = false;
+                        state.connecting = false;
+                        state.stage = "failed".into();
+                        state.core_id = None;
+                        state.error = Some(format!(
+                            "应用分流设置失败：{apply_error}；恢复原连接失败：{rollback_error}"
+                        ));
+                    }
+                    emit_snapshot(app, store);
+                    Err(format!(
+                        "应用失败且恢复原连接失败：{apply_error}；{rollback_error}"
+                    ))
+                }
+            }
+        }
+    }
 }
 
 pub fn set_auto_failover(
@@ -1653,7 +2202,12 @@ pub fn set_auto_failover(
     store: &ConnectionStore,
     enabled: bool,
 ) -> Result<(), String> {
-    persist_connection_settings(app, enabled)?;
+    let tun_enabled = store
+        .state
+        .lock()
+        .map_err(|_| "connection state unavailable")?
+        .tun_enabled;
+    persist_connection_settings(app, enabled, tun_enabled)?;
     store
         .state
         .lock()
@@ -1667,6 +2221,508 @@ pub fn set_auto_failover(
     Ok(())
 }
 
+pub fn set_auto_tun(
+    app: AppHandle,
+    store: &ConnectionStore,
+    runtime: &core_runtime::CoreRuntime,
+    enabled: bool,
+) -> Result<AppConnectionState, String> {
+    if enabled && !crate::process_utils::is_elevated() {
+        return Err("开启 TUN 模式需要管理员权限，请以管理员身份重新启动 KiNGO".into());
+    }
+    let (auto_failover, connecting, connected) = {
+        let state = store
+            .state
+            .lock()
+            .map_err(|_| "connection state unavailable")?;
+        (state.auto_failover, state.connecting, state.connected)
+    };
+    if connecting {
+        return Err("正在连接或切换线路，请完成后再切换 TUN 模式".into());
+    }
+    persist_connection_settings(&app, auto_failover, enabled)?;
+    if let Ok(mut state) = store.state.lock() {
+        state.tun_enabled = enabled;
+    }
+    emit_snapshot(&app, store);
+    if connected {
+        let route_id = if enabled {
+            None
+        } else {
+            store
+                .active_route
+                .lock()
+                .ok()
+                .and_then(|route| route.as_ref().map(|route| route.id.clone()))
+        };
+        start_public_connection(app, store, runtime, route_id)?;
+    }
+    Ok(snapshot(store))
+}
+
+fn tun_route_supported(route: &PublicRoute) -> bool {
+    matches!(route.core_id.as_str(), "mihomo" | "sing-box")
+}
+
+fn supports_dynamic_probe(route: &PublicRoute) -> bool {
+    matches!(
+        route.core_id.as_str(),
+        "xray" | "sing-box" | "hysteria" | "hysteria2" | "naiveproxy" | "juicity"
+    )
+}
+
+struct PreparedCandidate {
+    route: PublicRoute,
+    runtime: core_runtime::CoreRuntime,
+    port: u16,
+    latency: u32,
+    country: Option<String>,
+    exit: Option<ExitInfo>,
+}
+
+enum QuickProbeResult {
+    Ready(Box<PreparedCandidate>),
+    Failed(String, String),
+}
+
+fn prepare_candidate(
+    app: &AppHandle,
+    route: &PublicRoute,
+    port: u16,
+    cancel: &Arc<AtomicBool>,
+    precise: bool,
+) -> Result<PreparedCandidate, String> {
+    if cancel.load(Ordering::Relaxed) {
+        return Err("connection cancelled".into());
+    }
+    prepare_route(app, route)?;
+    let runtime = core_runtime::CoreRuntime::default();
+    let original_config = runtime_config(app, route)?;
+    let (config, temporary) = probe_config_for_port(route, &original_config, port)?;
+    if let Err(error) = core_runtime::start(app, &runtime, route.core_id.clone(), config.clone()) {
+        if temporary {
+            let _ = fs::remove_file(&config);
+        }
+        let _ = core_runtime::stop_all(&runtime);
+        return Err(error);
+    }
+    if temporary {
+        if let Err(error) =
+            core_runtime::register_temporary_config(&runtime, &route.core_id, &config)
+        {
+            let _ = core_runtime::stop_all(&runtime);
+            let _ = fs::remove_file(&config);
+            return Err(error);
+        }
+    }
+    let result = (|| {
+        if !wait_for_port(port, Duration::from_secs(6)) {
+            return Err("核心未能及时启动临时代理端口".to_string());
+        }
+        if cancel.load(Ordering::Relaxed) {
+            return Err("connection cancelled".into());
+        }
+        let latency = if precise {
+            probe_latency_median(route, port, cancel)?
+        } else {
+            proxy_request_latency_on_port(route, port)?
+        };
+        let exit = precise
+            .then(|| query_exit_info_on_port(route, port).ok())
+            .flatten();
+        let country = exit.as_ref().map(|value| value.country.clone());
+        Ok(PreparedCandidate {
+            route: route.clone(),
+            runtime: runtime.clone(),
+            port,
+            latency,
+            country,
+            exit,
+        })
+    })();
+    if result.is_err() {
+        let _ = core_runtime::stop_all(&runtime);
+    }
+    result
+}
+
+fn stop_prepared_candidate(candidate: &PreparedCandidate) {
+    let _ = core_runtime::stop_all(&candidate.runtime);
+}
+
+fn quick_select_candidate(
+    app: &AppHandle,
+    candidates: &[PublicRoute],
+    cancel: &Arc<AtomicBool>,
+    metrics: &Arc<Mutex<HashMap<String, RouteMetric>>>,
+) -> Option<PreparedCandidate> {
+    let candidates: Vec<_> = candidates
+        .iter()
+        .filter(|route| supports_dynamic_probe(route))
+        .take(6)
+        .cloned()
+        .collect();
+    if candidates.is_empty() {
+        return None;
+    }
+    let (sender, receiver) = mpsc::channel();
+    for (index, route) in candidates.iter().cloned().enumerate() {
+        let app = app.clone();
+        let sender = sender.clone();
+        let cancel = cancel.clone();
+        std::thread::spawn(move || {
+            let route_id = route.id.clone();
+            let result = match prepare_candidate(&app, &route, 12080 + index as u16, &cancel, false)
+            {
+                Ok(candidate) => QuickProbeResult::Ready(Box::new(candidate)),
+                Err(error) => QuickProbeResult::Failed(route_id, error),
+            };
+            if let Err(error) = sender.send(result) {
+                if let QuickProbeResult::Ready(candidate) = error.0 {
+                    stop_prepared_candidate(&candidate);
+                }
+            }
+        });
+    }
+    drop(sender);
+
+    let deadline = Instant::now() + Duration::from_secs(8);
+    let mut grace_deadline = None;
+    let mut best: Option<PreparedCandidate> = None;
+    while !cancel.load(Ordering::Relaxed) {
+        let now = Instant::now();
+        let end = grace_deadline.unwrap_or(deadline).min(deadline);
+        if now >= end {
+            break;
+        }
+        match receiver.recv_timeout((end - now).min(Duration::from_millis(100))) {
+            Ok(QuickProbeResult::Ready(candidate)) => {
+                let candidate = *candidate;
+                record_metric(metrics, &candidate.route.id, Some(candidate.latency), None);
+                record_route_country(metrics, &candidate.route.id, candidate.country.clone());
+                if best
+                    .as_ref()
+                    .is_none_or(|current| candidate.latency < current.latency)
+                {
+                    if let Some(previous) = best.replace(candidate) {
+                        stop_prepared_candidate(&previous);
+                    }
+                } else {
+                    stop_prepared_candidate(&candidate);
+                }
+                grace_deadline.get_or_insert_with(|| Instant::now() + Duration::from_millis(650));
+            }
+            Ok(QuickProbeResult::Failed(route_id, error)) => {
+                record_metric(metrics, &route_id, None, Some(error));
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => continue,
+            Err(mpsc::RecvTimeoutError::Disconnected) => break,
+        }
+    }
+    if cancel.load(Ordering::Relaxed) {
+        if let Some(candidate) = best.as_ref() {
+            stop_prepared_candidate(candidate);
+        }
+        return None;
+    }
+    best
+}
+
+#[allow(clippy::too_many_arguments)]
+fn activate_prepared_candidate(
+    app: &AppHandle,
+    state: &Arc<Mutex<AppConnectionState>>,
+    runtime: &core_runtime::CoreRuntime,
+    proxy: &system_proxy::ProxyState,
+    candidate: PreparedCandidate,
+    active_route: &Arc<Mutex<Option<PublicRoute>>>,
+    active_proxy_port: &Arc<Mutex<Option<u16>>>,
+) -> Result<(), String> {
+    core_runtime::stop_all(runtime)?;
+    core_runtime::adopt(runtime, &candidate.runtime, &candidate.route.core_id)?;
+    if let Err(error) = proxy.set_country_rules(geo_rules::load_cn_rules(app)?) {
+        let _ = core_runtime::stop(runtime, &candidate.route.core_id);
+        return Err(error);
+    }
+    let routing = get_auto_routing_settings(app);
+    if let Err(error) = system_proxy::enable_with_routing(
+        proxy,
+        candidate.port,
+        true,
+        false,
+        &routing.mode,
+        bridge_routing_rules(&routing),
+    ) {
+        let _ = core_runtime::stop(runtime, &candidate.route.core_id);
+        return Err(error);
+    }
+    if let Ok(mut route) = active_route.lock() {
+        *route = Some(candidate.route.clone());
+    }
+    if let Ok(mut port) = active_proxy_port.lock() {
+        *port = Some(candidate.port);
+    }
+    let route_for_exit = candidate.route.clone();
+    let exit_port = candidate.port;
+    let mut display_name = candidate.route.name.clone();
+    if let Some(exit) = candidate.exit {
+        display_name = exit
+            .country
+            .split(" · ")
+            .next()
+            .unwrap_or(&exit.country)
+            .to_string();
+        if let Ok(mut current) = state.lock() {
+            current.exit_ip = Some(exit.ip);
+            current.country = Some(exit.country);
+        }
+    }
+    if let Ok(mut current) = state.lock() {
+        current.connecting = false;
+        current.connected = true;
+        current.stage = "connected".into();
+        current.core_id = Some(candidate.route.core_id);
+        current.display_name = Some(display_name);
+        current.latency = Some(candidate.latency);
+        current.system_proxy_enabled = true;
+        current.error = None;
+    }
+    let _ = app.emit(
+        "connection-state",
+        state.lock().ok().map(|value| value.clone()),
+    );
+    let app = app.clone();
+    let state = state.clone();
+    let active_route = active_route.clone();
+    std::thread::spawn(move || {
+        let Ok(exit) = query_exit_info_on_port(&route_for_exit, exit_port) else {
+            return;
+        };
+        let still_active = active_route
+            .lock()
+            .ok()
+            .and_then(|value| value.as_ref().map(|route| route.id == route_for_exit.id))
+            .unwrap_or(false);
+        if !still_active {
+            return;
+        }
+        if let Ok(mut current) = state.lock() {
+            current.exit_ip = Some(exit.ip);
+            current.country = Some(exit.country.clone());
+            current.display_name = Some(
+                exit.country
+                    .split(" · ")
+                    .next()
+                    .unwrap_or(&exit.country)
+                    .to_string(),
+            );
+        }
+        let _ = app.emit(
+            "connection-state",
+            state.lock().ok().map(|value| value.clone()),
+        );
+    });
+    Ok(())
+}
+
+fn is_clear_latency_upgrade(current: u32, candidate: u32) -> bool {
+    let required_gain = (current / 5).max(80);
+    candidate.saturating_add(required_gain) < current
+}
+
+fn wait_for_low_traffic(state: &Arc<Mutex<AppConnectionState>>, cancel: &Arc<AtomicBool>) -> bool {
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let mut quiet_samples = 0_u8;
+    while Instant::now() < deadline && !cancel.load(Ordering::Relaxed) {
+        let quiet = state
+            .lock()
+            .map(|value| value.download_bps.saturating_add(value.upload_bps) < 64 * 1024)
+            .unwrap_or(false);
+        quiet_samples = if quiet {
+            quiet_samples.saturating_add(1)
+        } else {
+            0
+        };
+        if quiet_samples >= 3 {
+            return true;
+        }
+        std::thread::sleep(Duration::from_secs(1));
+    }
+    false
+}
+
+#[allow(clippy::too_many_arguments)]
+fn switch_to_prepared_candidate(
+    app: &AppHandle,
+    state: &Arc<Mutex<AppConnectionState>>,
+    runtime: &core_runtime::CoreRuntime,
+    proxy: &system_proxy::ProxyState,
+    active_route: &Arc<Mutex<Option<PublicRoute>>>,
+    active_proxy_port: &Arc<Mutex<Option<u16>>>,
+    routing_apply_in_progress: &Arc<AtomicBool>,
+    expected_route_id: &str,
+    candidate: PreparedCandidate,
+) -> Result<(), String> {
+    let _guard = RoutingApplyGuard::acquire(routing_apply_in_progress)?;
+    let previous = active_route
+        .lock()
+        .map_err(|_| "active route state unavailable".to_string())?
+        .clone()
+        .ok_or_else(|| "active route is no longer available".to_string())?;
+    if previous.id != expected_route_id {
+        return Err("active route changed while background probing".into());
+    }
+    let connected = state
+        .lock()
+        .map(|value| value.connected && !value.tun_enabled)
+        .unwrap_or(false);
+    if !connected {
+        return Err("connection is no longer eligible for background switching".into());
+    }
+
+    let same_core = previous.core_id == candidate.route.core_id;
+    if !same_core {
+        core_runtime::adopt(runtime, &candidate.runtime, &candidate.route.core_id)?;
+    }
+    let routing = get_auto_routing_settings(app);
+    let proxy_result = if previous.core_id == "mihomo" {
+        system_proxy::enable_with_routing(
+            proxy,
+            candidate.port,
+            true,
+            false,
+            &routing.mode,
+            bridge_routing_rules(&routing),
+        )
+    } else {
+        proxy.switch_socks_upstream(candidate.port)
+    };
+    if let Err(error) = proxy_result {
+        if !same_core {
+            let _ = core_runtime::stop(runtime, &candidate.route.core_id);
+        }
+        return Err(error);
+    }
+
+    // New connections already use the verified candidate. Give the old core a
+    // short drain window before stopping it so low-traffic switches rarely
+    // interrupt an in-flight request.
+    std::thread::sleep(Duration::from_millis(1500));
+    core_runtime::stop(runtime, &previous.core_id)?;
+    if same_core {
+        core_runtime::adopt(runtime, &candidate.runtime, &candidate.route.core_id)?;
+    }
+    if let Ok(mut route) = active_route.lock() {
+        *route = Some(candidate.route.clone());
+    }
+    if let Ok(mut port) = active_proxy_port.lock() {
+        *port = Some(candidate.port);
+    }
+    let mut display_name = candidate.route.name.clone();
+    if let Some(exit) = candidate.exit {
+        display_name = exit
+            .country
+            .split(" · ")
+            .next()
+            .unwrap_or(&exit.country)
+            .to_string();
+        if let Ok(mut current) = state.lock() {
+            current.exit_ip = Some(exit.ip);
+            current.country = Some(exit.country);
+        }
+    }
+    if let Ok(mut current) = state.lock() {
+        current.core_id = Some(candidate.route.core_id.clone());
+        current.display_name = Some(display_name);
+        current.latency = Some(candidate.latency);
+        current.error = None;
+    }
+    let _ = app.emit(
+        "connection-state",
+        state.lock().ok().map(|value| value.clone()),
+    );
+    let _ = app.emit(
+        "connection-log",
+        serde_json::json!({
+            "level": "success",
+            "message": format!(
+                "后台精测发现明显更优线路，已从 {} 平滑切换到 {}（{} ms）",
+                previous.name, candidate.route.name, candidate.latency
+            )
+        }),
+    );
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn spawn_background_route_optimizer(
+    app: AppHandle,
+    state: Arc<Mutex<AppConnectionState>>,
+    runtime: core_runtime::CoreRuntime,
+    proxy: system_proxy::ProxyState,
+    routes: Vec<PublicRoute>,
+    metrics: Arc<Mutex<HashMap<String, RouteMetric>>>,
+    active_route: Arc<Mutex<Option<PublicRoute>>>,
+    active_proxy_port: Arc<Mutex<Option<u16>>>,
+    routing_apply_in_progress: Arc<AtomicBool>,
+    cancel: Arc<AtomicBool>,
+) {
+    std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_secs(2));
+        let candidates = ordered_candidates(&routes, &metrics, None, false);
+        for (index, route) in candidates.into_iter().enumerate() {
+            if cancel.load(Ordering::Relaxed) {
+                return;
+            }
+            let current = active_route.lock().ok().and_then(|value| value.clone());
+            let Some(current) = current else { return };
+            if route.id == current.id || !supports_dynamic_probe(&route) {
+                continue;
+            }
+            let prepared = prepare_candidate(&app, &route, 14080 + index as u16, &cancel, true);
+            let candidate = match prepared {
+                Ok(candidate) => {
+                    record_metric(&metrics, &route.id, Some(candidate.latency), None);
+                    record_route_country(&metrics, &route.id, candidate.country.clone());
+                    candidate
+                }
+                Err(error) => {
+                    if !cancel.load(Ordering::Relaxed) {
+                        record_metric(&metrics, &route.id, None, Some(error));
+                    }
+                    continue;
+                }
+            };
+            let current_latency = state.lock().ok().and_then(|value| value.latency);
+            let should_switch = current_latency
+                .is_some_and(|latency| is_clear_latency_upgrade(latency, candidate.latency));
+            if should_switch && wait_for_low_traffic(&state, &cancel) {
+                let candidate_runtime = candidate.runtime.clone();
+                if switch_to_prepared_candidate(
+                    &app,
+                    &state,
+                    &runtime,
+                    &proxy,
+                    &active_route,
+                    &active_proxy_port,
+                    &routing_apply_in_progress,
+                    &current.id,
+                    candidate,
+                )
+                .is_ok()
+                {
+                    std::thread::sleep(Duration::from_secs(3));
+                    continue;
+                }
+                let _ = core_runtime::stop_all(&candidate_runtime);
+            } else {
+                stop_prepared_candidate(&candidate);
+            }
+            std::thread::sleep(Duration::from_millis(750));
+        }
+    });
+}
+
 #[allow(clippy::too_many_arguments)]
 fn connect_auto_or_selected(
     app: &AppHandle,
@@ -1678,8 +2734,13 @@ fn connect_auto_or_selected(
     cancel: &Arc<AtomicBool>,
     route_metrics: &Arc<Mutex<HashMap<String, RouteMetric>>>,
     active_route: &Arc<Mutex<Option<PublicRoute>>>,
+    active_proxy_port: &Arc<Mutex<Option<u16>>>,
 ) -> Result<(), String> {
+    let tun_enabled = state.lock().map(|value| value.tun_enabled).unwrap_or(false);
     if let Some(route) = selected {
+        if tun_enabled && !tun_route_supported(route) {
+            return Err("当前线路核心不支持原生 TUN，请选择 Mihomo 或 sing-box 线路".into());
+        }
         return connect_route(
             app,
             state,
@@ -1692,7 +2753,36 @@ fn connect_auto_or_selected(
         );
     }
 
-    let candidates = ordered_candidates(routes, route_metrics, None);
+    let candidates = ordered_candidates(routes, route_metrics, None, tun_enabled);
+    let has_recent_success = route_metrics
+        .lock()
+        .map(|metrics| {
+            let now = current_unix_seconds();
+            candidates.iter().any(|route| {
+                metrics.get(&route.id).is_some_and(|metric| {
+                    metric.error.is_none()
+                        && metric
+                            .last_success_at
+                            .is_some_and(|at| now.saturating_sub(at) <= 30 * 60)
+                })
+            })
+        })
+        .unwrap_or(false);
+    if !tun_enabled && !has_recent_success {
+        set_stage(app, state, "probing", Some("正在快速筛选可用线路".into()));
+        if let Some(candidate) = quick_select_candidate(app, &candidates, cancel, route_metrics) {
+            activate_prepared_candidate(
+                app,
+                state,
+                runtime,
+                proxy,
+                candidate,
+                active_route,
+                active_proxy_port,
+            )?;
+            return Ok(());
+        }
+    }
     let total = candidates.len();
     let mut failures = Vec::new();
     for (index, route) in candidates.iter().enumerate() {
@@ -1740,6 +2830,7 @@ fn ordered_candidates(
     routes: &[PublicRoute],
     route_metrics: &Arc<Mutex<HashMap<String, RouteMetric>>>,
     excluded_id: Option<&str>,
+    tun_enabled: bool,
 ) -> Vec<PublicRoute> {
     let metrics = route_metrics
         .lock()
@@ -1748,15 +2839,15 @@ fn ordered_candidates(
     let mut candidates: Vec<_> = routes
         .iter()
         .filter(|route| excluded_id != Some(route.id.as_str()))
+        .filter(|route| !tun_enabled || tun_route_supported(route))
         .cloned()
         .collect();
     candidates.sort_by_key(|route| {
         let metric = metrics.get(&route.id);
         (
-            metric.and_then(|value| value.error.as_ref()).is_some(),
-            metric.and_then(|value| value.latency).is_none(),
-            metric.and_then(|value| value.latency).unwrap_or(u32::MAX),
+            metric_candidate_score(metric),
             std::cmp::Reverse(metric.and_then(|value| value.last_success_at).unwrap_or(0)),
+            route.slot,
         )
     });
     candidates
@@ -1771,17 +2862,24 @@ fn record_metric(
     if let Ok(mut values) = metrics.lock() {
         let metric = values.entry(route_id.to_string()).or_default();
         if let Some(value) = latency {
-            metric.latency = Some(value);
+            metric.latency_samples.push(value);
+            if metric.latency_samples.len() > 10 {
+                metric.latency_samples.remove(0);
+            }
+            metric.latency = metric_median(&metric.latency_samples);
             metric.error = None;
-            metric.last_success_at = Some(
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|value| value.as_secs())
-                    .unwrap_or_default(),
-            );
+            metric.last_success_at = Some(current_unix_seconds());
+            metric.consecutive_failures = 0;
+            metric.recent_results.push(true);
         } else {
             metric.error = error;
             metric.latency = None;
+            metric.consecutive_failures = metric.consecutive_failures.saturating_add(1);
+            metric.last_failure_at = Some(current_unix_seconds());
+            metric.recent_results.push(false);
+        }
+        if metric.recent_results.len() > 10 {
+            metric.recent_results.remove(0);
         }
     }
     persist_route_metrics(metrics);
@@ -1854,6 +2952,7 @@ fn probe_route(
     route: &PublicRoute,
     test_port: u16,
     cancel: &Arc<AtomicBool>,
+    test_url: &str,
 ) -> Result<(u32, Option<String>), String> {
     prepare_route(app, route)?;
     core_runtime::stop_all(runtime)?;
@@ -1867,7 +2966,7 @@ fn probe_route(
         if cancel.load(Ordering::Relaxed) {
             return Err("connection cancelled".into());
         }
-        let latency = proxy_request_latency_on_port(route, test_port)?;
+        let latency = probe_latency_median_at_url(route, test_port, cancel, test_url)?;
         let country = query_exit_info_on_port(route, test_port)
             .ok()
             .map(|value| value.country);
@@ -1882,6 +2981,41 @@ fn probe_route(
         (Ok(_), Err(error)) => Err(error),
         (Ok(latency), Ok(())) => Ok(latency),
     }
+}
+
+fn probe_latency_median(
+    route: &PublicRoute,
+    port: u16,
+    cancel: &Arc<AtomicBool>,
+) -> Result<u32, String> {
+    let settings = current_speed_test_settings();
+    probe_latency_median_at_url(route, port, cancel, &settings.url)
+}
+
+fn probe_latency_median_at_url(
+    route: &PublicRoute,
+    port: u16,
+    cancel: &Arc<AtomicBool>,
+    test_url: &str,
+) -> Result<u32, String> {
+    let mut samples = Vec::with_capacity(3);
+    let mut last_error = None;
+    for _ in 0..3 {
+        if cancel.load(Ordering::Relaxed) {
+            return Err("connection cancelled".into());
+        }
+        match proxy_request_latency_on_port_with_url(route, port, test_url) {
+            Ok(latency) => samples.push(latency),
+            Err(error) => last_error = Some(error),
+        }
+        if samples.len() < 3 {
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    }
+    if samples.len() < 2 {
+        return Err(last_error.unwrap_or_else(|| "线路连续探测失败".into()));
+    }
+    metric_median(&samples).ok_or_else(|| "线路探测没有有效延迟".into())
 }
 
 fn probe_config_for_port(
@@ -1944,7 +3078,19 @@ fn connect_route(
     if !already_prepared {
         prepare_route(app, route)?;
     }
+    let tun_enabled = state.lock().map(|value| value.tun_enabled).unwrap_or(false);
+    if tun_enabled {
+        if !crate::process_utils::is_elevated() {
+            return Err("TUN 模式需要管理员权限，请以管理员身份重新启动 KiNGO".into());
+        }
+        if !tun_route_supported(route) {
+            return Err("当前线路核心不支持原生 TUN，请选择 Mihomo 或 sing-box 线路".into());
+        }
+    }
     let config = runtime_config(app, route)?;
+    if route.core_id == "mihomo" {
+        core_runtime::validate_mihomo_config(app, &config)?;
+    }
     if let Ok(mut current) = state.lock() {
         current.stage = "connecting".into();
         current.display_name = Some(route.name.clone());
@@ -1970,7 +3116,35 @@ fn connect_route(
         return Err("connection cancelled".into());
     }
     let verified_latency = proxy_request_latency(route)?;
-    system_proxy::enable(proxy, port, route.core_id != "mihomo", true)?;
+    proxy.set_country_rules(geo_rules::load_cn_rules(app)?)?;
+    let routing = get_auto_routing_settings(app);
+    if tun_enabled {
+        system_proxy::disable(proxy)?;
+    } else if route.core_id == "mihomo" {
+        system_proxy::enable(proxy, port, false, false)?;
+    } else {
+        system_proxy::enable_with_routing(
+            proxy,
+            port,
+            true,
+            false,
+            &routing.mode,
+            bridge_routing_rules(&routing),
+        )?;
+    }
+    let _ = app.emit(
+        "connection-log",
+        serde_json::json!({
+            "level": "success",
+            "message": if tun_enabled {
+                "TUN 模式已生效：虚拟网卡与 DNS 劫持已启用"
+            } else if routing.mode == "global" {
+                "全局模式已生效：局域网直连，其他公网流量走代理"
+            } else {
+                "规则模式已生效：局域网和中国域名/IP 直连，其他流量走代理"
+            }
+        }),
+    );
     let mut display_name = route.name.clone();
     if let Ok(exit) = query_exit_info(route) {
         let country_name = exit.country.split(" · ").next().unwrap_or(&exit.country);
@@ -1987,6 +3161,8 @@ fn connect_route(
         current.core_id = Some(started.core_id);
         current.display_name = Some(display_name);
         current.latency = Some(verified_latency);
+        current.tun_enabled = tun_enabled;
+        current.system_proxy_enabled = !tun_enabled;
         current.error = None;
     }
     let _ = app.emit(
@@ -2086,6 +3262,15 @@ fn proxy_request_latency(route: &PublicRoute) -> Result<u32, String> {
 
 fn proxy_request_latency_on_port(route: &PublicRoute, port: u16) -> Result<u32, String> {
     let settings = current_speed_test_settings();
+    proxy_request_latency_on_port_with_url(route, port, &settings.url)
+}
+
+fn proxy_request_latency_on_port_with_url(
+    route: &PublicRoute,
+    port: u16,
+    test_url: &str,
+) -> Result<u32, String> {
+    let settings = current_speed_test_settings();
     let connect_timeout = settings.timeout_seconds.min(5).to_string();
     let max_time = settings.timeout_seconds.to_string();
     let proxy = if route.core_id == "mihomo" {
@@ -2107,7 +3292,7 @@ fn proxy_request_latency_on_port(route: &PublicRoute, port: u16) -> Result<u32, 
             "--ssl-no-revoke",
             "--proxy",
             &proxy,
-            &settings.url,
+            test_url,
         ])
         .output()
         .map_err(|error| format!("无法启动线路探测：{error}"))?;
@@ -2229,8 +3414,16 @@ fn ensure_mihomo_controller(config: &std::path::Path) -> Result<(), String> {
     let mut normalized = Vec::new();
     let mut mixed_port_added = false;
     let mut controller_added = false;
+    let mut secret_added = false;
     for line in &lines[start..] {
         let trimmed = line.trim_start();
+        if trimmed.starts_with("secret:") {
+            if !secret_added {
+                normalized.push("secret: KiNGO".to_string());
+                secret_added = true;
+            }
+            continue;
+        }
         if trimmed.starts_with("mixed-port:") {
             if !mixed_port_added {
                 normalized.push("mixed-port: 7890".to_string());
@@ -2252,6 +3445,9 @@ fn ensure_mihomo_controller(config: &std::path::Path) -> Result<(), String> {
     }
     if !controller_added {
         normalized.push("external-controller: 127.0.0.1:9090".to_string());
+    }
+    if !secret_added {
+        normalized.push("secret: KiNGO".to_string());
     }
     fs::write(config, format!("{}\n", normalized.join("\n")))
         .map_err(|error| format!("mihomo 控制接口配置失败：{error}"))?;
@@ -2277,25 +3473,10 @@ fn cached_config(app: &AppHandle, route: &PublicRoute) -> Result<String, String>
     }
 }
 
-fn rule_outbound(action: &str) -> &str {
-    match action {
-        "direct" => "direct",
-        "block" => "block",
-        _ => "proxy",
-    }
-}
-
-fn mihomo_rule_target(target: &str) -> String {
-    if target.parse::<IpAddr>().is_ok() || target.contains('/') {
-        format!("IP-CIDR,{target},")
-    } else {
-        format!("DOMAIN-SUFFIX,{target},")
-    }
-}
-
 fn inject_mihomo_routing(
     mut value: serde_yaml::Value,
     settings: &AutoRoutingSettings,
+    tun_enabled: bool,
 ) -> Result<serde_yaml::Value, String> {
     use serde_yaml::{Mapping, Value};
 
@@ -2307,108 +3488,441 @@ fn inject_mihomo_routing(
         .and_then(Value::as_str)
         .unwrap_or("PROXY")
         .to_string();
-    let final_policy = match settings.mode.as_str() {
-        "direct" => "DIRECT".to_string(),
-        _ => proxy_name.clone(),
-    };
-    let mut rules = Vec::new();
+    let mut rules = vec![
+        Value::String("DOMAIN,localhost,DIRECT".into()),
+        Value::String("DOMAIN-SUFFIX,local,DIRECT".into()),
+        Value::String("IP-CIDR,127.0.0.0/8,DIRECT,no-resolve".into()),
+        Value::String("IP-CIDR,10.0.0.0/8,DIRECT,no-resolve".into()),
+        Value::String("IP-CIDR,172.16.0.0/12,DIRECT,no-resolve".into()),
+        Value::String("IP-CIDR,192.168.0.0/16,DIRECT,no-resolve".into()),
+        Value::String("IP-CIDR,169.254.0.0/16,DIRECT,no-resolve".into()),
+        Value::String("IP-CIDR6,::1/128,DIRECT,no-resolve".into()),
+        Value::String("IP-CIDR6,fc00::/7,DIRECT,no-resolve".into()),
+        Value::String("IP-CIDR6,fe80::/10,DIRECT,no-resolve".into()),
+    ];
     if settings.mode == "rule" {
-        for rule in settings.rules.iter().filter(|rule| rule.enabled) {
-            let outbound = match rule.action.as_str() {
-                "direct" => "DIRECT",
-                "block" => "REJECT",
-                _ => &proxy_name,
-            };
-            rules.push(Value::String(format!(
-                "{}{outbound}",
-                mihomo_rule_target(&rule.target)
-            )));
-        }
-        rules.push(Value::String("IP-CIDR,10.0.0.0/8,DIRECT,no-resolve".into()));
-        rules.push(Value::String(
-            "IP-CIDR,172.16.0.0/12,DIRECT,no-resolve".into(),
-        ));
-        rules.push(Value::String(
-            "IP-CIDR,192.168.0.0/16,DIRECT,no-resolve".into(),
-        ));
+        rules.push(Value::String("GEOSITE,CN,DIRECT".into()));
         rules.push(Value::String("GEOIP,CN,DIRECT".into()));
     }
-    rules.push(Value::String(format!("MATCH,{final_policy}")));
+    rules.push(Value::String(format!("MATCH,{proxy_name}")));
+
+    let mut dns = Mapping::new();
+    dns.insert(Value::String("enable".into()), Value::Bool(true));
+    dns.insert(
+        Value::String("enhanced-mode".into()),
+        Value::String("redir-host".into()),
+    );
+    dns.insert(Value::String("ipv6".into()), Value::Bool(true));
+    dns.insert(Value::String("use-hosts".into()), Value::Bool(true));
+    dns.insert(Value::String("use-system-hosts".into()), Value::Bool(true));
+    dns.insert(Value::String("respect-rules".into()), Value::Bool(true));
+    dns.insert(
+        Value::String("default-nameserver".into()),
+        Value::Sequence(
+            ["223.5.5.5", "119.29.29.29"]
+                .into_iter()
+                .map(|server| Value::String(server.into()))
+                .collect(),
+        ),
+    );
+    dns.insert(
+        Value::String("proxy-server-nameserver".into()),
+        Value::Sequence(
+            ["223.5.5.5", "119.29.29.29"]
+                .into_iter()
+                .map(|server| Value::String(server.into()))
+                .collect(),
+        ),
+    );
+    dns.insert(
+        Value::String("nameserver".into()),
+        Value::Sequence(
+            [
+                "https://cloudflare-dns.com/dns-query#RULES",
+                "https://dns.google/dns-query#RULES",
+            ]
+            .into_iter()
+            .map(|server| Value::String(server.into()))
+            .collect(),
+        ),
+    );
+    if settings.mode == "rule" {
+        dns.insert(
+            Value::String("direct-nameserver".into()),
+            Value::Sequence(
+                [
+                    "https://dns.alidns.com/dns-query",
+                    "https://doh.pub/dns-query",
+                ]
+                .into_iter()
+                .map(|server| Value::String(server.into()))
+                .collect(),
+            ),
+        );
+        dns.insert(
+            Value::String("direct-nameserver-follow-policy".into()),
+            Value::Bool(true),
+        );
+        let mut policy = Mapping::new();
+        policy.insert(
+            Value::String("geosite:cn".into()),
+            Value::Sequence(
+                [
+                    "https://dns.alidns.com/dns-query",
+                    "https://doh.pub/dns-query",
+                ]
+                .into_iter()
+                .map(|server| Value::String(server.into()))
+                .collect(),
+            ),
+        );
+        dns.insert(
+            Value::String("nameserver-policy".into()),
+            Value::Mapping(policy),
+        );
+    }
+    let tun = if tun_enabled {
+        serde_yaml::from_str::<Value>(
+            r#"
+enable: true
+stack: mixed
+device: KiNGO
+auto-route: true
+auto-detect-interface: true
+strict-route: true
+dns-hijack:
+  - any:53
+"#,
+        )
+        .map_err(|error| format!("生成 Mihomo TUN 配置失败：{error}"))?
+    } else {
+        let mut disabled = Mapping::new();
+        disabled.insert(Value::String("enable".into()), Value::Bool(false));
+        Value::Mapping(disabled)
+    };
     if let Value::Mapping(map) = &mut value {
+        map.insert(Value::String("geodata-mode".into()), Value::Bool(true));
+        map.insert(
+            Value::String("geodata-loader".into()),
+            Value::String("memconservative".into()),
+        );
+        map.insert(Value::String("geo-auto-update".into()), Value::Bool(false));
         map.insert(Value::String("rules".into()), Value::Sequence(rules));
-        map.entry(Value::String("mode".into()))
-            .or_insert(Value::String("rule".into()));
+        map.insert(Value::String("mode".into()), Value::String("rule".into()));
+        map.insert(Value::String("dns".into()), Value::Mapping(dns));
+        map.insert(Value::String("tun".into()), tun);
     } else {
         let mut map = Mapping::new();
+        map.insert(Value::String("geodata-mode".into()), Value::Bool(true));
+        map.insert(
+            Value::String("geodata-loader".into()),
+            Value::String("memconservative".into()),
+        );
+        map.insert(Value::String("geo-auto-update".into()), Value::Bool(false));
         map.insert(Value::String("rules".into()), Value::Sequence(rules));
+        map.insert(Value::String("mode".into()), Value::String("rule".into()));
+        map.insert(Value::String("dns".into()), Value::Mapping(dns));
+        map.insert(Value::String("tun".into()), tun);
         value = Value::Mapping(map);
     }
     Ok(value)
 }
 
-fn xray_rule(target: &str, outbound: &str) -> serde_json::Value {
-    if target.parse::<IpAddr>().is_ok() || target.contains('/') {
-        serde_json::json!({ "type": "field", "ip": [target], "outboundTag": outbound })
-    } else {
-        serde_json::json!({ "type": "field", "domain": [format!("domain:{target}")], "outboundTag": outbound })
+fn ensure_singbox_routing_outbounds(value: &mut serde_json::Value) -> Result<String, String> {
+    let outbounds = value["outbounds"]
+        .as_array_mut()
+        .ok_or_else(|| "sing-box 配置缺少出站".to_string())?;
+    let proxy = outbounds
+        .iter()
+        .find(|outbound| {
+            !matches!(
+                outbound.get("type").and_then(serde_json::Value::as_str),
+                Some("direct" | "block" | "dns")
+            )
+        })
+        .and_then(|outbound| outbound.get("tag"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned)
+        .ok_or_else(|| "sing-box 配置缺少代理出站标签".to_string())?;
+    if !outbounds
+        .iter()
+        .any(|outbound| outbound.get("tag").and_then(serde_json::Value::as_str) == Some("direct"))
+    {
+        outbounds.push(serde_json::json!({ "type": "direct", "tag": "direct" }));
     }
+    if !outbounds
+        .iter()
+        .any(|outbound| outbound.get("tag").and_then(serde_json::Value::as_str) == Some("block"))
+    {
+        outbounds.push(serde_json::json!({ "type": "block", "tag": "block" }));
+    }
+    Ok(proxy)
 }
 
-fn singbox_rule(target: &str, outbound: &str) -> serde_json::Value {
-    if target.parse::<IpAddr>().is_ok() || target.contains('/') {
-        serde_json::json!({ "ip_cidr": [target], "outbound": outbound })
-    } else {
-        serde_json::json!({ "domain_suffix": [target], "outbound": outbound })
+fn ensure_xray_routing_outbounds(value: &mut serde_json::Value) -> Result<String, String> {
+    let outbounds = value["outbounds"]
+        .as_array_mut()
+        .ok_or_else(|| "Xray 配置缺少出站".to_string())?;
+    let proxy = outbounds
+        .iter()
+        .find(|outbound| {
+            !matches!(
+                outbound.get("protocol").and_then(serde_json::Value::as_str),
+                Some("freedom" | "blackhole" | "dns")
+            )
+        })
+        .and_then(|outbound| outbound.get("tag"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned)
+        .ok_or_else(|| "Xray 配置缺少代理出站标签".to_string())?;
+    if !outbounds
+        .iter()
+        .any(|outbound| outbound.get("tag").and_then(serde_json::Value::as_str) == Some("direct"))
+    {
+        outbounds.push(serde_json::json!({ "protocol": "freedom", "tag": "direct" }));
     }
+    if !outbounds
+        .iter()
+        .any(|outbound| outbound.get("tag").and_then(serde_json::Value::as_str) == Some("block"))
+    {
+        outbounds.push(serde_json::json!({ "protocol": "blackhole", "tag": "block" }));
+    }
+    Ok(proxy)
 }
 
 fn inject_json_routing(
     route: &PublicRoute,
     mut value: serde_json::Value,
     settings: &AutoRoutingSettings,
+    singbox_country_rules: Option<&str>,
+    tun_enabled: bool,
 ) -> Result<serde_json::Value, String> {
-    let final_outbound = if settings.mode == "direct" {
-        "direct"
-    } else {
-        "proxy"
-    };
     if route.core_id == "sing-box" {
-        let mut rules = Vec::new();
-        if settings.mode == "rule" {
-            for rule in settings.rules.iter().filter(|rule| rule.enabled) {
-                rules.push(singbox_rule(&rule.target, rule_outbound(&rule.action)));
+        let proxy = ensure_singbox_routing_outbounds(&mut value)?;
+        if let Some(outbounds) = value["outbounds"].as_array_mut() {
+            for outbound in outbounds {
+                let tag = outbound.get("tag").and_then(serde_json::Value::as_str);
+                if tag == Some("direct") {
+                    outbound["domain_resolver"] = serde_json::json!("direct-dns");
+                } else if tag == Some(proxy.as_str()) {
+                    outbound["domain_resolver"] = serde_json::json!("bootstrap-dns");
+                }
             }
-            rules.push(serde_json::json!({ "ip_is_private": true, "outbound": "direct" }));
-            rules.push(serde_json::json!({ "domain_suffix": [".cn"], "outbound": "direct" }));
         }
+        let mut rules: Vec<serde_json::Value> = value["route"]["rules"]
+            .as_array()
+            .map(|rules| {
+                rules
+                    .iter()
+                    .filter(|rule| rule.get("action").is_some())
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default();
+        if tun_enabled {
+            let inbounds = value["inbounds"]
+                .as_array_mut()
+                .ok_or_else(|| "sing-box 配置缺少入站".to_string())?;
+            inbounds.retain(|inbound| {
+                inbound.get("tag").and_then(serde_json::Value::as_str) != Some("tun-in")
+            });
+            inbounds.insert(
+                0,
+                serde_json::json!({
+                    "type": "tun",
+                    "tag": "tun-in",
+                    "interface_name": "KiNGO",
+                    "address": ["172.19.0.1/30"],
+                    "mtu": 1500,
+                    "auto_route": true,
+                    "strict_route": true,
+                    "stack": "mixed"
+                }),
+            );
+            rules.insert(
+                0,
+                serde_json::json!({ "protocol": "dns", "action": "hijack-dns" }),
+            );
+            rules.insert(
+                0,
+                serde_json::json!({ "inbound": "tun-in", "action": "sniff" }),
+            );
+        }
+        rules.push(serde_json::json!({ "ip_is_private": true, "outbound": "direct" }));
+        if settings.mode == "rule" {
+            let country_rules =
+                singbox_country_rules.ok_or_else(|| "sing-box 中国规则文件不可用".to_string())?;
+            rules.push(serde_json::json!({ "rule_set": ["kingo-cn"], "outbound": "direct" }));
+            value["route"]["rule_set"] = serde_json::json!([{
+                "type": "local",
+                "tag": "kingo-cn",
+                "format": "source",
+                "path": country_rules
+            }]);
+        }
+        let dns_rules = if settings.mode == "rule" {
+            serde_json::json!([
+                { "domain_suffix": ["local", "lan"], "action": "route", "server": "direct-dns" },
+                { "rule_set": ["kingo-cn"], "action": "route", "server": "direct-dns" }
+            ])
+        } else {
+            serde_json::json!([
+                { "domain_suffix": ["local", "lan"], "action": "route", "server": "direct-dns" }
+            ])
+        };
+        value["dns"] = serde_json::json!({
+            "servers": [
+                { "type": "udp", "tag": "bootstrap-dns", "server": "223.5.5.5", "server_port": 53 },
+                {
+                    "type": "https",
+                    "tag": "direct-dns",
+                    "server": "223.5.5.5",
+                    "server_port": 443,
+                    "path": "/dns-query",
+                    "tls": { "enabled": true, "server_name": "dns.alidns.com" },
+                    "detour": "direct"
+                },
+                {
+                    "type": "https",
+                    "tag": "proxy-dns",
+                    "server": "1.1.1.1",
+                    "server_port": 443,
+                    "path": "/dns-query",
+                    "tls": { "enabled": true, "server_name": "cloudflare-dns.com" },
+                    "detour": proxy
+                }
+            ],
+            "rules": dns_rules,
+            "final": "proxy-dns",
+            "strategy": "prefer_ipv4",
+            "disable_cache": false,
+            "cache_capacity": 4096
+        });
         value["route"] = serde_json::json!({
             "rules": rules,
-            "final": final_outbound,
-            "auto_detect_interface": true
+            "final": proxy,
+            "auto_detect_interface": true,
+            "rule_set": value["route"]["rule_set"].clone()
         });
         return Ok(value);
     }
     if route.core_id == "xray" {
-        let mut rules = Vec::new();
-        if settings.mode == "rule" {
-            for rule in settings.rules.iter().filter(|rule| rule.enabled) {
-                rules.push(xray_rule(&rule.target, rule_outbound(&rule.action)));
+        let proxy = ensure_xray_routing_outbounds(&mut value)?;
+        if let Some(outbounds) = value["outbounds"].as_array_mut() {
+            for outbound in outbounds {
+                if outbound.get("tag").and_then(serde_json::Value::as_str) == Some("direct") {
+                    if !outbound
+                        .get("settings")
+                        .is_some_and(serde_json::Value::is_object)
+                    {
+                        outbound["settings"] = serde_json::json!({});
+                    }
+                    outbound["settings"]["domainStrategy"] = serde_json::json!("UseIP");
+                }
             }
-            rules.push(serde_json::json!({ "type": "field", "ip": ["geoip:private"], "outboundTag": "direct" }));
-            rules.push(serde_json::json!({ "type": "field", "domain": ["geosite:private"], "outboundTag": "direct" }));
+        }
+        let mut rules = Vec::new();
+        rules.push(serde_json::json!({ "type": "field", "ip": ["geoip:private"], "outboundTag": "direct" }));
+        rules.push(serde_json::json!({ "type": "field", "domain": ["geosite:private"], "outboundTag": "direct" }));
+        if settings.mode == "rule" {
             rules.push(serde_json::json!({ "type": "field", "domain": ["geosite:cn"], "outboundTag": "direct" }));
             rules.push(
                 serde_json::json!({ "type": "field", "ip": ["geoip:cn"], "outboundTag": "direct" }),
             );
-        } else if settings.mode == "direct" {
-            rules.push(serde_json::json!({ "type": "field", "network": "tcp,udp", "outboundTag": "direct" }));
         }
+        rules.push(serde_json::json!({
+            "type": "field",
+            "network": "tcp,udp",
+            "outboundTag": proxy
+        }));
         value["routing"] = serde_json::json!({
             "domainStrategy": "IPIfNonMatch",
             "rules": rules
         });
+        let mut servers = vec![serde_json::json!({
+            "address": "https+local://dns.alidns.com/dns-query",
+            "domains": ["geosite:private"],
+            "skipFallback": true,
+            "queryStrategy": "UseIP"
+        })];
+        if settings.mode == "rule" {
+            servers.push(serde_json::json!({
+                "address": "https+local://dns.alidns.com/dns-query",
+                "domains": ["geosite:cn"],
+                "expectedIPs": ["geoip:cn", "*"],
+                "skipFallback": true,
+                "queryStrategy": "UseIP"
+            }));
+        }
+        servers.push(serde_json::json!({
+            "address": "https://cloudflare-dns.com/dns-query",
+            "queryStrategy": "UseIP"
+        }));
+        value["dns"] = serde_json::json!({
+            "hosts": {
+                "dns.alidns.com": ["223.5.5.5", "223.6.6.6"],
+                "cloudflare-dns.com": ["104.16.248.249", "104.16.249.249"]
+            },
+            "servers": servers,
+            "queryStrategy": "UseIP",
+            "disableCache": false,
+            "disableFallbackIfMatch": true,
+            "enableParallelQuery": true,
+            "useSystemHosts": true
+        });
     }
     Ok(value)
+}
+
+fn install_shared_rule_file(source: &PathBuf, shared: &PathBuf) -> Result<(), String> {
+    let source_size = fs::metadata(source)
+        .map_err(|error| format!("读取规则资源失败：{error}"))?
+        .len();
+    if fs::metadata(shared).map(|value| value.len()).ok() == Some(source_size) {
+        return Ok(());
+    }
+    if let Some(parent) = shared.parent() {
+        fs::create_dir_all(parent).map_err(|error| format!("创建规则目录失败：{error}"))?;
+    }
+    let pending = shared.with_extension("dat.pending");
+    fs::copy(source, &pending).map_err(|error| format!("复制规则资源失败：{error}"))?;
+    if shared.is_file() {
+        fs::remove_file(shared).map_err(|error| format!("替换旧规则资源失败：{error}"))?;
+    }
+    fs::rename(&pending, shared).map_err(|error| format!("安装规则资源失败：{error}"))?;
+    Ok(())
+}
+
+fn ensure_mihomo_geodata(app: &AppHandle, runtime_dir: &std::path::Path) -> Result<(), String> {
+    let data = app
+        .path()
+        .app_data_dir()
+        .map_err(|error| format!("数据目录不可用：{error}"))?;
+    let shared_dir = data.join("rules").join("mihomo");
+    for name in ["geoip.dat", "geosite.dat"] {
+        let source = paths::resource_file(app, PathBuf::from("cores/xray").join(name))?;
+        let shared = shared_dir.join(name);
+        install_shared_rule_file(&source, &shared)?;
+        let target = runtime_dir.join(name);
+        if target.is_file() {
+            continue;
+        }
+        if fs::hard_link(&shared, &target).is_err() {
+            fs::copy(&shared, &target)
+                .map_err(|error| format!("准备 Mihomo {name} 失败：{error}"))?;
+        }
+    }
+    Ok(())
+}
+
+fn ensure_singbox_country_rules(app: &AppHandle) -> Result<PathBuf, String> {
+    let data = app
+        .path()
+        .app_data_dir()
+        .map_err(|error| format!("数据目录不可用：{error}"))?;
+    let target = data.join("rules").join("sing-box").join("kingo-cn.json");
+    geo_rules::load_cn_rules(app)?.write_singbox_source(&target)?;
+    Ok(target)
 }
 
 fn runtime_config(app: &AppHandle, route: &PublicRoute) -> Result<String, String> {
@@ -2417,6 +3931,7 @@ fn runtime_config(app: &AppHandle, route: &PublicRoute) -> Result<String, String
         return Ok(source);
     }
     let settings = get_auto_routing_settings(app);
+    let tun_enabled = get_connection_tun_enabled(app);
     let source_path = PathBuf::from(&source);
     let runtime = source_path.with_file_name(format!(
         "config.runtime.{}",
@@ -2427,18 +3942,33 @@ fn runtime_config(app: &AppHandle, route: &PublicRoute) -> Result<String, String
         }
     ));
     if route.config_format == "yaml" {
+        let runtime_dir = source_path.parent().ok_or("线路配置目录无效")?;
+        ensure_mihomo_geodata(app, runtime_dir)?;
         let content = fs::read_to_string(&source_path)
             .map_err(|error| format!("读取线路配置失败：{error}"))?;
         let value = serde_yaml::from_str::<serde_yaml::Value>(&content)
             .map_err(|error| format!("解析线路 YAML 失败：{error}"))?;
-        let value = inject_mihomo_routing(value, &settings)?;
+        let value = inject_mihomo_routing(value, &settings, tun_enabled)?;
         let content = serde_yaml::to_string(&value).map_err(|error| error.to_string())?;
         fs::write(&runtime, content).map_err(|error| format!("写入运行时规则失败：{error}"))?;
     } else {
         let data = fs::read(&source_path).map_err(|error| format!("读取线路配置失败：{error}"))?;
         let value = serde_json::from_slice::<serde_json::Value>(&data)
             .map_err(|error| format!("解析线路 JSON 失败：{error}"))?;
-        let value = inject_json_routing(route, value, &settings)?;
+        let singbox_country_rules = if route.core_id == "sing-box" && settings.mode == "rule" {
+            Some(ensure_singbox_country_rules(app)?)
+        } else {
+            None
+        };
+        let value = inject_json_routing(
+            route,
+            value,
+            &settings,
+            singbox_country_rules
+                .as_deref()
+                .and_then(std::path::Path::to_str),
+            tun_enabled,
+        )?;
         let content = serde_json::to_vec_pretty(&value).map_err(|error| error.to_string())?;
         fs::write(&runtime, content).map_err(|error| format!("写入运行时规则失败：{error}"))?;
     }
@@ -2459,6 +3989,9 @@ pub fn cancel_connection(
     store: &ConnectionStore,
     runtime: &core_runtime::CoreRuntime,
 ) -> Result<(), String> {
+    if store.routing_apply_in_progress.load(Ordering::Acquire) {
+        return Err("正在切换线路或应用连接设置，请稍候".into());
+    }
     if let Some(flag) = store
         .cancel
         .lock()
@@ -2471,6 +4004,9 @@ pub fn cancel_connection(
     let _ = system_proxy::disable(&store.proxy);
     if let Ok(mut route) = store.active_route.lock() {
         *route = None;
+    }
+    if let Ok(mut port) = store.active_proxy_port.lock() {
+        *port = None;
     }
     if let Ok(mut sample) = store.traffic_sample.lock() {
         *sample = None;
@@ -2489,7 +4025,7 @@ pub fn cancel_connection(
     state.upload_bps = 0;
     state.download_total = 0;
     state.upload_total = 0;
-    state.tun_enabled = false;
+    state.system_proxy_enabled = false;
     drop(state);
     emit_snapshot(app, store);
     Ok(())
@@ -2502,7 +4038,13 @@ pub fn refresh_exit_info(app: &AppHandle, store: &ConnectionStore) -> Result<(),
         .map_err(|_| "active route state unavailable")?
         .clone()
         .ok_or_else(|| "当前没有活动线路".to_string())?;
-    let exit = query_exit_info(&route)?;
+    let port = store
+        .active_proxy_port
+        .lock()
+        .ok()
+        .and_then(|value| *value)
+        .unwrap_or_else(|| proxy_port(&route));
+    let exit = query_exit_info_on_port(&route, port)?;
     let mut state = store
         .state
         .lock()
@@ -2638,4 +4180,368 @@ fn wait_for_port(port: u16, timeout: Duration) -> bool {
         std::thread::sleep(Duration::from_millis(200));
     }
     false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn routing_settings(mode: &str, action: &str) -> AutoRoutingSettings {
+        AutoRoutingSettings {
+            mode: mode.into(),
+            rules: vec![AutoRoutingRule {
+                id: "custom".into(),
+                target: "example.com".into(),
+                action: action.into(),
+                enabled: true,
+            }],
+        }
+    }
+
+    fn route(core_id: &str) -> PublicRoute {
+        PublicRoute {
+            id: format!("{core_id}:test"),
+            name: "test".into(),
+            core_id: core_id.into(),
+            slot: 1,
+            protocol_label: "test".into(),
+            config_format: "json".into(),
+            config_path: "test.json".into(),
+            downloaded: true,
+            active: false,
+            connection_state: "idle".into(),
+            last_success_at: None,
+            last_error: None,
+            latency: None,
+            country: None,
+            success_rate: None,
+            jitter: None,
+            quality: "待测试".into(),
+        }
+    }
+
+    #[test]
+    fn legacy_custom_rules_are_removed_during_normalization() {
+        let normalized =
+            normalize_auto_routing_settings(routing_settings("rule", "direct")).unwrap();
+        assert_eq!(normalized.mode, "rule");
+        assert!(normalized.rules.is_empty());
+    }
+
+    #[test]
+    fn route_latency_uses_median_and_reports_jitter() {
+        let metric = RouteMetric {
+            latency_samples: vec![90, 92, 420, 95, 94],
+            recent_results: vec![true, true, true, true, true],
+            last_success_at: Some(current_unix_seconds()),
+            ..Default::default()
+        };
+        assert_eq!(metric_median(&metric.latency_samples), Some(94));
+        assert_eq!(metric_jitter(&metric), Some(66));
+        assert_eq!(metric_success_rate(&metric), Some(100));
+        assert_eq!(metric_quality(&metric), "稳定");
+    }
+
+    #[test]
+    fn repeated_failures_push_route_behind_stable_candidate() {
+        let stable = RouteMetric {
+            latency: Some(180),
+            latency_samples: vec![170, 180, 190],
+            recent_results: vec![true, true, true],
+            last_success_at: Some(current_unix_seconds()),
+            ..Default::default()
+        };
+        let failed = RouteMetric {
+            latency: None,
+            error: Some("timeout".into()),
+            latency_samples: vec![80, 82, 84],
+            recent_results: vec![true, false, false],
+            consecutive_failures: 2,
+            last_failure_at: Some(current_unix_seconds()),
+            ..Default::default()
+        };
+        assert!(metric_candidate_score(Some(&stable)) < metric_candidate_score(Some(&failed)));
+        assert_eq!(metric_quality(&failed), "暂不可用");
+    }
+
+    #[test]
+    fn mihomo_global_mode_protects_lan_and_ignores_legacy_rules() {
+        let source: serde_yaml::Value = serde_yaml::from_str(
+            r#"
+proxy-groups:
+  - name: PROXY
+    type: select
+    proxies: [node]
+rules:
+  - MATCH,PROXY
+"#,
+        )
+        .unwrap();
+        let output =
+            inject_mihomo_routing(source, &routing_settings("global", "direct"), false).unwrap();
+        let rules = output["rules"].as_sequence().unwrap();
+        assert_eq!(rules[0].as_str(), Some("DOMAIN,localhost,DIRECT"));
+        assert!(!rules.iter().any(|rule| rule
+            .as_str()
+            .is_some_and(|value| value.contains("example.com"))));
+        assert!(!rules
+            .iter()
+            .any(|rule| rule.as_str() == Some("GEOIP,CN,DIRECT")));
+        assert_eq!(
+            rules.last().and_then(serde_yaml::Value::as_str),
+            Some("MATCH,PROXY")
+        );
+        assert_eq!(output["mode"].as_str(), Some("rule"));
+        assert_eq!(output["dns"]["enable"].as_bool(), Some(true));
+        assert_eq!(output["dns"]["enhanced-mode"].as_str(), Some("redir-host"));
+        assert!(output["dns"].get("nameserver-policy").is_none());
+    }
+
+    #[test]
+    fn singbox_global_mode_uses_proxy_and_protects_private_ips() {
+        let source = serde_json::json!({
+            "outbounds": [
+                { "type": "tuic", "tag": "upstream-node" },
+                { "type": "direct", "tag": "direct" }
+            ],
+            "route": {
+                "rules": [{ "inbound": "mixed-in", "action": "sniff" }],
+                "final": "upstream-node"
+            }
+        });
+        let output = inject_json_routing(
+            &route("sing-box"),
+            source,
+            &routing_settings("global", "direct"),
+            None,
+            false,
+        )
+        .unwrap();
+        assert_eq!(output["route"]["final"], "upstream-node");
+        assert_eq!(output["route"]["rules"][1]["outbound"], "direct");
+        assert_eq!(output["route"]["rules"][1]["ip_is_private"], true);
+        assert_eq!(output["dns"]["final"], "proxy-dns");
+        assert_eq!(output["dns"]["servers"][0]["tag"], "bootstrap-dns");
+        assert_eq!(output["dns"]["servers"][1]["detour"], "direct");
+        assert_eq!(output["dns"]["servers"][2]["detour"], "upstream-node");
+        assert!(output["outbounds"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|outbound| outbound["tag"] == "block"));
+    }
+
+    #[test]
+    fn xray_global_mode_protects_private_targets_before_proxy_fallback() {
+        let source = serde_json::json!({
+            "outbounds": [
+                { "protocol": "vless", "tag": "node-a" },
+                { "protocol": "freedom", "tag": "direct" },
+                { "protocol": "blackhole", "tag": "block" }
+            ]
+        });
+        let output = inject_json_routing(
+            &route("xray"),
+            source,
+            &routing_settings("global", "direct"),
+            None,
+            false,
+        )
+        .unwrap();
+        assert_eq!(output["routing"]["rules"][0]["outboundTag"], "direct");
+        assert_eq!(output["routing"]["rules"][1]["outboundTag"], "direct");
+        assert_eq!(output["routing"]["rules"][2]["outboundTag"], "node-a");
+        assert_eq!(output["dns"]["servers"][0]["domains"][0], "geosite:private");
+        assert_eq!(
+            output["dns"]["servers"][1]["address"],
+            "https://cloudflare-dns.com/dns-query"
+        );
+        assert_eq!(
+            output["outbounds"][1]["settings"]["domainStrategy"],
+            "UseIP"
+        );
+    }
+
+    #[test]
+    fn background_upgrade_requires_both_relative_and_absolute_gain() {
+        assert!(is_clear_latency_upgrade(600, 399));
+        assert!(!is_clear_latency_upgrade(600, 500));
+        assert!(!is_clear_latency_upgrade(200, 125));
+        assert!(is_clear_latency_upgrade(200, 110));
+    }
+
+    #[test]
+    fn only_json_socks_cores_join_parallel_probe_pool() {
+        for core in [
+            "xray",
+            "sing-box",
+            "hysteria",
+            "hysteria2",
+            "naiveproxy",
+            "juicity",
+        ] {
+            assert!(supports_dynamic_probe(&route(core)), "{core}");
+        }
+        for core in ["mihomo", "mieru", "shadowquic"] {
+            assert!(!supports_dynamic_probe(&route(core)), "{core}");
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn bundled_mihomo_accepts_generated_rule_config() {
+        let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let executable = manifest.join("resources/cores/mihomo/mihomo.exe");
+        if !executable.is_file() {
+            return;
+        }
+        let source: serde_yaml::Value = serde_yaml::from_str(include_str!(
+            "../resources/route-configs/mihomo/slot_1_config.yaml"
+        ))
+        .unwrap();
+        let output =
+            inject_mihomo_routing(source, &routing_settings("rule", "direct"), true).unwrap();
+        assert_eq!(output["geodata-mode"].as_bool(), Some(true));
+        assert_eq!(output["geodata-loader"].as_str(), Some("memconservative"));
+        assert_eq!(output["geo-auto-update"].as_bool(), Some(false));
+        assert_eq!(output["tun"]["enable"].as_bool(), Some(true));
+        assert_eq!(output["tun"]["strict-route"].as_bool(), Some(true));
+        let directory =
+            std::env::temp_dir().join(format!("kingo-routing-test-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&directory);
+        fs::create_dir_all(&directory).unwrap();
+        fs::copy(
+            manifest.join("resources/cores/xray/geoip.dat"),
+            directory.join("geoip.dat"),
+        )
+        .unwrap();
+        fs::copy(
+            manifest.join("resources/cores/xray/geosite.dat"),
+            directory.join("geosite.dat"),
+        )
+        .unwrap();
+        let config = directory.join("config.runtime.yaml");
+        fs::write(&config, serde_yaml::to_string(&output).unwrap()).unwrap();
+        let result = std::process::Command::new(executable)
+            .args([
+                "-t",
+                "-d",
+                directory.to_string_lossy().as_ref(),
+                "-f",
+                config.to_string_lossy().as_ref(),
+            ])
+            .output()
+            .unwrap();
+        let _ = fs::remove_dir_all(&directory);
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn bundled_json_cores_accept_generated_global_config() {
+        let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let cases = [
+            (
+                "xray",
+                manifest.join("resources/cores/xray/xray.exe"),
+                include_str!("../resources/route-configs/xray/slot_1_config.json"),
+            ),
+            (
+                "sing-box",
+                manifest.join("resources/cores/sing-box/sing-box.exe"),
+                include_str!("../resources/route-configs/sing-box/slot_1_config.json"),
+            ),
+        ];
+        for (core_id, executable, source) in cases {
+            if !executable.is_file() {
+                continue;
+            }
+            let source: serde_json::Value = serde_json::from_str(source).unwrap();
+            let output = inject_json_routing(
+                &route(core_id),
+                source,
+                &routing_settings("global", "direct"),
+                None,
+                false,
+            )
+            .unwrap();
+            let directory = std::env::temp_dir().join(format!(
+                "kingo-routing-test-{core_id}-{}",
+                std::process::id()
+            ));
+            let _ = fs::remove_dir_all(&directory);
+            fs::create_dir_all(&directory).unwrap();
+            let config = directory.join("config.runtime.json");
+            fs::write(&config, serde_json::to_vec_pretty(&output).unwrap()).unwrap();
+            let mut command = std::process::Command::new(&executable);
+            command.current_dir(executable.parent().unwrap());
+            if core_id == "xray" {
+                command.args(["run", "-test", "-config", config.to_string_lossy().as_ref()]);
+            } else {
+                command.args(["check", "-c", config.to_string_lossy().as_ref()]);
+            }
+            let result = command.output().unwrap();
+            let _ = fs::remove_dir_all(&directory);
+            assert!(
+                result.status.success(),
+                "{core_id}: {}",
+                String::from_utf8_lossy(&result.stderr)
+            );
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn bundled_singbox_accepts_generated_country_rule_mode() {
+        let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let executable = manifest.join("resources/cores/sing-box/sing-box.exe");
+        if !executable.is_file() {
+            return;
+        }
+        let directory =
+            std::env::temp_dir().join(format!("kingo-singbox-rule-test-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&directory);
+        fs::create_dir_all(&directory).unwrap();
+        let country_rules = directory.join("kingo-cn.json");
+        fs::write(
+            &country_rules,
+            serde_json::to_vec(&serde_json::json!({
+                "version": 3,
+                "rules": [{ "domain_suffix": ["cn"], "ip_cidr": ["223.5.5.0/24"] }]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let source: serde_json::Value = serde_json::from_str(include_str!(
+            "../resources/route-configs/sing-box/slot_1_config.json"
+        ))
+        .unwrap();
+        let output = inject_json_routing(
+            &route("sing-box"),
+            source,
+            &routing_settings("rule", "direct"),
+            country_rules.to_str(),
+            true,
+        )
+        .unwrap();
+        assert_eq!(output["inbounds"][0]["type"], "tun");
+        assert_eq!(output["inbounds"][0]["strict_route"], true);
+        let config = directory.join("config.runtime.json");
+        fs::write(&config, serde_json::to_vec_pretty(&output).unwrap()).unwrap();
+        let result = std::process::Command::new(&executable)
+            .current_dir(executable.parent().unwrap())
+            .args(["check", "-c", config.to_string_lossy().as_ref()])
+            .output()
+            .unwrap();
+        let _ = fs::remove_dir_all(&directory);
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+    }
 }

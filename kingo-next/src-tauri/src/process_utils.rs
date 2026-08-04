@@ -49,7 +49,29 @@ pub fn relaunch_elevated() -> Result<(), String> {
         .ok_or_else(|| "管理员授权被取消，TUN 模式未启动".into())
 }
 
+#[cfg(windows)]
+pub fn relaunch_elevated_delayed() -> Result<(), String> {
+    let executable =
+        std::env::current_exe().map_err(|error| format!("读取 KiNGO 程序路径失败：{error}"))?;
+    let path = executable.to_string_lossy().replace('\'', "''");
+    hidden_command("powershell.exe")
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            &format!("Start-Sleep -Milliseconds 900; Start-Process -FilePath '{path}' -Verb RunAs"),
+        ])
+        .spawn()
+        .map_err(|error| format!("请求管理员权限失败：{error}"))?;
+    Ok(())
+}
+
 #[cfg(not(windows))]
 pub fn relaunch_elevated() -> Result<(), String> {
+    Ok(())
+}
+
+#[cfg(not(windows))]
+pub fn relaunch_elevated_delayed() -> Result<(), String> {
     Ok(())
 }

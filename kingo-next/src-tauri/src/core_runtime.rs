@@ -24,6 +24,7 @@ pub struct CoreProcessStatus {
 pub struct CoreRuntime {
     children: Arc<Mutex<HashMap<String, Child>>>,
     executables: Arc<Mutex<HashMap<String, PathBuf>>>,
+    temporary_configs: Arc<Mutex<HashMap<String, PathBuf>>>,
 }
 
 impl Default for CoreRuntime {
@@ -31,6 +32,7 @@ impl Default for CoreRuntime {
         Self {
             children: Arc::new(Mutex::new(HashMap::new())),
             executables: Arc::new(Mutex::new(HashMap::new())),
+            temporary_configs: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 }
@@ -80,6 +82,14 @@ fn resolve_executable(
     Ok((status.profile, PathBuf::from(executable)))
 }
 
+fn configure_xray_assets(app: &AppHandle, command: &mut std::process::Command) {
+    if let Ok(asset) = crate::paths::resource_file(app, "cores/xray/geoip.dat") {
+        if let Some(directory) = asset.parent() {
+            command.env("XRAY_LOCATION_ASSET", directory);
+        }
+    }
+}
+
 pub fn spawn_transient(app: &AppHandle, core_id: &str, config_path: &str) -> Result<Child, String> {
     let (profile, executable) = resolve_executable(app, core_id)?;
     let config = PathBuf::from(config_path);
@@ -91,6 +101,17 @@ pub fn spawn_transient(app: &AppHandle, core_id: &str, config_path: &str) -> Res
         command.current_dir(directory);
     }
     match profile.family.as_str() {
+        "mihomo" => {
+            let directory = config
+                .parent()
+                .ok_or_else(|| "核心配置目录无效".to_string())?;
+            command.args([
+                "-d",
+                directory.to_string_lossy().as_ref(),
+                "-f",
+                config_path,
+            ]);
+        }
         "hysteria2" => {
             command.args(["client", "-c", config_path]);
         }
@@ -109,6 +130,9 @@ pub fn spawn_transient(app: &AppHandle, core_id: &str, config_path: &str) -> Res
             command.args(["run", "-c", config_path]);
         }
     }
+    if profile.family == "xray" {
+        configure_xray_assets(app, &mut command);
+    }
     command
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -126,7 +150,13 @@ pub fn validate_mihomo_config(app: &AppHandle, config_path: &str) -> Result<(), 
     }
     let directory = config.parent().ok_or("Clash 运行配置目录无效")?;
     let output = hidden_command(executable)
-        .args(["-t", "-d", directory.to_string_lossy().as_ref()])
+        .args([
+            "-t",
+            "-d",
+            directory.to_string_lossy().as_ref(),
+            "-f",
+            config_path,
+        ])
         .stdin(Stdio::null())
         .output()
         .map_err(|error| format!("mihomo 配置检查启动失败：{error}"))?;
@@ -163,7 +193,12 @@ pub fn start(
             let directory = config
                 .parent()
                 .ok_or_else(|| "核心配置目录无效".to_string())?;
-            command.args(["-d", directory.to_string_lossy().as_ref()]);
+            command.args([
+                "-d",
+                directory.to_string_lossy().as_ref(),
+                "-f",
+                &config_path,
+            ]);
         }
         "hysteria2" => {
             command.args(["client", "-c", &config_path]);
@@ -182,6 +217,9 @@ pub fn start(
         _ => {
             command.args(["run", "-c", &config_path]);
         }
+    }
+    if profile.family == "xray" {
+        configure_xray_assets(app, &mut command);
     }
     let mut child = command
         .stdin(Stdio::null())
@@ -240,6 +278,74 @@ pub fn stop(runtime: &CoreRuntime, core_id: &str) -> Result<(), String> {
                 .status();
         }
     }
+    if let Ok(mut configs) = runtime.temporary_configs.lock() {
+        if let Some(path) = configs.remove(core_id) {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+    Ok(())
+}
+
+pub fn register_temporary_config(
+    runtime: &CoreRuntime,
+    core_id: &str,
+    config_path: impl Into<PathBuf>,
+) -> Result<(), String> {
+    runtime
+        .temporary_configs
+        .lock()
+        .map_err(|_| "temporary core configuration state unavailable".to_string())?
+        .insert(core_id.to_string(), config_path.into());
+    Ok(())
+}
+
+/// Moves a verified process from an isolated runtime into the active runtime.
+/// The caller must stop any old active process before adopting the replacement.
+pub fn adopt(target: &CoreRuntime, source: &CoreRuntime, core_id: &str) -> Result<(), String> {
+    if target
+        .children
+        .lock()
+        .map_err(|_| "active core process state unavailable".to_string())?
+        .contains_key(core_id)
+    {
+        return Err("active runtime already contains this core".into());
+    }
+    let child = source
+        .children
+        .lock()
+        .map_err(|_| "candidate core process state unavailable".to_string())?
+        .remove(core_id)
+        .ok_or_else(|| "candidate core process is no longer running".to_string())?;
+    let executable = source
+        .executables
+        .lock()
+        .map_err(|_| "candidate core path state unavailable".to_string())?
+        .remove(core_id);
+    let temporary_config = source
+        .temporary_configs
+        .lock()
+        .map_err(|_| "candidate core configuration state unavailable".to_string())?
+        .remove(core_id);
+
+    target
+        .children
+        .lock()
+        .map_err(|_| "active core process state unavailable".to_string())?
+        .insert(core_id.to_string(), child);
+    if let Some(executable) = executable {
+        target
+            .executables
+            .lock()
+            .map_err(|_| "active core path state unavailable".to_string())?
+            .insert(core_id.to_string(), executable);
+    }
+    if let Some(config) = temporary_config {
+        target
+            .temporary_configs
+            .lock()
+            .map_err(|_| "active core configuration state unavailable".to_string())?
+            .insert(core_id.to_string(), config);
+    }
     Ok(())
 }
 
@@ -281,6 +387,11 @@ pub fn statuses(runtime: &CoreRuntime) -> Result<Vec<CoreProcessStatus>, String>
                         .stdout(Stdio::null())
                         .stderr(Stdio::null())
                         .status();
+                }
+            }
+            if let Ok(mut configs) = runtime.temporary_configs.lock() {
+                if let Some(path) = configs.remove(&core_id) {
+                    let _ = std::fs::remove_file(path);
                 }
             }
             output.push(CoreProcessStatus {

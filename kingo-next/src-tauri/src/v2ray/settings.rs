@@ -1,11 +1,7 @@
 use crate::paths;
 use serde::{Deserialize, Serialize};
-use std::{
-    fs,
-    path::PathBuf,
-    time::{SystemTime, UNIX_EPOCH},
-};
-use tauri::{AppHandle, Emitter};
+use std::{fs, path::PathBuf};
+use tauri::AppHandle;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -140,52 +136,6 @@ pub fn save(app: &AppHandle, value: V2raySettings) -> Result<V2raySettings, Stri
     fs::write(settings_path(app)?, content)
         .map_err(|error| format!("保存 V2ray 设置失败：{error}"))?;
     Ok(value)
-}
-
-fn now() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
-}
-
-pub fn start_subscription_scheduler(app: AppHandle) {
-    std::thread::spawn(move || {
-        let marker = PathBuf::from(
-            paths::ensure(&app)
-                .map(|value| value.data_dir)
-                .unwrap_or_default(),
-        )
-        .join("v2ray-subscription-last-run.txt");
-        loop {
-            std::thread::sleep(std::time::Duration::from_secs(60));
-            let settings = load(&app);
-            if settings.subscription_update_minutes == 0 {
-                continue;
-            }
-            let previous = fs::read_to_string(&marker)
-                .ok()
-                .and_then(|value| value.trim().parse::<u64>().ok())
-                .unwrap_or_else(now);
-            let interval = u64::from(settings.subscription_update_minutes) * 60;
-            if now().saturating_sub(previous) < interval {
-                if !marker.exists() {
-                    let _ = fs::write(&marker, previous.to_string());
-                }
-                continue;
-            }
-            let result = super::update_all_subscriptions(&app);
-            let _ = fs::write(&marker, now().to_string());
-            match result {
-                Ok(summary) => {
-                    let _ = app.emit("v2ray-subscriptions-auto-updated", &summary);
-                }
-                Err(error) => {
-                    let _ = app.emit("v2ray-subscriptions-auto-update-error", error);
-                }
-            }
-        }
-    });
 }
 
 #[cfg(test)]

@@ -31,9 +31,34 @@ pub fn is_kingo_enabled(port: u16) -> bool {
         && server.eq_ignore_ascii_case(&format!("127.0.0.1:{port}"))
 }
 
+pub fn has_pending_restore(state: &ProxyState) -> bool {
+    let in_memory = state
+        .backup
+        .lock()
+        .map(|backup| backup.is_some())
+        .unwrap_or(true);
+    let persisted = backup_path().is_some_and(|path| path.exists());
+    in_memory || persisted
+}
+
 impl ProxyState {
     pub fn traffic(&self) -> (u64, u64) {
         self.bridge.traffic()
+    }
+
+    pub fn update_routing(&self, mode: &str, rules: Vec<(String, String)>) -> Result<(), String> {
+        self.bridge.update_routing(mode, rules)
+    }
+
+    pub fn set_country_rules(
+        &self,
+        rules: Arc<crate::geo_rules::CountryRules>,
+    ) -> Result<(), String> {
+        self.bridge.set_country_rules(rules)
+    }
+
+    pub fn switch_socks_upstream(&self, port: u16) -> Result<(), String> {
+        self.bridge.switch_upstream(port)
     }
 }
 
@@ -106,6 +131,28 @@ fn delete_value(name: &str) -> Result<(), String> {
 }
 
 pub fn enable(state: &ProxyState, port: u16, socks5: bool, bypass_lan: bool) -> Result<(), String> {
+    state.update_routing("global", Vec::new())?;
+    enable_inner(state, port, socks5, bypass_lan)
+}
+
+pub fn enable_with_routing(
+    state: &ProxyState,
+    port: u16,
+    socks5: bool,
+    bypass_lan: bool,
+    mode: &str,
+    rules: Vec<(String, String)>,
+) -> Result<(), String> {
+    state.update_routing(mode, rules)?;
+    enable_inner(state, port, socks5, bypass_lan)
+}
+
+fn enable_inner(
+    state: &ProxyState,
+    port: u16,
+    socks5: bool,
+    bypass_lan: bool,
+) -> Result<(), String> {
     let mut backup = state
         .backup
         .lock()

@@ -34,10 +34,6 @@ pub fn save_settings(app: &AppHandle, value: V2raySettings) -> Result<V2raySetti
     settings::save(app, value)
 }
 
-pub fn start_subscription_scheduler(app: AppHandle) {
-    settings::start_subscription_scheduler(app);
-}
-
 fn parse_many(text: &str) -> (Vec<ParsedNode>, Vec<String>) {
     let mut nodes = Vec::new();
     let mut errors = Vec::new();

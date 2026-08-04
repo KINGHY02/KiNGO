@@ -7,7 +7,6 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use tauri::AppHandle;
-use tauri::Emitter;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -93,41 +92,9 @@ struct DownloadResult {
 }
 
 static PROFILE_WRITE_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-static SCHEDULER_STARTED: OnceLock<()> = OnceLock::new();
 
 fn write_lock() -> &'static Mutex<()> {
     PROFILE_WRITE_LOCK.get_or_init(|| Mutex::new(()))
-}
-
-pub fn start_scheduler(app: AppHandle) {
-    if SCHEDULER_STARTED.set(()).is_err() {
-        return;
-    }
-    std::thread::spawn(move || loop {
-        std::thread::sleep(Duration::from_secs(30));
-        let current = now();
-        let due = list(&app)
-            .unwrap_or_default()
-            .into_iter()
-            .filter(|profile| {
-                profile.source == "url"
-                    && profile.allow_auto_update
-                    && profile.next_update_at.is_some_and(|next| next <= current)
-            })
-            .map(|profile| profile.id)
-            .collect::<Vec<_>>();
-        for profile_id in due {
-            let result = update(&app, &profile_id);
-            let _ = app.emit(
-                "clash-profiles-changed",
-                serde_json::json!({
-                    "profileId": profile_id,
-                    "updated": result.is_ok(),
-                    "error": result.err()
-                }),
-            );
-        }
-    });
 }
 
 fn default_profile_source() -> String {

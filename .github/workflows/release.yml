@@ -54,23 +54,26 @@ jobs:
       - name: Build pull request installer
         if: github.event_name == 'pull_request'
         working-directory: kingo-next
-        run: npm run tauri -- build --bundles nsis
+        run: npm run tauri -- build --bundles nsis --config src-tauri/tauri.pr.conf.json
 
       - name: Build and publish tagged release
         if: startsWith(github.ref, 'refs/tags/v')
         uses: tauri-apps/tauri-action@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           projectPath: kingo-next
           tagName: ${{ github.ref_name }}
           releaseName: "KiNGO ${{ github.ref_name }}"
           releaseBody: |
             KiNGO 2.0 新架构 Windows x64 安装包。
-            请下载 `KiNGO-Setup-*-x64.exe`。本版本为未签名构建，Windows 首次运行时可能显示 SmartScreen 提示。
+            已安装支持软件内更新的 KiNGO 版本可直接在“设置 → 软件更新”完成下载、验证、安装和自动重启。
+            首次安装仍可下载 `KiNGO-Setup-*-x64.exe`。本版本未使用 Windows 代码签名证书，首次运行时仍可能显示 SmartScreen 提示。
           generateReleaseNotes: true
           releaseDraft: false
           prerelease: false
-          uploadUpdaterJson: false
+          uploadUpdaterJson: true
           args: --bundles nsis
           releaseAssetNamePattern: "KiNGO-Setup-[version]-[arch][ext]"

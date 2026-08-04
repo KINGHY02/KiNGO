@@ -4,6 +4,7 @@ mod clash_realtime;
 mod core_runtime;
 mod core_update;
 mod cores;
+mod geo_rules;
 mod paths;
 mod process_utils;
 mod services;
@@ -13,22 +14,57 @@ mod v2ray;
 
 use services::{AppConnectionState, ConnectionStore, PublicRoute};
 use tauri::{
-    menu::MenuBuilder,
+    menu::{CheckMenuItem, MenuBuilder, MenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
 };
 use tauri::{Listener, Manager, State};
+
+struct TrayMenuHandles {
+    status: MenuItem<tauri::Wry>,
+    connect: MenuItem<tauri::Wry>,
+    best_route: MenuItem<tauri::Wry>,
+    rule: CheckMenuItem<tauri::Wry>,
+    global: CheckMenuItem<tauri::Wry>,
+    tun: CheckMenuItem<tauri::Wry>,
+}
+
+#[derive(Default)]
+struct TrayMenuState(std::sync::Mutex<Option<TrayMenuHandles>>);
+
+fn show_main_window(app: &tauri::AppHandle) {
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.show();
+        let _ = window.unminimize();
+        let _ = window.set_focus();
+    }
+}
+
+fn report_tray_error(app: &tauri::AppHandle, error: String) {
+    let store = app.state::<ConnectionStore>();
+    if let Ok(mut state) = store.state.lock() {
+        state.error = Some(error);
+    }
+    services::emit_snapshot(app, &store);
+    show_main_window(app);
+}
+
+fn run_tray_action<F>(app: &tauri::AppHandle, action: F)
+where
+    F: FnOnce(tauri::AppHandle) -> Result<(), String> + Send + 'static,
+{
+    let app = app.clone();
+    std::thread::spawn(move || {
+        if let Err(error) = action(app.clone()) {
+            report_tray_error(&app, error);
+        }
+    });
+}
 
 fn update_tray_visual(app: &tauri::AppHandle, state: &AppConnectionState) {
     let Some(tray) = app.tray_by_id("kingo-tray") else {
         return;
     };
-    let active = state.connected
-        || state.connecting
-        || matches!(
-            state.stage.as_str(),
-            "preparing" | "connecting" | "switching" | "failover" | "disconnecting"
-        );
-    let bytes: &'static [u8] = if active {
+    let bytes: &'static [u8] = if state.connected {
         include_bytes!("../../../icons/32x32_Connecting.png")
     } else {
         include_bytes!("../icons/tray.png")
@@ -36,18 +72,74 @@ fn update_tray_visual(app: &tauri::AppHandle, state: &AppConnectionState) {
     if let Ok(icon) = tauri::image::Image::from_bytes(bytes) {
         let _ = tray.set_icon(Some(icon));
     }
+    let routing = services::get_auto_routing_settings(app);
+    let route_mode = if routing.mode == "global" {
+        "全局模式"
+    } else {
+        "规则模式"
+    };
+    let network_mode = if state.tun_enabled {
+        "TUN"
+    } else {
+        "系统代理"
+    };
     let tooltip = if state.connected {
-        state
-            .display_name
-            .as_deref()
-            .map(|name| format!("KiNGO · 已连接 · {name}"))
-            .unwrap_or_else(|| "KiNGO · 已连接".into())
-    } else if state.connecting {
-        "KiNGO · 正在连接".into()
+        match state.display_name.as_deref() {
+            Some(name) => format!("KiNGO · 已连接 · {name} · {route_mode}/{network_mode}"),
+            None => format!("KiNGO · 已连接 · {route_mode}/{network_mode}"),
+        }
+    } else if state.connecting || state.stage != "idle" {
+        let action = match state.stage.as_str() {
+            "switching" => "正在切换线路",
+            "failover" => "正在故障切换",
+            "disconnecting" => "正在断开",
+            _ => "正在连接",
+        };
+        format!("KiNGO · {action}")
     } else {
         "KiNGO · 未连接".into()
     };
     let _ = tray.set_tooltip(Some(tooltip));
+
+    let status_text = if state.connected {
+        state
+            .display_name
+            .as_deref()
+            .map(|name| format!("● 已连接 · {name}"))
+            .unwrap_or_else(|| "● 已连接".into())
+    } else if state.connecting || state.stage != "idle" {
+        "◐ 正在处理连接".into()
+    } else {
+        "○ 未连接".into()
+    };
+    let action_text = if state.connected {
+        "断开连接"
+    } else if state.connecting || state.stage != "idle" {
+        "取消连接"
+    } else {
+        "连接"
+    };
+    let best_route_text = if state.connected {
+        "重新选择最佳线路"
+    } else {
+        "自动选择最佳线路"
+    };
+    if let Ok(handles) = app.state::<TrayMenuState>().0.lock() {
+        if let Some(handles) = handles.as_ref() {
+            let actions_enabled = !state.connecting && state.stage == "idle";
+            let _ = handles.status.set_text(status_text);
+            let _ = handles.connect.set_text(action_text);
+            let _ = handles.connect.set_enabled(state.stage != "disconnecting");
+            let _ = handles.best_route.set_text(best_route_text);
+            let _ = handles.best_route.set_enabled(actions_enabled);
+            let _ = handles.rule.set_enabled(actions_enabled);
+            let _ = handles.rule.set_checked(routing.mode != "global");
+            let _ = handles.global.set_enabled(actions_enabled);
+            let _ = handles.global.set_checked(routing.mode == "global");
+            let _ = handles.tun.set_enabled(actions_enabled);
+            let _ = handles.tun.set_checked(state.tun_enabled);
+        }
+    }
 }
 
 #[tauri::command]
@@ -145,9 +237,11 @@ fn get_auto_routing_settings(app: tauri::AppHandle) -> services::AutoRoutingSett
 #[tauri::command]
 fn set_auto_routing_settings(
     app: tauri::AppHandle,
+    store: State<'_, ConnectionStore>,
+    runtime: State<'_, core_runtime::CoreRuntime>,
     settings: services::AutoRoutingSettings,
-) -> Result<services::AutoRoutingSettings, String> {
-    services::set_auto_routing_settings(&app, settings)
+) -> Result<services::AutoRoutingApplyResult, String> {
+    services::set_auto_routing_settings(&app, &store, &runtime, settings)
 }
 
 #[tauri::command]
@@ -207,6 +301,14 @@ fn set_speed_test_settings(
 }
 
 #[tauri::command]
+fn test_speed_test_url(
+    url: String,
+    timeout_seconds: u64,
+) -> Result<services::SpeedTestUrlResult, String> {
+    services::test_speed_test_url(url, timeout_seconds)
+}
+
+#[tauri::command]
 fn list_core_profiles() -> Vec<cores::CoreProfile> {
     cores::profiles()
 }
@@ -224,6 +326,21 @@ fn check_core_updates(app: tauri::AppHandle) -> Result<Vec<core_update::CoreVers
 #[tauri::command]
 fn check_app_update() -> Result<core_update::AppUpdateInfo, String> {
     core_update::check_app_update()
+}
+
+#[tauri::command]
+fn prepare_app_update(
+    app: tauri::AppHandle,
+    store: State<'_, ConnectionStore>,
+    runtime: State<'_, core_runtime::CoreRuntime>,
+) -> Result<(), String> {
+    services::cancel_connection(&app, &store, &runtime)?;
+    core_runtime::stop_all(&runtime)?;
+    system_proxy::disable(&store.proxy)?;
+    if system_proxy::has_pending_restore(&store.proxy) {
+        return Err("更新前未能完全恢复 Windows 系统代理，请重试".into());
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -1006,6 +1123,23 @@ fn set_clash_tun(
 }
 
 #[tauri::command]
+fn set_auto_tun(
+    app: tauri::AppHandle,
+    store: State<'_, ConnectionStore>,
+    runtime: State<'_, core_runtime::CoreRuntime>,
+    enabled: bool,
+) -> Result<AppConnectionState, String> {
+    services::set_auto_tun(app, &store, &runtime, enabled)
+}
+
+#[tauri::command]
+fn restart_as_admin(app: tauri::AppHandle) -> Result<(), String> {
+    process_utils::relaunch_elevated_delayed()?;
+    app.exit(0);
+    Ok(())
+}
+
+#[tauri::command]
 fn list_clash_connections(
     store: State<'_, ConnectionStore>,
 ) -> Result<Vec<clash_controller::ClashConnection>, String> {
@@ -1076,18 +1210,53 @@ pub fn run() {
         .manage(ConnectionStore::default())
         .manage(core_runtime::CoreRuntime::default())
         .manage(clash_realtime::ClashRealtimeHub::default())
+        .manage(TrayMenuState::default())
         .setup(|app| {
             let store = app.state::<ConnectionStore>();
             let _ = system_proxy::recover_stale(&store.proxy);
             services::load_connection_settings(app.handle(), &store);
             services::load_speed_test_settings(app.handle());
-            v2ray::start_subscription_scheduler(app.handle().clone());
-            clash_profiles::start_scheduler(app.handle().clone());
+            let tray_status = MenuItem::with_id(app, "tray-status", "KiNGO", false, None::<&str>)?;
+            let tray_connect =
+                MenuItem::with_id(app, "tray-connect-toggle", "连接", true, None::<&str>)?;
+            let tray_best_route = MenuItem::with_id(
+                app,
+                "tray-best-route",
+                "自动选择最佳线路",
+                true,
+                None::<&str>,
+            )?;
+            let tray_rule =
+                CheckMenuItem::with_id(app, "tray-rule", "规则模式", true, true, None::<&str>)?;
+            let tray_global =
+                CheckMenuItem::with_id(app, "tray-global", "全局模式", true, false, None::<&str>)?;
+            let tray_tun =
+                CheckMenuItem::with_id(app, "tray-tun", "TUN 模式", true, false, None::<&str>)?;
             let tray_menu = MenuBuilder::new(app)
-                .text("show", "显示 KiNGO")
+                .item(&tray_status)
                 .separator()
+                .item(&tray_connect)
+                .item(&tray_best_route)
+                .separator()
+                .item(&tray_rule)
+                .item(&tray_global)
+                .item(&tray_tun)
+                .separator()
+                .text("show", "显示 KiNGO")
                 .text("quit", "退出 KiNGO")
                 .build()?;
+            *app.state::<TrayMenuState>()
+                .0
+                .lock()
+                .map_err(|_| std::io::Error::other("tray menu state unavailable"))? =
+                Some(TrayMenuHandles {
+                    status: tray_status,
+                    connect: tray_connect,
+                    best_route: tray_best_route,
+                    rule: tray_rule,
+                    global: tray_global,
+                    tun: tray_tun,
+                });
             let tray_icon = tauri::image::Image::from_bytes(include_bytes!("../icons/tray.png"))?;
             TrayIconBuilder::with_id("kingo-tray")
                 .icon(tray_icon)
@@ -1095,13 +1264,56 @@ pub fn run() {
                 .menu(&tray_menu)
                 .show_menu_on_left_click(false)
                 .on_menu_event(|app, event| match event.id().as_ref() {
-                    "show" => {
-                        if let Some(window) = app.get_webview_window("main") {
-                            let _ = window.show();
-                            let _ = window.unminimize();
-                            let _ = window.set_focus();
+                    "show" => show_main_window(app),
+                    "tray-connect-toggle" => run_tray_action(app, |app| {
+                        let store = app.state::<ConnectionStore>();
+                        let runtime = app.state::<core_runtime::CoreRuntime>();
+                        let state = services::snapshot(&store);
+                        if state.connected || state.connecting || state.stage != "idle" {
+                            services::cancel_connection(&app, &store, &runtime)
+                        } else {
+                            let selected = store
+                                .selected_route
+                                .lock()
+                                .map_err(|_| "线路选择状态不可用")?
+                                .clone();
+                            services::start_public_connection(
+                                app.clone(),
+                                &store,
+                                &runtime,
+                                selected,
+                            )
                         }
+                    }),
+                    "tray-best-route" => run_tray_action(app, |app| {
+                        let store = app.state::<ConnectionStore>();
+                        let runtime = app.state::<core_runtime::CoreRuntime>();
+                        services::start_public_connection(app.clone(), &store, &runtime, None)
+                    }),
+                    "tray-rule" | "tray-global" => {
+                        let mode = if event.id().as_ref() == "tray-global" {
+                            "global"
+                        } else {
+                            "rule"
+                        }
+                        .to_string();
+                        run_tray_action(app, move |app| {
+                            let store = app.state::<ConnectionStore>();
+                            let runtime = app.state::<core_runtime::CoreRuntime>();
+                            let mut settings = services::get_auto_routing_settings(&app);
+                            settings.mode = mode;
+                            services::set_auto_routing_settings(&app, &store, &runtime, settings)?;
+                            services::emit_snapshot(&app, &store);
+                            Ok(())
+                        });
                     }
+                    "tray-tun" => run_tray_action(app, |app| {
+                        let store = app.state::<ConnectionStore>();
+                        let runtime = app.state::<core_runtime::CoreRuntime>();
+                        let enabled = !services::snapshot(&store).tun_enabled;
+                        services::set_auto_tun(app.clone(), &store, &runtime, enabled)?;
+                        Ok(())
+                    }),
                     "quit" => app.exit(0),
                     _ => {}
                 })
@@ -1117,12 +1329,7 @@ pub fn run() {
                             ..
                         }
                     ) {
-                        let app = tray.app_handle();
-                        if let Some(window) = app.get_webview_window("main") {
-                            let _ = window.show();
-                            let _ = window.unminimize();
-                            let _ = window.set_focus();
-                        }
+                        show_main_window(tray.app_handle());
                     }
                 })
                 .build(app)?;
@@ -1136,6 +1343,8 @@ pub fn run() {
             Ok(())
         })
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_process::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .invoke_handler(tauri::generate_handler![
             get_app_state,
             enable_uwp_loopback,
@@ -1156,10 +1365,12 @@ pub fn run() {
             set_auto_failover,
             get_speed_test_settings,
             set_speed_test_settings,
+            test_speed_test_url,
             list_core_profiles,
             list_core_status,
             check_core_updates,
             check_app_update,
+            prepare_app_update,
             update_core,
             restore_bundled_core,
             get_clash_core,
@@ -1199,6 +1410,8 @@ pub fn run() {
             set_clash_boolean_setting,
             set_clash_system_proxy,
             set_clash_tun,
+            set_auto_tun,
+            restart_as_admin,
             list_clash_connections,
             close_all_clash_connections,
             close_clash_connection,

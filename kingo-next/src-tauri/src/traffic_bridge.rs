@@ -1,27 +1,152 @@
 use std::{
+    collections::HashMap,
     io::{Read, Write},
-    net::{Shutdown, TcpListener, TcpStream},
+    net::{IpAddr, Ipv4Addr, Ipv6Addr, Shutdown, TcpListener, TcpStream, ToSocketAddrs},
     sync::{
-        atomic::{AtomicBool, AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU16, AtomicU64, Ordering},
         Arc, Mutex,
     },
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
+
+use crate::geo_rules::CountryRules;
 
 #[derive(Clone, Default)]
 pub struct BridgeRuntime {
     active: Arc<Mutex<Option<BridgeHandle>>>,
     download_total: Arc<AtomicU64>,
     upload_total: Arc<AtomicU64>,
+    routing: Arc<Mutex<RoutingPolicy>>,
+    country_rules: Arc<Mutex<Arc<CountryRules>>>,
+    resolution_cache: Arc<Mutex<HashMap<String, (Instant, bool)>>>,
+    connections: Arc<Mutex<HashMap<u64, TcpStream>>>,
+    next_connection_id: Arc<AtomicU64>,
 }
 
 struct BridgeHandle {
     stop: Arc<AtomicBool>,
+    socks_port: Arc<AtomicU16>,
+    listener_port: u16,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RouteMode {
+    Rule,
+    Global,
+    Direct,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RouteAction {
+    Direct,
+    Proxy,
+    Block,
+}
+
+#[derive(Clone, Debug)]
+struct RouteRule {
+    target: String,
+    action: RouteAction,
+}
+
+#[derive(Clone, Debug)]
+struct RoutingPolicy {
+    mode: RouteMode,
+    rules: Vec<RouteRule>,
+}
+
+impl Default for RoutingPolicy {
+    fn default() -> Self {
+        Self {
+            mode: RouteMode::Global,
+            rules: Vec::new(),
+        }
+    }
+}
+
+impl RoutingPolicy {
+    fn from_parts(mode: &str, rules: Vec<(String, String)>) -> Result<Self, String> {
+        let mode = match mode {
+            "rule" => RouteMode::Rule,
+            "global" => RouteMode::Global,
+            "direct" => RouteMode::Direct,
+            _ => return Err("本地分流模式无效".into()),
+        };
+        let mut normalized_rules = Vec::with_capacity(rules.len());
+        for (target, action) in rules {
+            let action = match action.as_str() {
+                "direct" => RouteAction::Direct,
+                "proxy" => RouteAction::Proxy,
+                "block" => RouteAction::Block,
+                _ => return Err("本地分流动作无效".into()),
+            };
+            normalized_rules.push(RouteRule {
+                target: target.trim().trim_end_matches('.').to_ascii_lowercase(),
+                action,
+            });
+        }
+        Ok(Self {
+            mode,
+            rules: normalized_rules,
+        })
+    }
+
+    fn action_for(&self, host: &str, country_rules: &CountryRules) -> RouteAction {
+        let host = host.trim().trim_end_matches('.').to_ascii_lowercase();
+        if local_target(&host) {
+            return RouteAction::Direct;
+        }
+        if let Some(rule) = self
+            .rules
+            .iter()
+            .find(|rule| target_matches(&rule.target, &host))
+        {
+            return rule.action;
+        }
+        match self.mode {
+            RouteMode::Global => RouteAction::Proxy,
+            RouteMode::Direct => RouteAction::Direct,
+            RouteMode::Rule if country_rules.matches_host(&host) => RouteAction::Direct,
+            RouteMode::Rule => RouteAction::Proxy,
+        }
+    }
+
+    fn should_try_cn_ip_fallback(&self, host: &str, country_rules: &CountryRules) -> bool {
+        if self.mode != RouteMode::Rule || local_target(host) || country_rules.matches_host(host) {
+            return false;
+        }
+        !self
+            .rules
+            .iter()
+            .any(|rule| target_matches(&rule.target, host))
+    }
 }
 
 impl BridgeRuntime {
+    pub fn update_routing(&self, mode: &str, rules: Vec<(String, String)>) -> Result<(), String> {
+        let policy = RoutingPolicy::from_parts(mode, rules)?;
+        *self.routing.lock().map_err(|_| "本地分流策略状态不可用")? = policy;
+        self.close_connections();
+        Ok(())
+    }
+
+    pub fn set_country_rules(&self, rules: Arc<CountryRules>) -> Result<(), String> {
+        *self
+            .country_rules
+            .lock()
+            .map_err(|_| "中国路由规则状态不可用")? = rules;
+        self.close_connections();
+        Ok(())
+    }
+
     pub fn start(&self, socks_port: u16) -> Result<u16, String> {
+        if let Ok(active) = self.active.lock() {
+            if let Some(handle) = active.as_ref() {
+                handle.socks_port.store(socks_port, Ordering::Release);
+                return Ok(handle.listener_port);
+            }
+        }
         self.stop();
         self.download_total.store(0, Ordering::Relaxed);
         self.upload_total.store(0, Ordering::Relaxed);
@@ -35,21 +160,48 @@ impl BridgeRuntime {
             .set_nonblocking(true)
             .map_err(|error| format!("本地代理转接配置失败：{error}"))?;
         let stop = Arc::new(AtomicBool::new(false));
+        let upstream_port = Arc::new(AtomicU16::new(socks_port));
         let worker_stop = stop.clone();
+        let worker_upstream_port = upstream_port.clone();
         let download_total = self.download_total.clone();
         let upload_total = self.upload_total.clone();
+        let routing = self.routing.clone();
+        let country_rules = self.country_rules.clone();
+        let resolution_cache = self.resolution_cache.clone();
+        let connections = self.connections.clone();
+        let next_connection_id = self.next_connection_id.clone();
         thread::spawn(move || {
             while !worker_stop.load(Ordering::Relaxed) {
                 match listener.accept() {
                     Ok((stream, _)) => {
+                        let connection_id = next_connection_id.fetch_add(1, Ordering::Relaxed);
+                        if let Ok(clone) = stream.try_clone() {
+                            if let Ok(mut active) = connections.lock() {
+                                active.insert(connection_id, clone);
+                            }
+                        }
                         let download_total = download_total.clone();
                         let upload_total = upload_total.clone();
+                        let routing = routing.clone();
+                        let country_rules = country_rules.clone();
+                        let resolution_cache = resolution_cache.clone();
+                        let connections = connections.clone();
+                        let socks_port = worker_upstream_port.load(Ordering::Acquire);
                         thread::spawn(move || {
                             let _ = stream.set_nonblocking(false);
-                            if let Err(error) =
-                                handle_client(stream, socks_port, download_total, upload_total)
-                            {
+                            if let Err(error) = handle_client(
+                                stream,
+                                socks_port,
+                                routing,
+                                country_rules,
+                                resolution_cache,
+                                download_total,
+                                upload_total,
+                            ) {
                                 eprintln!("[traffic-bridge] {error}");
+                            }
+                            if let Ok(mut active) = connections.lock() {
+                                active.remove(&connection_id);
                             }
                         });
                     }
@@ -60,8 +212,28 @@ impl BridgeRuntime {
                 }
             }
         });
-        *self.active.lock().map_err(|_| "本地代理转接状态不可用")? = Some(BridgeHandle { stop });
+        if let Ok(mut active) = self.active.lock() {
+            *active = Some(BridgeHandle {
+                stop,
+                socks_port: upstream_port,
+                listener_port: port,
+            });
+        } else {
+            return Err("local proxy bridge state unavailable".into());
+        }
         Ok(port)
+    }
+
+    pub fn switch_upstream(&self, socks_port: u16) -> Result<(), String> {
+        let active = self
+            .active
+            .lock()
+            .map_err(|_| "local proxy bridge state unavailable".to_string())?;
+        let handle = active
+            .as_ref()
+            .ok_or_else(|| "local proxy bridge is not running".to_string())?;
+        handle.socks_port.store(socks_port, Ordering::Release);
+        Ok(())
     }
 
     pub fn stop(&self) {
@@ -70,6 +242,7 @@ impl BridgeRuntime {
                 handle.stop.store(true, Ordering::Relaxed);
             }
         }
+        self.close_connections();
     }
 
     pub fn traffic(&self) -> (u64, u64) {
@@ -78,11 +251,22 @@ impl BridgeRuntime {
             self.upload_total.load(Ordering::Relaxed),
         )
     }
+
+    fn close_connections(&self) {
+        if let Ok(mut connections) = self.connections.lock() {
+            for (_, stream) in connections.drain() {
+                let _ = stream.shutdown(Shutdown::Both);
+            }
+        }
+    }
 }
 
 fn handle_client(
     mut client: TcpStream,
     socks_port: u16,
+    routing: Arc<Mutex<RoutingPolicy>>,
+    country_rules: Arc<Mutex<Arc<CountryRules>>>,
+    resolution_cache: Arc<Mutex<HashMap<String, (Instant, bool)>>>,
     download_total: Arc<AtomicU64>,
     upload_total: Arc<AtomicU64>,
 ) -> Result<(), String> {
@@ -120,7 +304,29 @@ fn handle_client(
         };
         (host, port, Some(path.to_string()))
     };
-    let mut upstream = connect_socks5(socks_port, &host, port)?;
+    let (mut action, try_cn_ip_fallback, country_rules) = {
+        let routing = routing.lock().map_err(|_| "本地分流策略状态不可用")?;
+        let country_rules = country_rules.lock().map_err(|_| "中国路由规则状态不可用")?;
+        (
+            routing.action_for(&host, &country_rules),
+            routing.should_try_cn_ip_fallback(&host, &country_rules),
+            country_rules.clone(),
+        )
+    };
+    if try_cn_ip_fallback && resolved_host_is_cn(&host, port, &country_rules, &resolution_cache) {
+        action = RouteAction::Direct;
+    }
+    if action == RouteAction::Block {
+        client
+            .write_all(b"HTTP/1.1 403 Forbidden\r\nConnection: close\r\nContent-Length: 0\r\n\r\n")
+            .map_err(|error| error.to_string())?;
+        return Ok(());
+    }
+    let mut upstream = match action {
+        RouteAction::Direct => connect_direct(&host, port)?,
+        RouteAction::Proxy => connect_socks5(socks_port, &host, port)?,
+        RouteAction::Block => unreachable!("blocked requests return before connecting"),
+    };
     if method.eq_ignore_ascii_case("CONNECT") {
         client
             .write_all(b"HTTP/1.1 200 Connection established\r\n\r\n")
@@ -149,6 +355,119 @@ fn handle_client(
         }
     }
     relay(client, upstream, download_total, upload_total)
+}
+
+fn resolved_host_is_cn(
+    host: &str,
+    port: u16,
+    country_rules: &CountryRules,
+    cache: &Arc<Mutex<HashMap<String, (Instant, bool)>>>,
+) -> bool {
+    const POSITIVE_TTL: Duration = Duration::from_secs(10 * 60);
+    const NEGATIVE_TTL: Duration = Duration::from_secs(60);
+    let key = host.trim().trim_end_matches('.').to_ascii_lowercase();
+    if let Ok(values) = cache.lock() {
+        if let Some((cached_at, is_cn)) = values.get(&key) {
+            let ttl = if *is_cn { POSITIVE_TTL } else { NEGATIVE_TTL };
+            if cached_at.elapsed() < ttl {
+                return *is_cn;
+            }
+        }
+    }
+    let is_cn = (key.as_str(), port)
+        .to_socket_addrs()
+        .map(|addresses| {
+            addresses
+                .into_iter()
+                .any(|item| country_rules.matches_ip(item.ip()))
+        })
+        .unwrap_or(false);
+    if let Ok(mut values) = cache.lock() {
+        if values.len() >= 2048 {
+            values.retain(|_, (cached_at, is_cn)| {
+                cached_at.elapsed() < if *is_cn { POSITIVE_TTL } else { NEGATIVE_TTL }
+            });
+        }
+        values.insert(key, (Instant::now(), is_cn));
+    }
+    is_cn
+}
+
+fn target_matches(target: &str, host: &str) -> bool {
+    if let Some((network, prefix)) = target.split_once('/') {
+        let Ok(network) = network.parse::<IpAddr>() else {
+            return false;
+        };
+        let Ok(prefix) = prefix.parse::<u8>() else {
+            return false;
+        };
+        let Ok(host) = host.parse::<IpAddr>() else {
+            return false;
+        };
+        return ip_in_network(host, network, prefix);
+    }
+    if target.parse::<IpAddr>().is_ok() {
+        return host == target;
+    }
+    host == target || host.ends_with(&format!(".{target}"))
+}
+
+fn ip_in_network(address: IpAddr, network: IpAddr, prefix: u8) -> bool {
+    match (address, network) {
+        (IpAddr::V4(address), IpAddr::V4(network)) if prefix <= 32 => {
+            let mask = if prefix == 0 {
+                0
+            } else {
+                u32::MAX << (32 - prefix)
+            };
+            u32::from(address) & mask == u32::from(network) & mask
+        }
+        (IpAddr::V6(address), IpAddr::V6(network)) if prefix <= 128 => {
+            let mask = if prefix == 0 {
+                0
+            } else {
+                u128::MAX << (128 - prefix)
+            };
+            u128::from(address) & mask == u128::from(network) & mask
+        }
+        _ => false,
+    }
+}
+
+fn local_target(host: &str) -> bool {
+    if host == "localhost" || host.ends_with(".localhost") || host.ends_with(".local") {
+        return true;
+    }
+    host.parse::<IpAddr>()
+        .map(is_private_or_local)
+        .unwrap_or(false)
+}
+
+fn is_private_or_local(address: IpAddr) -> bool {
+    match address {
+        IpAddr::V4(address) => {
+            address.is_private()
+                || address.is_loopback()
+                || address.is_link_local()
+                || address.is_unspecified()
+                || address == Ipv4Addr::BROADCAST
+        }
+        IpAddr::V6(address) => {
+            address.is_loopback()
+                || address.is_unspecified()
+                || address.is_unique_local()
+                || address.is_unicast_link_local()
+                || address == Ipv6Addr::LOCALHOST
+        }
+    }
+}
+
+fn connect_direct(host: &str, port: u16) -> Result<TcpStream, String> {
+    let stream =
+        TcpStream::connect((host, port)).map_err(|error| format!("直连目标失败：{error}"))?;
+    stream.set_read_timeout(Some(Duration::from_secs(8))).ok();
+    stream.set_write_timeout(Some(Duration::from_secs(8))).ok();
+    Ok(stream)
 }
 
 fn split_authority(authority: &str, default_port: u16) -> Result<(String, u16), String> {
@@ -316,6 +635,121 @@ mod tests {
         let mut pong = [0_u8; 4];
         client.read_exact(&mut pong).unwrap();
         assert_eq!(&pong, b"pong");
+        bridge.stop();
+    }
+
+    #[test]
+    fn custom_rules_override_every_fallback_mode() {
+        let country_rules = CountryRules::default();
+        for mode in ["rule", "global", "direct"] {
+            let policy = RoutingPolicy::from_parts(
+                mode,
+                vec![
+                    ("example.com".into(), "block".into()),
+                    ("1.1.1.0/24".into(), "direct".into()),
+                ],
+            )
+            .unwrap();
+            assert_eq!(
+                policy.action_for("api.example.com", &country_rules),
+                RouteAction::Block
+            );
+            assert_eq!(
+                policy.action_for("1.1.1.1", &country_rules),
+                RouteAction::Direct
+            );
+        }
+    }
+
+    #[test]
+    fn rule_mode_bypasses_local_and_cn_targets() {
+        let policy = RoutingPolicy::from_parts("rule", Vec::new()).unwrap();
+        let country_rules = CountryRules::with_root_domain("example.cn");
+        assert_eq!(
+            policy.action_for("news.example.cn", &country_rules),
+            RouteAction::Direct
+        );
+        assert_eq!(
+            policy.action_for("192.168.1.1", &country_rules),
+            RouteAction::Direct
+        );
+        assert_eq!(
+            policy.action_for("example.com", &country_rules),
+            RouteAction::Proxy
+        );
+    }
+
+    #[test]
+    fn rule_mode_uses_resolved_cn_ip_only_as_an_unmatched_fallback() {
+        let policy = RoutingPolicy::from_parts("rule", Vec::new()).unwrap();
+        let rules = CountryRules::with_ipv4_network(Ipv4Addr::LOCALHOST, 8);
+        assert!(policy.should_try_cn_ip_fallback("unlisted.example", &rules));
+        let cache = Arc::new(Mutex::new(HashMap::new()));
+        assert!(resolved_host_is_cn("localhost", 80, &rules, &cache));
+
+        let explicit_proxy =
+            RoutingPolicy::from_parts("rule", vec![("unlisted.example".into(), "proxy".into())])
+                .unwrap();
+        assert!(!explicit_proxy.should_try_cn_ip_fallback("unlisted.example", &rules));
+    }
+
+    #[test]
+    fn global_mode_still_bypasses_local_networks() {
+        let policy = RoutingPolicy::from_parts("global", Vec::new()).unwrap();
+        let country_rules = CountryRules::default();
+        assert_eq!(
+            policy.action_for("localhost", &country_rules),
+            RouteAction::Direct
+        );
+        assert_eq!(
+            policy.action_for("192.168.1.1", &country_rules),
+            RouteAction::Direct
+        );
+        assert_eq!(
+            policy.action_for("example.com", &country_rules),
+            RouteAction::Proxy
+        );
+    }
+
+    #[test]
+    fn direct_and_block_actions_do_not_require_the_socks_core() {
+        let echo = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let echo_port = echo.local_addr().unwrap().port();
+        thread::spawn(move || {
+            let (mut stream, _) = echo.accept().unwrap();
+            let mut value = [0_u8; 4];
+            stream.read_exact(&mut value).unwrap();
+            stream.write_all(b"pong").unwrap();
+        });
+
+        let bridge = BridgeRuntime::default();
+        bridge.update_routing("direct", Vec::new()).unwrap();
+        let bridge_port = bridge.start(1).unwrap();
+        let mut client = TcpStream::connect(("127.0.0.1", bridge_port)).unwrap();
+        client
+            .write_all(
+                format!("CONNECT 127.0.0.1:{echo_port} HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")
+                    .as_bytes(),
+            )
+            .unwrap();
+        let mut response = [0_u8; 39];
+        client.read_exact(&mut response).unwrap();
+        assert!(String::from_utf8_lossy(&response).starts_with("HTTP/1.1 200"));
+        client.write_all(b"ping").unwrap();
+        let mut pong = [0_u8; 4];
+        client.read_exact(&mut pong).unwrap();
+        assert_eq!(&pong, b"pong");
+
+        bridge
+            .update_routing("global", vec![("blocked.example".into(), "block".into())])
+            .unwrap();
+        let mut blocked = TcpStream::connect(("127.0.0.1", bridge_port)).unwrap();
+        blocked
+            .write_all(b"CONNECT blocked.example:443 HTTP/1.1\r\nHost: blocked.example\r\n\r\n")
+            .unwrap();
+        let mut denied = [0_u8; 24];
+        blocked.read_exact(&mut denied).unwrap();
+        assert!(String::from_utf8_lossy(&denied).starts_with("HTTP/1.1 403"));
         bridge.stop();
     }
 }
