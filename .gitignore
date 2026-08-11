@@ -1,6 +1,6 @@
 node_modules/
-app/dist/
-app/out/
+kingo-next/dist/
+kingo-next/src-tauri/target/
 chrome-user-data/
 .claude/
 
@@ -19,7 +19,7 @@ chrome-user-data/
 /Browser/
 /wget.exe
 
-# Original batch scripts (replaced by Electron app)
+# Original batch scripts
 *.cmd
 
 # IDE
@@ -33,7 +33,6 @@ chrome-user-data/
 *.7z.exe
 git-installer.exe
 screenshot*.png
-app/dev-output.txt
 
 # Windows compatibility (large binaries)
 /win7-win8/
@@ -43,6 +42,7 @@ KiNGO-GUI-实施计划.md
 KINGO_ROADMAP.md
 KiNGO-GUI-实施计划.md
 MyNodes-V2rayN-Rebuild-Plan.md
+/.codex/
 
 # Local reference source trees (not part of KiNGO release)
 /clash-verge-rev-dev/

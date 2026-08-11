@@ -12,7 +12,7 @@
 
 ## 项目简介
 
-KiNGO 2.0 已迁移到 **Tauri 2 + Rust + React + TypeScript**。当前正式构建来自 [`kingo-next`](./kingo-next)，仓库中的旧 Electron 工程仅用于历史参考，不参与 2.0 安装包构建。
+KiNGO 2.0 使用 **Tauri 2 + Rust + React + TypeScript** 构建。仓库只维护 [`kingo-next`](./kingo-next) 新架构；安装包、软件内更新与 GitHub Actions 均以该目录为唯一源码入口。
 
 KiNGO 提供三种彼此独立的使用入口：
 
@@ -134,6 +134,8 @@ kingo-next/
 ```
 
 GitHub Actions 会在拉取请求中验证 Windows 安装包构建，并在推送 `v*` tag 时创建 Release、构建 NSIS 安装包并上传产物。
+
+仓库默认分支为 `master`。功能开发、文档和发布配置都以该分支为准，历史版本通过 [Releases](https://github.com/KINGHY02/KiNGO/releases) 与 Git 标签保留。
 
 ## 当前边界
 

@@ -65,7 +65,7 @@ fn update_tray_visual(app: &tauri::AppHandle, state: &AppConnectionState) {
         return;
     };
     let bytes: &'static [u8] = if state.connected {
-        include_bytes!("../../../icons/32x32_Connecting.png")
+        include_bytes!("../icons/tray-connecting.png")
     } else {
         include_bytes!("../icons/tray.png")
     };

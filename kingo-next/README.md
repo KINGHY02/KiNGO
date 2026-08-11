@@ -1,6 +1,6 @@
 # KiNGO 2.0
 
-这里是 KiNGO 当前正式架构：Tauri 2、Rust、React 19、TypeScript 和 Vite。
+这里是 KiNGO 唯一维护的正式架构：Tauri 2、Rust、React 19、TypeScript 和 Vite。旧 Electron 架构不再保留在主仓库中。
 
 完整的产品介绍、安装说明和功能清单请查看[仓库主 README](../README.md)。
 
