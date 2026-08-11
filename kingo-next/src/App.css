@@ -40,6 +40,7 @@ body{min-width:820px;min-height:600px}.app-shell{min-height:600px}.brand{padding
 .topbar{height:clamp(60px,9.5vh,72px);padding-inline:clamp(22px,2.8vw,34px)}
 .page{padding-block:clamp(14px,3.2vh,28px);padding-inline:clamp(20px,2.8vw,34px)}
 .hero-card{padding-block:clamp(20px,3.4vh,28px);padding-inline:clamp(22px,3.5vw,42px)}
+.home-refresh-feedback{display:block;margin-top:8px;color:var(--theme-muted);font-size:12px}
 
 /* Speed-test endpoints: presets remain editable and batch fallback stays explicit. */
 .speed-endpoint-list{display:flex;flex-direction:column;gap:12px;margin-bottom:14px}

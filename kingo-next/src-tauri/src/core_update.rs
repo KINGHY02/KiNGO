@@ -121,6 +121,7 @@ pub struct CoreUpdateResult {
     pub core_id: String,
     pub version: String,
     pub checksum_verified: bool,
+    pub connection_restarted: bool,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -415,6 +416,17 @@ fn verify_checksum(file: &Path, checksum_file: &Path, asset_name: &str) -> Resul
 }
 
 pub fn update(app: &AppHandle, core_id: &str) -> Result<CoreUpdateResult, String> {
+    update_with_before_install(app, core_id, || Ok(()))
+}
+
+pub fn update_with_before_install<F>(
+    app: &AppHandle,
+    core_id: &str,
+    before_install: F,
+) -> Result<CoreUpdateResult, String>
+where
+    F: FnOnce() -> Result<(), String>,
+{
     let profile = cores::profiles()
         .into_iter()
         .find(|p| p.id == core_id)
@@ -447,6 +459,13 @@ pub fn update(app: &AppHandle, core_id: &str) -> Result<CoreUpdateResult, String
     let staged = target.with_extension("exe.new");
     let backup = target.with_extension("exe.bak");
     fs::copy(executable, &staged).map_err(|e| e.to_string())?;
+    // Keep the current proxy core alive for release lookup, download, unpacking,
+    // and checksum verification. The caller only stops it at this final swap.
+    if let Err(error) = before_install() {
+        let _ = fs::remove_file(&staged);
+        let _ = fs::remove_dir_all(&temp);
+        return Err(error);
+    }
     if target.exists() {
         let _ = fs::remove_file(&backup);
         fs::rename(&target, &backup).map_err(|e| e.to_string())?;
@@ -463,6 +482,7 @@ pub fn update(app: &AppHandle, core_id: &str) -> Result<CoreUpdateResult, String
         core_id: core_id.into(),
         version: release.tag_name,
         checksum_verified,
+        connection_restarted: false,
     })
 }
 

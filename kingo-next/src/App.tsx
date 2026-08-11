@@ -479,9 +479,12 @@ function App() {
 
   async function refreshExit() {
     try {
-      await invoke("refresh_exit_info");
+      const refreshed = await invoke<AppState>("refresh_exit_info");
+      setState(refreshed);
+      return refreshed;
     } catch (error) {
       setState((value) => ({ ...value, error: String(error) }));
+      throw error;
     }
   }
 
@@ -564,9 +567,11 @@ function Home({
 }: {
   state: AppState;
   onToggle: () => void;
-  onRefresh: () => void;
+  onRefresh: () => Promise<AppState>;
   onNavigate: (page: Page) => void;
 }) {
+  const [refreshingExit, setRefreshingExit] = useState(false);
+  const [exitRefreshMessage, setExitRefreshMessage] = useState<string | null>(null);
   const [routing, setRouting] = useState<AutoRoutingSettings>({ mode: "rule", rules: [] });
   const [routingSaving, setRoutingSaving] = useState(false);
   useEffect(() => {
@@ -675,9 +680,17 @@ function Home({
             <button className="home-route-action" onClick={() => onNavigate("routes")}>{state.connected ? "更换" : "选择"}</button>
           </div>
           {state.connected && <div className="small-actions">
-            {state.connected && <button onClick={onRefresh} disabled={state.connecting}>刷新出口 IP</button>}
+            {state.connected && <button onClick={() => {
+              setRefreshingExit(true);
+              setExitRefreshMessage(null);
+              void onRefresh()
+                .then(refreshed => setExitRefreshMessage(`已重新查询：${refreshed.exitIp ?? "未知 IP"}`))
+                .catch(error => setExitRefreshMessage(`刷新失败：${String(error)}`))
+                .finally(() => setRefreshingExit(false));
+            }} disabled={state.connecting || refreshingExit}>{refreshingExit ? "查询中…" : "刷新出口 IP"}</button>}
             {state.connected && <button onClick={() => onNavigate("connections")}>连接详情</button>}
           </div>}
+          {state.connected && exitRefreshMessage && <small className="home-refresh-feedback">{exitRefreshMessage}</small>}
         </div>
         <div
           className={
@@ -768,6 +781,8 @@ function Workspace({
   const [updateSummary, setUpdateSummary] = useState<RouteUpdateSummary | null>(
     null,
   );
+  const [refreshingRoutes, setRefreshingRoutes] = useState(false);
+  const [routeRefreshMessage, setRouteRefreshMessage] = useState<string | null>(null);
   const [coreVersions, setCoreVersions] = useState<CoreVersionInfo[]>([]);
   const [checkingCores, setCheckingCores] = useState(false);
   const [updatingCore, setUpdatingCore] = useState<string | null>(null);
@@ -866,6 +881,19 @@ function Workspace({
   const usableRoutes = routes.filter((route) => route.lastError == null);
   const failedRoutes = routes.length - usableRoutes.length;
   const latestSuccessAt = Math.max(0, ...routes.map((route) => route.lastSuccessAt ?? 0));
+  const refreshRoutes = async () => {
+    setRefreshingRoutes(true);
+    setRouteRefreshMessage(null);
+    try {
+      const refreshed = await invoke<Route[]>("list_public_routes");
+      setRoutes(refreshed);
+      setRouteRefreshMessage(`已重新载入 ${refreshed.length} 条线路 · ${new Date().toLocaleTimeString()}`);
+    } catch (error) {
+      setRouteRefreshMessage(`刷新线路失败：${String(error)}`);
+    } finally {
+      setRefreshingRoutes(false);
+    }
+  };
   const checkCoreUpdates = async () => {
     setCheckingCores(true);
     setCoreMessage(null);
@@ -880,7 +908,7 @@ function Workspace({
   const installCoreUpdate = async (core: CoreVersionInfo) => {
     if (
       !window.confirm(
-        `更新 ${core.name} 到 ${core.latestVersion ?? "最新版本"}？\n更新时会停止当前代理核心。`,
+        `更新 ${core.name} 到 ${core.latestVersion ?? "最新版本"}？\nKiNGO 会保持代理完成下载和校验，仅在替换核心时短暂重连。`,
       )
     )
       return;
@@ -890,11 +918,21 @@ function Workspace({
       const result = await invoke<{
         version: string;
         checksumVerified: boolean;
+        connectionRestarted: boolean;
       }>("update_core", { coreId: core.coreId });
+      const installedVersion = result.version.replace(/^v/i, "");
+      setCoreVersions(values => values.map(value => value.coreId === core.coreId ? {
+        ...value,
+        currentVersion: installedVersion,
+        latestVersion: installedVersion,
+        outdated: false,
+        available: true,
+        source: "user",
+        error: null,
+      } : value));
       setCoreMessage(
-        `${core.name} 已更新至 ${result.version}${result.checksumVerified ? "，SHA-256 校验通过" : ""}`,
+        `${core.name} 已更新至 ${result.version}${result.checksumVerified ? "，SHA-256 校验通过" : ""}${result.connectionRestarted ? "，正在恢复代理连接" : ""}`,
       );
-      await checkCoreUpdates();
     } catch (error) {
       setCoreMessage(`${core.name} 更新失败：${String(error)}`);
     } finally {
@@ -1179,7 +1217,7 @@ function Workspace({
             <button
               className="settings-action"
               disabled={
-                checkingCores || updatingCore != null || state.connected
+                checkingCores || updatingCore != null || state.connecting
               }
               onClick={() => void checkCoreUpdates()}
             >
@@ -1194,11 +1232,6 @@ function Workspace({
               )}
             </button>
           </div>
-          {state.connected && (
-            <div className="settings-notice">
-              <ExclamationCircleOutlined /> 请先断开连接，再检查或更新核心。
-            </div>
-          )}
           {coreMessage && (
             <div className="settings-notice info">{coreMessage}</div>
           )}
@@ -1265,7 +1298,7 @@ function Workspace({
                         !core.updateSupported ||
                         (!core.outdated && core.available) ||
                         updatingCore != null ||
-                        state.connected
+                        state.connecting
                       }
                       onClick={() => void installCoreUpdate(core)}
                     >
@@ -1279,7 +1312,8 @@ function Workspace({
                       disabled={
                         core.source !== "user" ||
                         updatingCore != null ||
-                        state.connected
+                        state.connected ||
+                        state.connecting
                       }
                       onClick={() => void restoreCore(core)}
                       title="恢复内置版本"
@@ -1428,7 +1462,7 @@ function Workspace({
       <div className="workspace-toolbar">
         <div>
           <p className="muted">
-            {mode === "auto"
+            {routeRefreshMessage ?? (mode === "auto"
               ? updateProgress
                 ? `正在更新 ${updateProgress.completed}/${updateProgress.total} · ${updateProgress.routeName}`
                 : progress
@@ -1442,7 +1476,7 @@ function Workspace({
                         ? "最近一次测速已取消"
                         : `测速完成：${testSummary.succeeded}/${testSummary.total} 条可用`
                       : `当前策略：${selectedRouteName}`
-              : "功能区正在接入统一服务层"}
+              : "功能区正在接入统一服务层")}
           </p>
         </div>
         <div className="toolbar-actions">
@@ -1452,6 +1486,7 @@ function Workspace({
                 className="primary-button"
                 disabled={state.connected || updateProgress != null}
                 onClick={() => {
+                  setRouteRefreshMessage(null);
                   setTestSummary(null);
                   void invoke(
                     state.connecting
@@ -1463,12 +1498,13 @@ function Workspace({
                 {state.connecting ? "取消测速" : "测试全部线路"}
               </button>
               <button
-                disabled={state.connected || state.connecting}
+                disabled={state.connecting}
                 onClick={() => {
                   if (updateProgress) {
                     void invoke("cancel_public_route_update");
                     return;
                   }
+                  setRouteRefreshMessage(null);
                   setUpdateSummary(null);
                   setUpdateProgress({
                     completed: 0,
@@ -1493,11 +1529,10 @@ function Workspace({
                 {updateProgress ? "取消更新" : "更新线路"}
               </button>
               <button
-                onClick={() =>
-                  void invoke<Route[]>("list_public_routes").then(setRoutes)
-                }
+                disabled={refreshingRoutes}
+                onClick={() => void refreshRoutes()}
               >
-                刷新
+                {refreshingRoutes ? "刷新中…" : "刷新列表"}
               </button>
             </>
           )}

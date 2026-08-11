@@ -266,7 +266,7 @@ fn disconnect(
 fn refresh_exit_info(
     app: tauri::AppHandle,
     store: State<'_, ConnectionStore>,
-) -> Result<(), String> {
+) -> Result<AppConnectionState, String> {
     services::refresh_exit_info(&app, &store)
 }
 
@@ -347,10 +347,54 @@ fn prepare_app_update(
 fn update_core(
     app: tauri::AppHandle,
     core_id: String,
+    store: State<'_, ConnectionStore>,
+    runtime: State<'_, core_runtime::CoreRuntime>,
 ) -> Result<core_update::CoreUpdateResult, String> {
-    let runtime = app.state::<core_runtime::CoreRuntime>();
-    core_runtime::stop_all(&runtime)?;
-    core_update::update(&app, &core_id)
+    let state = services::snapshot(&store);
+    if state.connecting {
+        return Err("正在连接或切换线路，请完成后再更新核心".into());
+    }
+    let active_core_id = store
+        .active_route
+        .lock()
+        .ok()
+        .and_then(|route| route.as_ref().map(|route| route.core_id.clone()));
+    let reconnect_after_update = state.connected
+        && state.mode == "auto"
+        && active_core_id.as_deref() == Some(core_id.as_str());
+    let selected_route = store
+        .selected_route
+        .lock()
+        .ok()
+        .and_then(|route| route.clone());
+    let mut connection_stopped = false;
+    let update_result = core_update::update_with_before_install(&app, &core_id, || {
+        if reconnect_after_update {
+            services::cancel_connection(&app, &store, &runtime)?;
+            connection_stopped = true;
+        } else {
+            core_runtime::stop(&runtime, &core_id)?;
+        }
+        Ok(())
+    });
+
+    if connection_stopped {
+        if let Err(reconnect_error) =
+            services::start_public_connection(app.clone(), &store, &runtime, selected_route)
+        {
+            return Err(match update_result {
+                Ok(_) => format!("核心已更新，但恢复代理连接失败：{reconnect_error}"),
+                Err(update_error) => {
+                    format!("{update_error}；恢复代理连接失败：{reconnect_error}")
+                }
+            });
+        }
+    }
+
+    update_result.map(|mut result| {
+        result.connection_restarted = connection_stopped;
+        result
+    })
 }
 
 #[tauri::command]

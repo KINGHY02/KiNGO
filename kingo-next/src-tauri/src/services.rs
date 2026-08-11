@@ -310,9 +310,9 @@ pub fn update_public_routes(app: AppHandle, store: &ConnectionStore) -> Result<(
         .state
         .lock()
         .map_err(|_| "连接状态不可用")
-        .map(|state| state.connecting || state.connected)?;
+        .map(|state| state.connecting)?;
     if connection_busy {
-        return Err("请先结束测速或断开连接再更新线路".into());
+        return Err("请先等待连接、切换或测速任务完成再更新线路".into());
     }
     if store
         .route_update_running
@@ -326,6 +326,24 @@ pub fn update_public_routes(app: AppHandle, store: &ConnectionStore) -> Result<(
     let cancel = store.route_update_cancel.clone();
     let metrics = store.route_metrics.clone();
     let progress = store.route_update_progress.clone();
+    let download_proxy = store
+        .active_route
+        .lock()
+        .ok()
+        .and_then(|route| route.clone())
+        .map(|route| {
+            let port = store
+                .active_proxy_port
+                .lock()
+                .ok()
+                .and_then(|value| *value)
+                .unwrap_or_else(|| proxy_port(&route));
+            if route.core_id == "mihomo" {
+                format!("http://127.0.0.1:{port}")
+            } else {
+                format!("socks5h://127.0.0.1:{port}")
+            }
+        });
     if let Ok(mut value) = progress.lock() {
         *value = Some(RouteUpdateProgress {
             completed: 0,
@@ -346,7 +364,7 @@ pub fn update_public_routes(app: AppHandle, store: &ConnectionStore) -> Result<(
             if cancel.load(Ordering::Relaxed) {
                 break;
             }
-            let result = download_and_install_route(&app, route);
+            let result = download_and_install_route(&app, route, download_proxy.as_deref());
             let error = result.as_ref().err().cloned();
             if result.is_ok() {
                 updated += 1;
@@ -412,7 +430,11 @@ pub fn cancel_public_route_update(store: &ConnectionStore) {
     store.route_update_cancel.store(true, Ordering::SeqCst);
 }
 
-fn download_and_install_route(app: &AppHandle, route: &PublicRoute) -> Result<(), String> {
+fn download_and_install_route(
+    app: &AppHandle,
+    route: &PublicRoute,
+    download_proxy: Option<&str>,
+) -> Result<(), String> {
     let remote_dir = match route.core_id.as_str() {
         "mihomo" => "clash.meta2",
         "xray" => "xray",
@@ -438,7 +460,7 @@ fn download_and_install_route(app: &AppHandle, route: &PublicRoute) -> Result<()
     ];
     let mut failures = Vec::new();
     for url in urls {
-        match download_route(&url).and_then(|bytes| {
+        match download_route(&url, download_proxy).and_then(|bytes| {
             validate_route_config(route, &bytes)?;
             install_route_config(app, route, &bytes)
         }) {
@@ -449,17 +471,21 @@ fn download_and_install_route(app: &AppHandle, route: &PublicRoute) -> Result<()
     Err(failures.join("；备用源："))
 }
 
-fn download_route(url: &str) -> Result<Vec<u8>, String> {
-    let output = hidden_command("curl.exe")
-        .args([
-            "-fsSL",
-            "--ssl-no-revoke",
-            "--connect-timeout",
-            "8",
-            "--max-time",
-            "30",
-            url,
-        ])
+fn download_route(url: &str, download_proxy: Option<&str>) -> Result<Vec<u8>, String> {
+    let mut command = hidden_command("curl.exe");
+    command.args([
+        "-fsSL",
+        "--ssl-no-revoke",
+        "--connect-timeout",
+        "8",
+        "--max-time",
+        "30",
+    ]);
+    if let Some(proxy) = download_proxy {
+        command.args(["--proxy", proxy]);
+    }
+    let output = command
+        .arg(url)
         .output()
         .map_err(|error| format!("无法启动系统下载器：{error}"))?;
     if !output.status.success() {
@@ -3187,7 +3213,15 @@ fn query_exit_info_on_port(route: &PublicRoute, port: u16) -> Result<ExitInfo, S
     } else {
         format!("socks5h://127.0.0.1:{port}")
     };
-    if let Ok(value) = proxy_json_request(&proxy, "https://my.ippure.com/v1/info", 8) {
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|value| value.as_millis())
+        .unwrap_or_default();
+    if let Ok(value) = proxy_json_request(
+        &proxy,
+        &format!("https://my.ippure.com/v1/info?kingo_refresh={nonce}"),
+        8,
+    ) {
         if let Ok(value) = serde_json::from_value::<ExitInfoResponse>(value) {
             if let Some(ip) = value.ip {
                 let country =
@@ -3203,7 +3237,7 @@ fn query_exit_info_on_port(route: &PublicRoute, port: u16) -> Result<ExitInfo, S
         }
     }
     for url in ["https://api.country.is/", "https://ipwho.is/"] {
-        if let Ok(value) = proxy_json_request(&proxy, url, 5) {
+        if let Ok(value) = proxy_json_request(&proxy, &format!("{url}?kingo_refresh={nonce}"), 5) {
             let ip = value
                 .get("ip")
                 .and_then(|value| value.as_str())
@@ -3246,6 +3280,10 @@ fn proxy_json_request(
             proxy,
             "-H",
             "Accept: application/json",
+            "-H",
+            "Cache-Control: no-cache",
+            "-H",
+            "Pragma: no-cache",
             url,
         ])
         .output()
@@ -4031,7 +4069,10 @@ pub fn cancel_connection(
     Ok(())
 }
 
-pub fn refresh_exit_info(app: &AppHandle, store: &ConnectionStore) -> Result<(), String> {
+pub fn refresh_exit_info(
+    app: &AppHandle,
+    store: &ConnectionStore,
+) -> Result<AppConnectionState, String> {
     let route = store
         .active_route
         .lock()
@@ -4045,15 +4086,29 @@ pub fn refresh_exit_info(app: &AppHandle, store: &ConnectionStore) -> Result<(),
         .and_then(|value| *value)
         .unwrap_or_else(|| proxy_port(&route));
     let exit = query_exit_info_on_port(&route, port)?;
+    let latency = proxy_request_latency_on_port(&route, port).ok();
     let mut state = store
         .state
         .lock()
         .map_err(|_| "connection state unavailable")?;
     state.exit_ip = Some(exit.ip);
     state.country = Some(exit.country);
+    if latency.is_some() {
+        state.latency = latency;
+    }
+    let refreshed = state.clone();
     drop(state);
     emit_snapshot(app, store);
-    Ok(())
+    emit_log(
+        app,
+        "info",
+        &format!(
+            "出口信息已刷新：{} · {}",
+            refreshed.exit_ip.as_deref().unwrap_or("未知 IP"),
+            refreshed.country.as_deref().unwrap_or("未知地区")
+        ),
+    );
+    Ok(refreshed)
 }
 
 pub fn get_traffic(app: &AppHandle, store: &ConnectionStore) -> Result<TrafficState, String> {
