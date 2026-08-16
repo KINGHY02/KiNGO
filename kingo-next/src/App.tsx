@@ -408,7 +408,7 @@ function App() {
     () => localStorage.getItem("kingo-auto-route") || null,
   );
   const [logs, setLogs] = useState<LogEntry[]>([]);
-  const [appVersion, setAppVersion] = useState("2.0.4");
+  const [appVersion, setAppVersion] = useState("2.0.5");
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [motionEnabled, setMotionEnabled] = useState(() => localStorage.getItem("kingo-motion") !== "off");
   const [theme, setTheme] = useState<Theme>(() => (localStorage.getItem("kingo-theme") as Theme) || "light");
@@ -1653,7 +1653,7 @@ function Workspace({
             </button>
           </div>
           <div className="app-version-row">
-            <div><small>当前版本</small><b>v{appUpdate?.currentVersion ?? "2.0.4"}</b></div>
+            <div><small>当前版本</small><b>v{appUpdate?.currentVersion ?? "2.0.5"}</b></div>
             <div><small>最新版本</small><b>{appUpdate?.latestVersion ? `v${appUpdate.latestVersion}` : "尚未检查"}</b></div>
             <span className={appUpdate?.outdated ? "core-status update" : "core-status ok"}>{appUpdate ? appUpdate.outdated ? "发现新版本" : "已是最新版本" : "等待检查"}</span>
             {appUpdate?.outdated && appUpdate.installable && (
