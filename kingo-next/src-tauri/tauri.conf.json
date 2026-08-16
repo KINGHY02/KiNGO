@@ -52,6 +52,7 @@
         "uninstallerIcon": "icons/icon.ico",
         "headerImage": "installer/nsis-header.bmp",
         "sidebarImage": "installer/nsis-sidebar.bmp",
+        "installerHooks": "installer/hooks.nsh",
         "installMode": "currentUser",
         "languages": ["SimpChinese", "English"],
         "customLanguageFiles": {
