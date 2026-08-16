@@ -37,6 +37,7 @@ type Theme = "light" | "dark" | "pink" | "blue";
 type Page =
   | "home"
   | "routes"
+  | "community"
   | "connections"
   | "logs"
   | "settings";
@@ -46,6 +47,8 @@ export type AppState = {
   connecting: boolean;
   stage: string;
   coreId: string | null;
+  sourceType: string | null;
+  nodeId: string | null;
   displayName: string | null;
   latency: number | null;
   exitIp: string | null;
@@ -104,6 +107,55 @@ type RouteUpdateSummary = {
   updated: number;
   failed: number;
   errors: { routeId: string; message: string }[];
+};
+type CommunityScanState = {
+  jobId: string | null;
+  state: string;
+  stage: string;
+  sourceTotal: number;
+  sourceDone: number;
+  sourceSucceeded: number;
+  sourceFailed: number;
+  rawTotal: number;
+  deduplicatedTotal: number;
+  aliveTotal: number;
+  aliveDone: number;
+  aliveSucceeded: number;
+  speedTotal: number;
+  speedDone: number;
+  speedSucceeded: number;
+  finalistTotal: number;
+  finalistDone: number;
+  retainedTotal: number;
+  bytesDownloaded: number;
+  startedAt: number | null;
+  updatedAt: number | null;
+  completedAt: number | null;
+  usingRemoteManifest: boolean;
+  message: string | null;
+};
+type CommunityNode = {
+  id: string;
+  displayName: string;
+  originalName: string;
+  protocol: string;
+  server: string;
+  port: number;
+  latencyMedianMs: number | null;
+  speedMedianKbps: number | null;
+  countryName: string | null;
+  exitIp: string | null;
+  exitVerified: boolean;
+  sourceIds: string[];
+  lastTestedAt: number | null;
+  lastErrorCode: string | null;
+  lastErrorDetail: string | null;
+};
+type CommunitySettings = {
+  retainCount: number;
+  sortMode: "balanced" | "latency" | "speed";
+  speedConcurrency: number;
+  speedTimeoutSeconds: number;
 };
 type AutoRoutingMode = "rule" | "global" | "direct";
 type AutoRoutingAction = "direct" | "proxy" | "block";
@@ -184,6 +236,8 @@ const emptyState: AppState = {
   connecting: false,
   stage: "idle",
   coreId: null,
+  sourceType: null,
+  nodeId: null,
   displayName: null,
   latency: null,
   exitIp: null,
@@ -354,7 +408,7 @@ function App() {
     () => localStorage.getItem("kingo-auto-route") || null,
   );
   const [logs, setLogs] = useState<LogEntry[]>([]);
-  const [appVersion, setAppVersion] = useState("2.0.3");
+  const [appVersion, setAppVersion] = useState("2.0.4");
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [motionEnabled, setMotionEnabled] = useState(() => localStorage.getItem("kingo-motion") !== "off");
   const [theme, setTheme] = useState<Theme>(() => (localStorage.getItem("kingo-theme") as Theme) || "light");
@@ -371,16 +425,18 @@ function App() {
       .catch(() => undefined);
     void invoke("select_public_route", { routeId }).catch(() => undefined);
     let cleanup: (() => void) | undefined;
+    let disposed = false;
     void listen<AppState>("connection-state", (event) =>
       setState(event.payload),
     ).then((value) => {
-      cleanup = value;
+      if (disposed) value(); else cleanup = value;
     });
-    return () => cleanup?.();
+    return () => { disposed = true; cleanup?.(); };
   }, []);
 
   useEffect(() => {
     let cleanup: (() => void) | undefined;
+    let disposed = false;
     void listen<{ level: string; message: string }>(
       "connection-log",
       (event) => {
@@ -393,22 +449,23 @@ function App() {
         });
       },
     ).then((value) => {
-      cleanup = value;
+      if (disposed) value(); else cleanup = value;
     });
-    return () => cleanup?.();
+    return () => { disposed = true; cleanup?.(); };
   }, []);
 
   useEffect(() => {
     let cleanup: (() => void) | undefined;
+    let disposed = false;
     void listen<string | null>("public-route-selection", (event) => {
       const value = event.payload;
       setRouteId(value);
       if (value) localStorage.setItem("kingo-auto-route", value);
       else localStorage.removeItem("kingo-auto-route");
     }).then((value) => {
-      cleanup = value;
+      if (disposed) value(); else cleanup = value;
     });
-    return () => cleanup?.();
+    return () => { disposed = true; cleanup?.(); };
   }, []);
 
   useEffect(() => {
@@ -446,6 +503,7 @@ function App() {
       [
         ["home", "首页", <DashboardOutlined />],
         ["routes", "线路", <CloudServerOutlined />],
+        ["community", "获取节点", <CloudDownloadOutlined />],
         ["logs", "日志", <FileTextOutlined />],
         ["settings", "设置", <SettingOutlined />],
       ] as const,
@@ -752,6 +810,257 @@ function Home({
   );
 }
 
+const EMPTY_COMMUNITY_SCAN: CommunityScanState = {
+  jobId: null, state: "idle", stage: "idle", sourceTotal: 0, sourceDone: 0,
+  sourceSucceeded: 0, sourceFailed: 0, rawTotal: 0, deduplicatedTotal: 0,
+  aliveTotal: 0, aliveDone: 0, aliveSucceeded: 0, speedTotal: 0, speedDone: 0,
+  speedSucceeded: 0, finalistTotal: 0, finalistDone: 0, retainedTotal: 0,
+  bytesDownloaded: 0, startedAt: null, updatedAt: null, completedAt: null,
+  usingRemoteManifest: false, message: null,
+};
+
+function shouldAcceptCommunityScan(current: CommunityScanState, incoming: CommunityScanState) {
+  if (current.jobId !== incoming.jobId) {
+    return (incoming.startedAt ?? incoming.updatedAt ?? 0) >= (current.startedAt ?? current.updatedAt ?? 0);
+  }
+  if ((incoming.updatedAt ?? 0) !== (current.updatedAt ?? 0)) {
+    return (incoming.updatedAt ?? 0) > (current.updatedAt ?? 0);
+  }
+  const terminalRank = (value: CommunityScanState) => ["completed", "failed", "stopped"].includes(value.state) ? 1_000_000 : value.state === "stopping" ? 500_000 : 0;
+  const progressRank = (value: CommunityScanState) => terminalRank(value) + value.sourceDone + value.aliveDone + value.speedDone + value.retainedTotal;
+  return progressRank(incoming) >= progressRank(current);
+}
+
+function CommunityNodesPage({ state }: { state: AppState }) {
+  const [scan, setScan] = useState<CommunityScanState>(EMPTY_COMMUNITY_SCAN);
+  const [nodes, setNodes] = useState<CommunityNode[]>([]);
+  const [settings, setSettings] = useState<CommunitySettings>({
+    retainCount: 50, sortMode: "speed", speedConcurrency: 4, speedTimeoutSeconds: 10,
+  });
+  const [error, setError] = useState<string | null>(null);
+  const [retesting, setRetesting] = useState<Set<string>>(new Set());
+  const [batchRetest, setBatchRetest] = useState<{ done: number; total: number } | null>(null);
+  const [connectingNode, setConnectingNode] = useState<string | null>(null);
+  const [lastRequestedNode, setLastRequestedNode] = useState<string | null>(null);
+  const [nodeSearch, setNodeSearch] = useState("");
+  const [countryFilter, setCountryFilter] = useState("all");
+  const [protocolFilter, setProtocolFilter] = useState("all");
+  const [statusFilter, setStatusFilter] = useState("all");
+  const [progressClock, setProgressClock] = useState(() => Math.floor(Date.now() / 1000));
+  const running = ["running", "stopping"].includes(scan.state);
+  const refreshNodes = () => invoke<CommunityNode[]>("list_community_nodes").then(setNodes).catch(() => undefined);
+  const acceptScan = (incoming: CommunityScanState) => {
+    setScan(current => shouldAcceptCommunityScan(current, incoming) ? incoming : current);
+  };
+
+  useEffect(() => {
+    if (!state.connecting) setConnectingNode(null);
+  }, [state.connecting, state.connected, state.error]);
+
+  useEffect(() => {
+    if (state.sourceType === "community" && state.error) setError(state.error);
+    else if (state.sourceType === "community" && state.connected) setError(null);
+  }, [state.sourceType, state.connected, state.error]);
+
+  useEffect(() => {
+    if (!running || scan.state === "paused") return;
+    const timer = window.setInterval(() => setProgressClock(Math.floor(Date.now() / 1000)), 1000);
+    return () => window.clearInterval(timer);
+  }, [running, scan.state]);
+
+  useEffect(() => {
+    void invoke<CommunityScanState>("get_community_scan_state").then(acceptScan).catch(() => undefined);
+    void refreshNodes();
+    void invoke<CommunitySettings>("get_community_settings").then(setSettings).catch(() => undefined);
+    let cleanup: (() => void) | undefined;
+    let disposed = false;
+    let cleanupRetest: (() => void) | undefined;
+    let cleanupBatchRetest: (() => void) | undefined;
+    void listen<CommunityScanState>("community-scan-progress", event => {
+      acceptScan(event.payload);
+      if (["completed", "stopped", "failed"].includes(event.payload.state)) void refreshNodes();
+    }).then(value => { if (disposed) value(); else cleanup = value; });
+    void listen<{ nodeId: string; state: string; error?: string; batch?: boolean }>("community-node-retest", event => {
+      setRetesting(current => {
+        const next = new Set(current);
+        if (event.payload.state === "running") next.add(event.payload.nodeId);
+        else next.delete(event.payload.nodeId);
+        return next;
+      });
+      if (event.payload.state === "completed") {
+        if (!event.payload.batch) {
+          void refreshNodes();
+          if (event.payload.error) setError(event.payload.error);
+        }
+      }
+    }).then(value => { if (disposed) value(); else cleanupRetest = value; });
+    void listen<{ state: string; done: number; total: number }>("community-retest-batch", event => {
+      setBatchRetest(event.payload.state === "completed" ? null : { done: event.payload.done, total: event.payload.total });
+      if (event.payload.state === "completed") void refreshNodes();
+    }).then(value => { if (disposed) value(); else cleanupBatchRetest = value; });
+    return () => { disposed = true; cleanup?.(); cleanupRetest?.(); cleanupBatchRetest?.(); };
+  }, []);
+
+  const runCommand = async (command: string) => {
+    setError(null);
+    try { acceptScan(await invoke<CommunityScanState>(command)); }
+    catch (value) { setError(String(value)); }
+  };
+  const saveSettings = async (next: CommunitySettings) => {
+    const previous = settings;
+    setSettings(next);
+    try { setSettings(await invoke<CommunitySettings>("save_community_settings", { settings: next })); }
+    catch (value) { setSettings(previous); setError(String(value)); }
+  };
+  const retestNode = async (nodeId: string) => {
+    setError(null);
+    setRetesting(current => new Set(current).add(nodeId));
+    try { await invoke("retest_community_node", { nodeId }); }
+    catch (value) {
+      setRetesting(current => { const next = new Set(current); next.delete(nodeId); return next; });
+      setError(String(value));
+    }
+  };
+  const connectNode = async (nodeId: string) => {
+    setError(null);
+    setLastRequestedNode(nodeId);
+    setConnectingNode(nodeId);
+    try { await invoke("connect_community_node", { nodeId }); }
+    catch (value) { setConnectingNode(null); setError(String(value)); }
+  };
+  const retestAllNodes = async () => {
+    setError(null);
+    setBatchRetest({ done: 0, total: 0 });
+    try {
+      const total = await invoke<number>("retest_all_community_nodes");
+      setBatchRetest(current => current ? { done: current.done, total } : null);
+    } catch (value) {
+      setBatchRetest(null);
+      setError(String(value));
+    }
+  };
+  const connectWithoutTun = async () => {
+    const nodeId = lastRequestedNode ?? state.nodeId;
+    if (!nodeId) return;
+    setError(null);
+    try {
+      await invoke<AppState>("set_auto_tun", { enabled: false });
+      await connectNode(nodeId);
+    } catch (value) {
+      setError(String(value));
+    }
+  };
+  const stageProgress = scan.stage === "subs_check_alive"
+    ? [scan.aliveDone, scan.aliveTotal]
+    : scan.stage === "subs_check_speed"
+      ? [scan.speedDone, scan.speedTotal]
+      : [0, 0];
+  const progressKnown = scan.state === "completed" || stageProgress[1] > 0;
+  const percent = scan.state === "completed"
+    ? 100
+    : stageProgress[1] > 0 ? Math.min(100, Math.round(stageProgress[0] / stageProgress[1] * 100)) : 0;
+  const stageIndex = scan.state === "completed" ? 3
+    : scan.stage === "subs_check_speed" ? 2
+      : scan.stage === "subs_check_alive" ? 1 : 0;
+  const taskTitle = scan.state === "completed"
+    ? `检测完成，保留 ${scan.retainedTotal} 个节点`
+    : scan.state === "failed"
+      ? "节点检测失败"
+      : scan.state === "stopped"
+        ? "节点检测已停止"
+        : scan.state === "stopping"
+          ? "正在停止节点检测"
+          : scan.stage === "subs_check_speed"
+            ? `下载测速 ${scan.speedDone} / ${scan.speedTotal || "待确定"}`
+            : scan.stage === "subs_check_alive"
+              ? `节点测活 ${scan.aliveDone} / ${scan.aliveTotal || "待确定"}`
+              : scan.state === "running"
+                ? "正在获取、解析并去重订阅"
+                : "尚未开始获取节点";
+  const progressIdleSeconds = scan.updatedAt ? Math.max(0, progressClock - scan.updatedAt) : 0;
+  const progressHealth = scan.state === "running" && progressIdleSeconds >= 20
+      ? `已有 ${progressIdleSeconds} 秒没有完成新节点，正在等待检测服务或复杂配置`
+      : null;
+  const taskDetail = scan.state === "idle"
+    ? "点击开始获取后，将依次处理订阅、测活并进行下载测速。"
+    : scan.state === "failed"
+      ? scan.message ?? "检测未完成，请查看错误后重试。"
+      : progressHealth ?? (scan.stage === "subs_check_fetch" || scan.stage === "subs_check_starting"
+        ? "订阅获取阶段无法取得逐条进度，完成解析后将显示准确的节点测活数量。"
+        : "进度条表示当前阶段，不是对整轮任务的估算。进入下一阶段后会按新阶段重新计算。");
+  const countries = useMemo(() => [...new Set(nodes.map(node => node.countryName).filter((value): value is string => Boolean(value)))].sort(), [nodes]);
+  const protocols = useMemo(() => [...new Set(nodes.map(node => node.protocol))].sort(), [nodes]);
+  const filteredNodes = useMemo(() => {
+    const keyword = nodeSearch.trim().toLowerCase();
+    return nodes.filter(node => {
+      const available = node.exitVerified && (node.latencyMedianMs != null || node.speedMedianKbps != null);
+      if (countryFilter !== "all" && node.countryName !== countryFilter) return false;
+      if (protocolFilter !== "all" && node.protocol !== protocolFilter) return false;
+      if (statusFilter === "available" && !available) return false;
+      if (statusFilter === "failed" && available) return false;
+      return !keyword || [node.displayName, node.originalName, node.server, node.exitIp ?? ""].some(value => value.toLowerCase().includes(keyword));
+    });
+  }, [nodes, nodeSearch, countryFilter, protocolFilter, statusFilter]);
+
+  return (
+    <div className="page workspace community-page">
+      <div className="workspace-toolbar community-toolbar">
+        <div><p className="muted">聚合公开订阅并在后台检测，只保留测速排名靠前的节点。</p></div>
+        <div className="toolbar-actions">
+          {!running && <button className="primary-button" disabled={state.connecting || (state.connected && state.sourceType === "community")} onClick={() => void runCommand("start_community_scan")}>开始获取</button>}
+          {running && <button className="danger" disabled={scan.state === "stopping"} onClick={() => void runCommand("stop_community_scan")}>{scan.state === "stopping" ? "停止中…" : "停止"}</button>}
+          <button disabled={running || nodes.length === 0 || retesting.size > 0 || batchRetest != null} onClick={() => void retestAllNodes()}>{batchRetest ? `批量复测 ${batchRetest.done}/${batchRetest.total || "…"}` : "复测全部"}</button>
+          <button disabled={running || nodes.length === 0 || retesting.size > 0 || batchRetest != null || state.connecting || (state.connected && state.sourceType === "community")} onClick={async () => { setError(null); try { await invoke("clear_community_nodes"); setNodes([]); } catch (value) { setError(String(value)); } }}>清空结果</button>
+        </div>
+      </div>
+      <section className="community-summary">
+        <div><span>订阅清单</span><b>{scan.sourceTotal || 65} 条</b><small>{scan.state === "running" && stageIndex === 0 ? "正在获取与解析" : stageIndex > 0 || scan.state === "completed" ? "订阅处理已完成" : "固定内置清单"}</small></div>
+        <div><span>去重后候选</span><b>{scan.deduplicatedTotal || "-"}</b><small>{scan.deduplicatedTotal ? "重复配置已合并" : "解析完成后显示"}</small></div>
+        <div><span>测活通过</span><b>{scan.aliveSucceeded}</b><small>{scan.aliveDone} / {scan.aliveTotal || "待开始"} 已检测</small></div>
+        <div><span>测速通过</span><b>{scan.speedSucceeded}</b><small>{scan.speedDone} / {scan.speedTotal || "待开始"} 已检测</small></div>
+        <div><span>最终保留</span><b>{running ? "待定" : nodes.length}</b><small>{running ? `当前列表为上轮 ${nodes.length} 个` : `目标 ${settings.retainCount} 个`}</small></div>
+      </section>
+      <section className="community-task-card">
+        <div className="community-task-heading"><div><b>{taskTitle}</b><small>{taskDetail}</small></div><strong>{progressKnown ? `${percent}%` : scan.state === "running" ? "处理中" : "0%"}</strong></div>
+        <div className="community-stage-track" aria-label="节点检测阶段">
+          {["订阅处理", "节点测活", "下载测速"].map((label, index) => <span key={label} className={stageIndex > index ? "done" : stageIndex === index && running ? "current" : ""}>{label}</span>)}
+        </div>
+        {progressKnown ? <progress aria-label="当前阶段进度" max={100} value={percent} /> : <progress aria-label="当前阶段正在处理" max={100} />}
+        <div className="community-options">
+          <label><span>保留数量</span><select disabled={running || retesting.size > 0 || batchRetest != null} value={settings.retainCount} onChange={event => void saveSettings({ ...settings, retainCount: Number(event.target.value) })}><option value={20}>20</option><option value={50}>50</option><option value={100}>100</option><option value={200}>200</option></select></label>
+          <label><span>测速并发</span><select disabled={running || retesting.size > 0 || batchRetest != null} value={settings.speedConcurrency} onChange={event => void saveSettings({ ...settings, speedConcurrency: Number(event.target.value) })}>{[1,2,3,4,5,6,7,8].map(value => <option value={value} key={value}>{value}</option>)}</select></label>
+        </div>
+        {error && (
+          <div className="connection-alert community-connection-alert">
+            <span>{error}</span>
+            {error.includes("管理员权限") && (
+              <div className="connection-alert-actions">
+                <button onClick={() => void connectWithoutTun()}>关闭 TUN 后连接</button>
+                <button className="primary-button" onClick={() => void invoke("restart_as_admin")}>管理员重启</button>
+              </div>
+            )}
+          </div>
+        )}
+      </section>
+      <section className="community-filters">
+        <input value={nodeSearch} onChange={event => setNodeSearch(event.target.value)} placeholder="搜索节点、地址或出口 IP" />
+        <select value={countryFilter} onChange={event => setCountryFilter(event.target.value)}><option value="all">全部国家</option>{countries.map(country => <option value={country} key={country}>{country}</option>)}</select>
+        <select value={protocolFilter} onChange={event => setProtocolFilter(event.target.value)}><option value="all">全部协议</option>{protocols.map(protocol => <option value={protocol} key={protocol}>{protocol.toUpperCase()}</option>)}</select>
+        <select value={statusFilter} onChange={event => setStatusFilter(event.target.value)}><option value="all">全部状态</option><option value="available">可用</option><option value="failed">复测失败</option></select>
+        <span>{filteredNodes.length} / {nodes.length}</span>
+      </section>
+      <section className="community-node-list">
+        <div className="community-node-head"><span>#</span><span>节点</span><span>协议</span><span>延迟</span><span>下载速度</span><span>出口 IP</span><span>操作</span></div>
+        {filteredNodes.length ? filteredNodes.map((node, index) => (
+          <div className={`community-node-row ${node.lastErrorDetail ? "has-error" : ""}`} key={node.id} title={`${node.originalName}\n来源 ${node.sourceIds.length} 个${node.lastErrorDetail ? `\n失败原因：${node.lastErrorDetail}` : ""}`}>
+            <span>{String(index + 1).padStart(2, "0")}</span><b>{node.displayName || node.countryName || "未知地区"}</b><span>{node.protocol.toUpperCase()}</span><span className={node.latencyMedianMs == null && node.lastErrorDetail ? "community-failed-value" : ""}>{node.latencyMedianMs == null ? node.lastErrorDetail ? "失败" : node.speedMedianKbps != null ? "待复测" : "-" : `${node.latencyMedianMs} ms`}</span><span>{node.speedMedianKbps == null ? "-" : `${(node.speedMedianKbps / 1024).toFixed(1)} MB/s`}</span><span>{node.exitIp ?? "-"}</span><span className="community-node-actions"><button disabled={retesting.has(node.id) || running || batchRetest != null || state.connecting} onClick={() => void retestNode(node.id)}>{retesting.has(node.id) ? "复测中" : "复测"}</button><button className={state.connected && state.sourceType === "community" && state.nodeId === node.id ? "selected" : ""} disabled={running || retesting.has(node.id) || batchRetest != null || state.connecting || (state.connected && state.sourceType === "community" && state.nodeId === node.id)} onClick={() => void connectNode(node.id)}>{state.connected && state.sourceType === "community" && state.nodeId === node.id ? "已连接" : connectingNode === node.id && state.connecting ? "连接中" : "连接"}</button></span>
+          </div>
+        )) : <div className="community-empty">{nodes.length ? "没有符合当前筛选条件的节点。" : "完成检测后，可用节点会显示在这里。"}</div>}
+      </section>
+    </div>
+  );
+}
+
 function Workspace({
   mode,
   page,
@@ -820,19 +1129,21 @@ function Workspace({
   useEffect(() => {
     if (mode !== "auto") return;
     let cleanup: (() => void) | undefined;
+    let disposed = false;
     void listen<RouteProgress>("public-route-progress", (event) => {
       setProgress(event.payload);
       void invoke<Route[]>("list_public_routes")
         .then(setRoutes)
         .catch(() => undefined);
     }).then((value) => {
-      cleanup = value;
+      if (disposed) value(); else cleanup = value;
     });
-    return () => cleanup?.();
+    return () => { disposed = true; cleanup?.(); };
   }, [mode]);
   useEffect(() => {
     if (mode !== "auto") return;
     let cleanup: (() => void) | undefined;
+    let disposed = false;
     void listen<RouteTestSummary>("public-route-test-complete", (event) => {
       setTestSummary(event.payload);
       setProgress(null);
@@ -840,21 +1151,22 @@ function Workspace({
         .then(setRoutes)
         .catch(() => undefined);
     }).then((value) => {
-      cleanup = value;
+      if (disposed) value(); else cleanup = value;
     });
-    return () => cleanup?.();
+    return () => { disposed = true; cleanup?.(); };
   }, [mode]);
   useEffect(() => {
     if (mode !== "auto") return;
     let cleanupProgress: (() => void) | undefined;
     let cleanupComplete: (() => void) | undefined;
+    let disposed = false;
     void listen<RouteUpdateProgress>(
       "public-route-update-progress",
       (event) => {
         setUpdateProgress(event.payload);
       },
     ).then((value) => {
-      cleanupProgress = value;
+      if (disposed) value(); else cleanupProgress = value;
     });
     void listen<RouteUpdateSummary>("public-route-update-complete", (event) => {
       setUpdateSummary(event.payload);
@@ -863,9 +1175,10 @@ function Workspace({
         .then(setRoutes)
         .catch(() => undefined);
     }).then((value) => {
-      cleanupComplete = value;
+      if (disposed) value(); else cleanupComplete = value;
     });
     return () => {
+      disposed = true;
       cleanupProgress?.();
       cleanupComplete?.();
     };
@@ -906,9 +1219,13 @@ function Workspace({
     }
   };
   const installCoreUpdate = async (core: CoreVersionInfo) => {
+    const installImpact =
+      core.coreId === "subs-check"
+        ? "KiNGO 会保持当前代理连接完成下载；公共节点检测运行中不会替换 SubsCheck。"
+        : "KiNGO 会保持代理完成下载，仅在最终替换正在使用的代理核心时短暂重连。";
     if (
       !window.confirm(
-        `更新 ${core.name} 到 ${core.latestVersion ?? "最新版本"}？\nKiNGO 会保持代理完成下载和校验，仅在替换核心时短暂重连。`,
+        `更新 ${core.name} 到 ${core.latestVersion ?? "最新版本"}？\n${installImpact}\n下载文件通过 SHA-256 校验后才会安装。`,
       )
     )
       return;
@@ -1212,7 +1529,7 @@ function Workspace({
         <div className="settings-section core-manager">
           <div className="settings-section-heading">
             <div>
-              <b>代理核心</b>
+              <b>核心更新</b>
             </div>
             <button
               className="settings-action"
@@ -1336,7 +1653,7 @@ function Workspace({
             </button>
           </div>
           <div className="app-version-row">
-            <div><small>当前版本</small><b>v{appUpdate?.currentVersion ?? "2.0.3"}</b></div>
+            <div><small>当前版本</small><b>v{appUpdate?.currentVersion ?? "2.0.4"}</b></div>
             <div><small>最新版本</small><b>{appUpdate?.latestVersion ? `v${appUpdate.latestVersion}` : "尚未检查"}</b></div>
             <span className={appUpdate?.outdated ? "core-status update" : "core-status ok"}>{appUpdate ? appUpdate.outdated ? "发现新版本" : "已是最新版本" : "等待检查"}</span>
             {appUpdate?.outdated && appUpdate.installable && (
@@ -1372,6 +1689,7 @@ function Workspace({
         </div>
       </div>
     );
+  if (page === "community") return <CommunityNodesPage state={state} />;
   if (page === "logs")
     return (
       <div className="page workspace">

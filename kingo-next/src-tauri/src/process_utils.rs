@@ -26,9 +26,42 @@ pub fn is_elevated() -> bool {
         .is_some_and(|output| String::from_utf8_lossy(&output.stdout).trim().eq_ignore_ascii_case("true"))
 }
 
+#[cfg(windows)]
+pub fn active_external_tun_adapters() -> Vec<String> {
+    let script = r#"$routes = Get-NetRoute -ErrorAction SilentlyContinue | Where-Object {
+  $_.State -eq 'Alive' -and ($_.DestinationPrefix -in @('0.0.0.0/0','0.0.0.0/1','128.0.0.0/1','::/0','::/1','8000::/1'))
+} | Select-Object -ExpandProperty InterfaceIndex -Unique
+Get-NetAdapter -ErrorAction SilentlyContinue |
+Where-Object {
+  $_.Status -eq 'Up' -and
+  $routes -contains $_.InterfaceIndex -and
+  (($_.Name + ' ' + $_.InterfaceDescription) -match '(?i)(tun|wintun|tap|vpn)') -and
+  (($_.Name + ' ' + $_.InterfaceDescription) -notmatch '(?i)kingo')
+} | ForEach-Object { $_.Name }"#;
+    hidden_command("powershell.exe")
+        .args(["-NoProfile", "-NonInteractive", "-Command", script])
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .map(|output| {
+            String::from_utf8_lossy(&output.stdout)
+                .lines()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 #[cfg(not(windows))]
 pub fn is_elevated() -> bool {
     true
+}
+
+#[cfg(not(windows))]
+pub fn active_external_tun_adapters() -> Vec<String> {
+    Vec::new()
 }
 
 #[cfg(windows)]

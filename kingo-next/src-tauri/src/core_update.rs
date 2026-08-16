@@ -1,4 +1,4 @@
-use crate::{cores, paths, process_utils::hidden_command};
+use crate::{community_nodes::subs_check, cores, paths, process_utils::hidden_command};
 use flate2::read::GzDecoder;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -80,6 +80,13 @@ const REPOS: &[Repo] = &[
         github: "enfein/mieru",
         version_arg: "version",
         keywords: &["windows", "amd64"],
+        prerelease: false,
+    },
+    Repo {
+        id: "subs-check",
+        github: "beck-8/subs-check",
+        version_arg: "",
+        keywords: &["windows", "x86_64"],
         prerelease: false,
     },
 ];
@@ -236,7 +243,7 @@ fn pick_asset(release: &Release, repo: Repo) -> Option<Asset> {
 
 pub fn check_all(app: &AppHandle) -> Result<Vec<CoreVersionInfo>, String> {
     let statuses = cores::statuses(app)?;
-    Ok(statuses
+    let mut versions: Vec<_> = statuses
         .into_iter()
         .map(|status| {
             let repo = REPOS
@@ -279,7 +286,64 @@ pub fn check_all(app: &AppHandle) -> Result<Vec<CoreVersionInfo>, String> {
                 error,
             }
         })
-        .collect())
+        .collect();
+    versions.push(check_subs_check(app));
+    Ok(versions)
+}
+
+fn check_subs_check(app: &AppHandle) -> CoreVersionInfo {
+    let repo = REPOS
+        .iter()
+        .find(|repo| repo.id == "subs-check")
+        .copied()
+        .expect("SubsCheck repository must be configured");
+    let installed = subs_check::installation(app);
+    let (current, source, available, mut error) = match installed {
+        Ok(value) => (Some(value.version), value.source, true, None),
+        Err(value) => (
+            None,
+            if subs_check::has_user_core(app) {
+                "user"
+            } else {
+                "missing"
+            }
+            .into(),
+            false,
+            Some(value),
+        ),
+    };
+    let (latest, asset_name, asset_size) = match release(repo) {
+        Ok(value) => {
+            let asset = pick_asset(&value, repo);
+            (
+                version_from(&value.tag_name).or(Some(value.tag_name)),
+                asset.as_ref().map(|value| value.name.clone()),
+                asset.and_then(|value| value.size),
+            )
+        }
+        Err(value) => {
+            error = Some(value);
+            (None, None, None)
+        }
+    };
+    let is_outdated = match (&current, &latest) {
+        (Some(current), Some(latest)) => outdated(current, latest),
+        (None, Some(_)) => true,
+        _ => false,
+    };
+    CoreVersionInfo {
+        core_id: "subs-check".into(),
+        name: "SubsCheck".into(),
+        current_version: current,
+        latest_version: latest,
+        outdated: is_outdated,
+        source,
+        available,
+        update_supported: true,
+        asset_name,
+        asset_size,
+        error,
+    }
 }
 
 pub fn check_app_update() -> Result<AppUpdateInfo, String> {
@@ -383,13 +447,21 @@ fn checksum_asset(release: &Release, asset: &Asset) -> Option<Asset> {
 
 fn verify_checksum(file: &Path, checksum_file: &Path, asset_name: &str) -> Result<bool, String> {
     let text = fs::read_to_string(checksum_file).map_err(|e| e.to_string())?;
-    let line = text
-        .lines()
-        .find(|line| {
-            line.to_ascii_lowercase()
-                .contains(&asset_name.to_ascii_lowercase())
+    let named_line = text.lines().find(|line| {
+        line.to_ascii_lowercase()
+            .contains(&asset_name.to_ascii_lowercase())
+    });
+    let checksum_name = checksum_file
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("");
+    let line = named_line
+        .or_else(|| {
+            checksum_name
+                .eq_ignore_ascii_case(&format!("{asset_name}.sha256"))
+                .then(|| text.lines().next())
+                .flatten()
         })
-        .or_else(|| text.lines().next())
         .unwrap_or("");
     let expected = line
         .split_whitespace()
@@ -415,6 +487,22 @@ fn verify_checksum(file: &Path, checksum_file: &Path, asset_name: &str) -> Resul
     }
 }
 
+fn file_sha256(path: &Path) -> Result<String, String> {
+    let mut source = fs::File::open(path).map_err(|error| error.to_string())?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0u8; 65536];
+    loop {
+        let read = source
+            .read(&mut buffer)
+            .map_err(|error| error.to_string())?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    Ok(format!("{:x}", hasher.finalize()))
+}
+
 pub fn update(app: &AppHandle, core_id: &str) -> Result<CoreUpdateResult, String> {
     update_with_before_install(app, core_id, || Ok(()))
 }
@@ -427,6 +515,9 @@ pub fn update_with_before_install<F>(
 where
     F: FnOnce() -> Result<(), String>,
 {
+    if core_id == "subs-check" {
+        return update_subs_check(app, before_install);
+    }
     let profile = cores::profiles()
         .into_iter()
         .find(|p| p.id == core_id)
@@ -443,13 +534,27 @@ where
     fs::create_dir_all(&temp).map_err(|e| e.to_string())?;
     let archive = temp.join(&asset.name);
     download(&asset.browser_download_url, &archive)?;
-    let checksum_verified = if let Some(checksum) = checksum_asset(&release, &asset) {
-        let path = temp.join(&checksum.name);
-        download(&checksum.browser_download_url, &path)?;
-        verify_checksum(&archive, &path, &asset.name)?
-    } else {
-        false
-    };
+    let checksum = checksum_asset(&release, &asset).ok_or_else(|| {
+        let _ = fs::remove_dir_all(&temp);
+        "该核心发布包没有 SHA-256 校验文件，KiNGO 已拒绝安装未经完整性验证的可执行程序".to_string()
+    })?;
+    let checksum_path = temp.join(&checksum.name);
+    if let Err(error) = download(&checksum.browser_download_url, &checksum_path) {
+        let _ = fs::remove_dir_all(&temp);
+        return Err(format!("下载核心校验文件失败：{error}"));
+    }
+    match verify_checksum(&archive, &checksum_path, &asset.name) {
+        Ok(true) => {}
+        Ok(false) => {
+            let _ = fs::remove_dir_all(&temp);
+            return Err("核心 SHA-256 校验文件格式无效，已拒绝安装".into());
+        }
+        Err(error) => {
+            let _ = fs::remove_dir_all(&temp);
+            return Err(error);
+        }
+    }
+    let checksum_verified = true;
     let extract = temp.join("extract");
     fs::create_dir_all(&extract).map_err(|e| e.to_string())?;
     let executable = unpack(&archive, &extract)?;
@@ -486,7 +591,81 @@ where
     })
 }
 
+fn update_subs_check<F>(app: &AppHandle, before_install: F) -> Result<CoreUpdateResult, String>
+where
+    F: FnOnce() -> Result<(), String>,
+{
+    let repo = REPOS
+        .iter()
+        .find(|repo| repo.id == "subs-check")
+        .copied()
+        .expect("SubsCheck repository must be configured");
+    let release = release(repo)?;
+    let asset = pick_asset(&release, repo)
+        .ok_or_else(|| "上游发布中没有找到 Windows x86_64 的 SubsCheck 文件".to_string())?;
+    let temp = std::env::temp_dir().join(format!("kingo-core-subs-check-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&temp);
+    fs::create_dir_all(&temp).map_err(|error| error.to_string())?;
+    let archive = temp.join(&asset.name);
+    download(&asset.browser_download_url, &archive)?;
+    let checksum = checksum_asset(&release, &asset).ok_or_else(|| {
+        let _ = fs::remove_dir_all(&temp);
+        "SubsCheck 上游发布未提供 SHA-256 checksums 文件".to_string()
+    })?;
+    let checksum_path = temp.join(&checksum.name);
+    download(&checksum.browser_download_url, &checksum_path)?;
+    if !verify_checksum(&archive, &checksum_path, &asset.name)? {
+        let _ = fs::remove_dir_all(&temp);
+        return Err("SubsCheck checksums 文件中没有当前 Windows 安装包的校验值".into());
+    }
+    let extract = temp.join("extract");
+    fs::create_dir_all(&extract).map_err(|error| error.to_string())?;
+    let executable = unpack(&archive, &extract)?;
+    let target = subs_check::user_core_target(app)?;
+    let target_dir = target
+        .parent()
+        .ok_or_else(|| "SubsCheck 更新目录无效".to_string())?;
+    fs::create_dir_all(target_dir).map_err(|error| error.to_string())?;
+    let staged = target.with_extension("exe.new");
+    let backup = target.with_extension("exe.bak");
+    fs::copy(&executable, &staged).map_err(|error| error.to_string())?;
+    let installed_sha256 = file_sha256(&staged)?;
+    before_install()?;
+    if target.exists() {
+        let _ = fs::remove_file(&backup);
+        fs::rename(&target, &backup).map_err(|error| error.to_string())?;
+    }
+    if let Err(error) = fs::rename(&staged, &target) {
+        if backup.exists() {
+            let _ = fs::rename(&backup, &target);
+        }
+        let _ = fs::remove_dir_all(&temp);
+        return Err(error.to_string());
+    }
+    if let Err(error) =
+        subs_check::save_user_core_metadata(app, &release.tag_name, &installed_sha256)
+    {
+        let _ = fs::remove_file(&target);
+        if backup.exists() {
+            let _ = fs::rename(&backup, &target);
+        }
+        let _ = fs::remove_dir_all(&temp);
+        return Err(format!("保存 SubsCheck 版本信息失败：{error}"));
+    }
+    let _ = fs::remove_file(backup);
+    let _ = fs::remove_dir_all(temp);
+    Ok(CoreUpdateResult {
+        core_id: "subs-check".into(),
+        version: release.tag_name,
+        checksum_verified: true,
+        connection_restarted: false,
+    })
+}
+
 pub fn restore_bundled(app: &AppHandle, core_id: &str) -> Result<(), String> {
+    if core_id == "subs-check" {
+        return subs_check::remove_user_core(app);
+    }
     let profile = cores::profiles()
         .into_iter()
         .find(|p| p.id == core_id)
@@ -498,4 +677,70 @@ pub fn restore_bundled(app: &AppHandle, core_id: &str) -> Result<(), String> {
         fs::remove_file(target).map_err(|e| e.to_string())?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::verify_checksum;
+    use sha2::{Digest, Sha256};
+    use std::fs;
+
+    fn fixture(name: &str) -> std::path::PathBuf {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!(
+            "kingo-checksum-{name}-{}-{unique}",
+            std::process::id(),
+        ))
+    }
+
+    #[test]
+    fn checksum_list_must_name_the_selected_asset() {
+        let dir = fixture("named");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let archive = dir.join("mihomo-windows-amd64.zip");
+        fs::write(&archive, b"verified core").unwrap();
+        let hash = format!("{:x}", Sha256::digest(b"verified core"));
+        let checksums = dir.join("checksums.txt");
+        fs::write(&checksums, format!("{hash} other-platform.zip\n")).unwrap();
+        assert!(!verify_checksum(&archive, &checksums, "mihomo-windows-amd64.zip").unwrap());
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn asset_specific_sha256_file_accepts_a_bare_hash() {
+        let dir = fixture("bare");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let asset_name = "mihomo-windows-amd64.zip";
+        let archive = dir.join(asset_name);
+        fs::write(&archive, b"verified core").unwrap();
+        let hash = format!("{:x}", Sha256::digest(b"verified core"));
+        let checksums = dir.join(format!("{asset_name}.sha256"));
+        fs::write(&checksums, hash).unwrap();
+        assert!(verify_checksum(&archive, &checksums, asset_name).unwrap());
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn upstream_checksum_list_accepts_the_selected_subs_check_asset() {
+        let dir = fixture("subs-check");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let asset_name = "subs-check_Windows_x86_64.zip";
+        let archive = dir.join(asset_name);
+        fs::write(&archive, b"official release archive").unwrap();
+        let hash = format!("{:x}", Sha256::digest(b"official release archive"));
+        let checksums = dir.join("subs-check_1.6.2_checksums.txt");
+        fs::write(
+            &checksums,
+            format!("{hash}  {asset_name}\n0000  subs-check_Linux_x86_64.tar.gz\n"),
+        )
+        .unwrap();
+        assert!(verify_checksum(&archive, &checksums, asset_name).unwrap());
+        let _ = fs::remove_dir_all(dir);
+    }
 }

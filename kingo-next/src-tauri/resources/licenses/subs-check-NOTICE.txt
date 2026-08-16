@@ -1,0 +1,16 @@
+SubsCheck core
+
+Version: 1.6.2
+Source: https://github.com/beck-8/subs-check
+Release: https://github.com/beck-8/subs-check/releases/tag/v1.6.2
+License: GNU General Public License v3.0
+Bundled license: subs-check-GPL-3.0.txt
+
+Official Windows x64 archive SHA-256:
+f84b2d464dffafc794cfeba1d53b20be5cc41ed228ac1fc2d044b1f06827bd2c
+
+Bundled executable SHA-256:
+135a731efd4b97dd6f8ae685224cf8d97c8bcbc07b3b8dd70d1342e21542e5a0
+
+KiNGO launches this executable as an isolated child process with a generated
+local configuration. It does not embed the SubsCheck source code into KiNGO.

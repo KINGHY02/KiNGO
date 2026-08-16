@@ -24,6 +24,10 @@ pub struct AppConnectionState {
     pub connecting: bool,
     pub stage: String,
     pub core_id: Option<String>,
+    #[serde(default)]
+    pub source_type: Option<String>,
+    #[serde(default)]
+    pub node_id: Option<String>,
     pub display_name: Option<String>,
     pub latency: Option<u32>,
     pub exit_ip: Option<String>,
@@ -196,7 +200,7 @@ fn default_download_test_url() -> String {
 }
 
 impl SpeedTestSettings {
-    fn latency_urls(&self) -> Vec<String> {
+    pub(crate) fn latency_urls(&self) -> Vec<String> {
         let mut urls = Vec::with_capacity(self.fallback_urls.len() + 1);
         for url in std::iter::once(&self.url).chain(self.fallback_urls.iter()) {
             let url = url.trim();
@@ -226,7 +230,7 @@ fn speed_test_settings() -> &'static Mutex<SpeedTestSettings> {
     SPEED_TEST_SETTINGS.get_or_init(|| Mutex::new(SpeedTestSettings::default()))
 }
 
-fn current_speed_test_settings() -> SpeedTestSettings {
+pub(crate) fn current_speed_test_settings() -> SpeedTestSettings {
     speed_test_settings()
         .lock()
         .map(|value| value.clone())
@@ -242,6 +246,8 @@ impl Default for ConnectionStore {
                 connecting: false,
                 stage: "idle".into(),
                 core_id: None,
+                source_type: None,
+                node_id: None,
                 display_name: None,
                 latency: None,
                 exit_ip: None,
@@ -967,10 +973,19 @@ pub fn load_connection_settings(app: &AppHandle, store: &ConnectionStore) {
     let Ok(settings) = serde_json::from_str::<ConnectionSettings>(&content) else {
         return;
     };
+    let elevated = crate::process_utils::is_elevated();
+    let tun_enabled = effective_tun_enabled(settings.tun_enabled, elevated);
+    if settings.tun_enabled && !tun_enabled {
+        let _ = persist_connection_settings(app, settings.auto_failover, false);
+    }
     if let Ok(mut state) = store.state.lock() {
         state.auto_failover = settings.auto_failover;
-        state.tun_enabled = settings.tun_enabled;
+        state.tun_enabled = tun_enabled;
     }
+}
+
+fn effective_tun_enabled(requested: bool, elevated: bool) -> bool {
+    requested && elevated
 }
 
 fn get_connection_tun_enabled(app: &AppHandle) -> bool {
@@ -1242,6 +1257,7 @@ fn monitor_clash_runtime(
     store: &ConnectionStore,
     runtime: &core_runtime::CoreRuntime,
     cancel: Arc<AtomicBool>,
+    core_id: String,
 ) {
     let app_monitor = app.clone();
     let state = store.state.clone();
@@ -1257,7 +1273,7 @@ fn monitor_clash_runtime(
             .map(|items| {
                 items
                     .iter()
-                    .any(|item| item.core_id == "mihomo" && item.running)
+                    .any(|item| item.core_id == core_id && item.running)
             })
             .unwrap_or(false);
         if running {
@@ -1271,7 +1287,7 @@ fn monitor_clash_runtime(
             current.connected = false;
             current.connecting = false;
             current.stage = "failed".into();
-            current.error = Some("mihomo 核心意外退出".into());
+            current.error = Some(format!("{core_id} 核心意外退出"));
             current.download_bps = 0;
             current.upload_bps = 0;
         }
@@ -1483,7 +1499,11 @@ pub fn start_clash_connection(
             });
         if matches!(rollback.as_ref(), Some(Ok(()))) {
             emit_snapshot(&app, store);
-            monitor_clash_runtime(&app, store, runtime, cancel);
+            let restored_core = previous_state
+                .core_id
+                .clone()
+                .unwrap_or_else(|| "mihomo".into());
+            monitor_clash_runtime(&app, store, runtime, cancel, restored_core);
             return Err(format!("{error}；已自动恢复上一配置"));
         }
         if let Ok(mut active) = store.active_route.lock() {
@@ -1510,7 +1530,445 @@ pub fn start_clash_connection(
     }
 
     emit_snapshot(&app, store);
-    monitor_clash_runtime(&app, store, runtime, cancel);
+    monitor_clash_runtime(&app, store, runtime, cancel, clash_core);
+    Ok(())
+}
+
+pub fn start_community_connection(
+    app: AppHandle,
+    store: &ConnectionStore,
+    runtime: &core_runtime::CoreRuntime,
+    node: crate::community_nodes::models::CommunityNodeCandidate,
+) -> Result<(), String> {
+    if store.routing_apply_in_progress.load(Ordering::Acquire) {
+        return Err("正在切换线路或应用连接设置，请稍候".into());
+    }
+    let config = crate::community_nodes::store::write_connection_config(&app, &node)?;
+    let route = PublicRoute {
+        id: format!("community:{}", node.id),
+        name: node.display_name.clone(),
+        core_id: "mihomo".into(),
+        slot: 0,
+        protocol_label: node.protocol.to_uppercase(),
+        config_format: "yaml".into(),
+        config_path: config.to_string_lossy().into_owned(),
+        downloaded: true,
+        active: false,
+        connection_state: "ready".into(),
+        last_success_at: None,
+        last_error: None,
+        latency: node.latency_median_ms,
+        country: node.country_name.clone(),
+        success_rate: None,
+        jitter: None,
+        quality: "community".into(),
+    };
+    let previous_route = store
+        .active_route
+        .lock()
+        .map_err(|_| "active route state unavailable")?
+        .clone();
+    let previous_selected = store
+        .selected_route
+        .lock()
+        .map_err(|_| "route selection unavailable")?
+        .clone();
+    let switching = {
+        let state = store.state.lock().map_err(|_| "连接状态不可用")?;
+        if state.connecting {
+            return Err("已有连接或测速任务正在执行".into());
+        }
+        state.connected
+    };
+    let tun_enabled = store
+        .state
+        .lock()
+        .map(|state| state.tun_enabled)
+        .unwrap_or(false);
+    if switching && !tun_enabled {
+        return start_seamless_community_switch(
+            app,
+            store,
+            runtime,
+            node,
+            route,
+            previous_route.ok_or_else(|| "当前连接线路状态缺失".to_string())?,
+        );
+    }
+    if switching {
+        cancel_connection(&app, store, runtime)?;
+    }
+    if let Ok(mut port) = store.active_proxy_port.lock() {
+        *port = None;
+    }
+    {
+        let mut state = store.state.lock().map_err(|_| "连接状态不可用")?;
+        state.mode = "auto".into();
+        state.connected = false;
+        state.connecting = true;
+        state.stage = if switching {
+            "switching".into()
+        } else {
+            "preparing".into()
+        };
+        state.core_id = None;
+        state.source_type = Some("community".into());
+        state.node_id = Some(node.id.clone());
+        state.display_name = Some(node.display_name.clone());
+        state.error = None;
+        state.exit_ip = None;
+        state.country = node.country_name.clone();
+        state.download_bps = 0;
+        state.upload_bps = 0;
+        state.download_total = 0;
+        state.upload_total = 0;
+    }
+    let cancel = Arc::new(AtomicBool::new(false));
+    *store
+        .cancel
+        .lock()
+        .map_err(|_| "connection control unavailable")? = Some(cancel.clone());
+    emit_snapshot(&app, store);
+
+    let state = store.state.clone();
+    let cancel_slot = store.cancel.clone();
+    let proxy = store.proxy.clone();
+    let route_metrics = store.route_metrics.clone();
+    let active_route = store.active_route.clone();
+    let active_proxy_port = store.active_proxy_port.clone();
+    let selected_route = store.selected_route.clone();
+    let traffic_sample = store.traffic_sample.clone();
+    let routing_apply_in_progress = store.routing_apply_in_progress.clone();
+    let runtime = runtime.clone();
+    let routes = vec![route.clone()];
+    std::thread::spawn(move || {
+        let result = connect_route(
+            &app,
+            &state,
+            &runtime,
+            &proxy,
+            &route,
+            &cancel,
+            false,
+            &active_route,
+        );
+        if result.is_ok() {
+            if let Ok(mut port) = active_proxy_port.lock() {
+                *port = Some(proxy_port(&route));
+            }
+            if let Ok(mut selected) = selected_route.lock() {
+                *selected = None;
+            }
+            if let Ok(mut current) = state.lock() {
+                current.display_name = Some(node.display_name.clone());
+                current.country = node.country_name.clone().or(current.country.clone());
+                current.exit_ip = node.exit_ip.clone().or(current.exit_ip.clone());
+                current.latency = node.latency_median_ms.or(current.latency);
+            }
+            let _ = app.emit("public-route-selection", Option::<String>::None);
+            let _ = app.emit(
+                "connection-state",
+                state.lock().ok().map(|value| value.clone()),
+            );
+            monitor_connection(
+                &app,
+                &state,
+                &runtime,
+                &proxy,
+                &active_route,
+                &traffic_sample,
+                &cancel,
+                &routing_apply_in_progress,
+                &routes,
+                &route_metrics,
+                &active_proxy_port,
+            );
+        } else if let Err(error) = result {
+            let _ = core_runtime::stop_all(&runtime);
+            let _ = system_proxy::disable(&proxy);
+            let rollback = if switching && !cancel.load(Ordering::Relaxed) {
+                previous_route.as_ref().map(|previous| {
+                    connect_route(
+                        &app,
+                        &state,
+                        &runtime,
+                        &proxy,
+                        previous,
+                        &cancel,
+                        false,
+                        &active_route,
+                    )
+                })
+            } else {
+                None
+            };
+            if matches!(rollback.as_ref(), Some(Ok(()))) {
+                if let Ok(mut selected) = selected_route.lock() {
+                    *selected = previous_selected.clone();
+                }
+                if let Ok(mut current) = state.lock() {
+                    current.error = Some(format!("公共节点连接失败，已恢复原线路：{error}"));
+                }
+                let _ = app.emit("public-route-selection", previous_selected);
+                let _ = app.emit(
+                    "connection-state",
+                    state.lock().ok().map(|value| value.clone()),
+                );
+                monitor_connection(
+                    &app,
+                    &state,
+                    &runtime,
+                    &proxy,
+                    &active_route,
+                    &traffic_sample,
+                    &cancel,
+                    &routing_apply_in_progress,
+                    &routes,
+                    &route_metrics,
+                    &active_proxy_port,
+                );
+            } else {
+                if let Ok(mut active) = active_route.lock() {
+                    *active = None;
+                }
+                if let Ok(mut current) = state.lock() {
+                    current.connecting = false;
+                    current.connected = false;
+                    current.stage = "failed".into();
+                    current.core_id = None;
+                    current.error = Some(match rollback {
+                        Some(Err(rollback_error)) => {
+                            format!("公共节点连接失败：{error}；恢复原线路也失败：{rollback_error}")
+                        }
+                        _ => format!("公共节点连接失败：{error}"),
+                    });
+                }
+                let _ = app.emit(
+                    "connection-state",
+                    state.lock().ok().map(|value| value.clone()),
+                );
+            }
+        }
+        if let Ok(mut slot) = cancel_slot.lock() {
+            if slot
+                .as_ref()
+                .is_some_and(|current| Arc::ptr_eq(current, &cancel))
+            {
+                *slot = None;
+            }
+        }
+    });
+    Ok(())
+}
+
+fn start_seamless_community_switch(
+    app: AppHandle,
+    store: &ConnectionStore,
+    runtime: &core_runtime::CoreRuntime,
+    node: crate::community_nodes::models::CommunityNodeCandidate,
+    route: PublicRoute,
+    previous_route: PublicRoute,
+) -> Result<(), String> {
+    let cancel = Arc::new(AtomicBool::new(false));
+    let previous_cancel = store
+        .cancel
+        .lock()
+        .map_err(|_| "connection control unavailable")?
+        .replace(cancel.clone());
+    {
+        let mut state = store.state.lock().map_err(|_| "连接状态不可用")?;
+        state.connecting = true;
+        state.stage = "switching".into();
+        state.error = None;
+    }
+    emit_snapshot(&app, store);
+
+    let state = store.state.clone();
+    let cancel_slot = store.cancel.clone();
+    let proxy = store.proxy.clone();
+    let route_metrics = store.route_metrics.clone();
+    let active_route = store.active_route.clone();
+    let active_proxy_port = store.active_proxy_port.clone();
+    let selected_route = store.selected_route.clone();
+    let traffic_sample = store.traffic_sample.clone();
+    let routing_apply_in_progress = store.routing_apply_in_progress.clone();
+    let runtime = runtime.clone();
+    std::thread::spawn(move || {
+        let test_port = crate::community_nodes::probe::available_port_pair()
+            .map(|ports| ports.0)
+            .unwrap_or(16080);
+        let prepared = prepare_candidate(&app, &route, test_port, &cancel, true);
+        let candidate = match prepared {
+            Ok(candidate) => candidate,
+            Err(error) => {
+                if let Ok(mut current) = state.lock() {
+                    current.connecting = false;
+                    current.stage = "connected".into();
+                    current.error = Some(format!("新公共节点复核失败，原连接保持不变：{error}"));
+                }
+                if let Ok(mut slot) = cancel_slot.lock() {
+                    if slot
+                        .as_ref()
+                        .is_some_and(|value| Arc::ptr_eq(value, &cancel))
+                    {
+                        *slot = previous_cancel;
+                    }
+                }
+                let _ = app.emit(
+                    "connection-state",
+                    state.lock().ok().map(|value| value.clone()),
+                );
+                return;
+            }
+        };
+        let verified_latency = candidate.latency;
+        stop_prepared_candidate(&candidate);
+        let _guard = match RoutingApplyGuard::acquire(&routing_apply_in_progress) {
+            Ok(guard) => guard,
+            Err(error) => {
+                if let Ok(mut current) = state.lock() {
+                    current.connecting = false;
+                    current.stage = "connected".into();
+                    current.error = Some(format!("公共节点切换未执行：{error}"));
+                }
+                if let Ok(mut slot) = cancel_slot.lock() {
+                    if slot
+                        .as_ref()
+                        .is_some_and(|value| Arc::ptr_eq(value, &cancel))
+                    {
+                        *slot = previous_cancel;
+                    }
+                }
+                let _ = app.emit(
+                    "connection-state",
+                    state.lock().ok().map(|value| value.clone()),
+                );
+                return;
+            }
+        };
+        // Keep the existing connection monitor alive until the candidate has
+        // passed verification and this switch owns the routing mutation lock.
+        if let Some(previous) = previous_cancel.as_ref() {
+            previous.store(true, Ordering::Relaxed);
+        }
+        let result = connect_route(
+            &app,
+            &state,
+            &runtime,
+            &proxy,
+            &route,
+            &cancel,
+            false,
+            &active_route,
+        );
+        drop(_guard);
+        match result {
+            Ok(()) => {
+                if let Ok(mut port) = active_proxy_port.lock() {
+                    *port = Some(proxy_port(&route));
+                }
+                if let Ok(mut selected) = selected_route.lock() {
+                    *selected = None;
+                }
+                if let Ok(mut current) = state.lock() {
+                    current.connected = true;
+                    current.connecting = false;
+                    current.stage = "connected".into();
+                    current.display_name = Some(node.display_name.clone());
+                    current.country = node.country_name.clone().or(current.country.clone());
+                    current.exit_ip = node.exit_ip.clone().or(current.exit_ip.clone());
+                    current.latency = node.latency_median_ms.or(Some(verified_latency));
+                    current.error = None;
+                }
+                let _ = app.emit("public-route-selection", Option::<String>::None);
+                let _ = app.emit(
+                    "connection-state",
+                    state.lock().ok().map(|value| value.clone()),
+                );
+                monitor_connection(
+                    &app,
+                    &state,
+                    &runtime,
+                    &proxy,
+                    &active_route,
+                    &traffic_sample,
+                    &cancel,
+                    &routing_apply_in_progress,
+                    std::slice::from_ref(&route),
+                    &route_metrics,
+                    &active_proxy_port,
+                );
+            }
+            Err(error) => {
+                let _ = core_runtime::stop_all(&runtime);
+                let _ = system_proxy::disable(&proxy);
+                let rollback = connect_route(
+                    &app,
+                    &state,
+                    &runtime,
+                    &proxy,
+                    &previous_route,
+                    &cancel,
+                    false,
+                    &active_route,
+                );
+                match rollback {
+                    Ok(()) => {
+                        if let Ok(mut port) = active_proxy_port.lock() {
+                            *port = Some(proxy_port(&previous_route));
+                        }
+                        if let Ok(mut current) = state.lock() {
+                            current.connecting = false;
+                            current.stage = "connected".into();
+                            current.error =
+                                Some(format!("公共节点切换失败，已恢复原线路：{error}"));
+                        }
+                        let _ = app.emit(
+                            "connection-state",
+                            state.lock().ok().map(|value| value.clone()),
+                        );
+                        monitor_connection(
+                            &app,
+                            &state,
+                            &runtime,
+                            &proxy,
+                            &active_route,
+                            &traffic_sample,
+                            &cancel,
+                            &routing_apply_in_progress,
+                            std::slice::from_ref(&previous_route),
+                            &route_metrics,
+                            &active_proxy_port,
+                        );
+                    }
+                    Err(rollback_error) => {
+                        if let Ok(mut current) = state.lock() {
+                            current.connecting = false;
+                            current.connected = false;
+                            current.stage = "failed".into();
+                            current.core_id = None;
+                            current.system_proxy_enabled = false;
+                            current.error = Some(format!(
+                                "公共节点切换失败：{error}；恢复原线路也失败：{rollback_error}"
+                            ));
+                        }
+                        let _ = app.emit(
+                            "connection-state",
+                            state.lock().ok().map(|value| value.clone()),
+                        );
+                    }
+                }
+            }
+        }
+        if let Ok(mut slot) = cancel_slot.lock() {
+            if slot
+                .as_ref()
+                .is_some_and(|value| Arc::ptr_eq(value, &cancel))
+            {
+                *slot = None;
+            }
+        }
+    });
     Ok(())
 }
 
@@ -1572,6 +2030,8 @@ pub fn start_public_connection(
             "preparing".into()
         };
         state.core_id = None;
+        state.source_type = None;
+        state.node_id = None;
         state.display_name = selected.as_ref().map(|route| route.name.clone());
         state.error = None;
         state.exit_ip = None;
@@ -1908,6 +2368,8 @@ fn monitor_connection(
             current.connecting = false;
             current.stage = "failed".into();
             current.core_id = None;
+            current.source_type = None;
+            current.node_id = None;
             current.display_name = None;
             current.download_bps = 0;
             current.upload_bps = 0;
@@ -2293,7 +2755,7 @@ fn tun_route_supported(route: &PublicRoute) -> bool {
 fn supports_dynamic_probe(route: &PublicRoute) -> bool {
     matches!(
         route.core_id.as_str(),
-        "xray" | "sing-box" | "hysteria" | "hysteria2" | "naiveproxy" | "juicity"
+        "mihomo" | "xray" | "sing-box" | "hysteria" | "hysteria2" | "naiveproxy" | "juicity"
     )
 }
 
@@ -3053,6 +3515,24 @@ fn probe_config_for_port(
         return Ok((config.to_string(), false));
     }
     let data = fs::read(config).map_err(|error| format!("测速配置读取失败：{error}"))?;
+    if route.core_id == "mihomo" {
+        let mut value: serde_yaml::Value = serde_yaml::from_slice(&data)
+            .map_err(|error| format!("Mihomo 测速配置解析失败：{error}"))?;
+        let mapping = value
+            .as_mapping_mut()
+            .ok_or_else(|| "Mihomo 测速配置不是有效对象".to_string())?;
+        mapping.insert(
+            serde_yaml::Value::String("mixed-port".into()),
+            serde_yaml::Value::Number(test_port.into()),
+        );
+        mapping.remove(serde_yaml::Value::String("external-controller".into()));
+        mapping.remove(serde_yaml::Value::String("secret".into()));
+        let path = std::path::Path::new(config).with_file_name(format!("probe-{test_port}.yaml"));
+        let content = serde_yaml::to_string(&value)
+            .map_err(|error| format!("Mihomo 测速配置生成失败：{error}"))?;
+        fs::write(&path, content).map_err(|error| format!("Mihomo 测速配置写入失败：{error}"))?;
+        return Ok((path.to_string_lossy().into_owned(), true));
+    }
     let mut value: serde_json::Value =
         serde_json::from_slice(&data).map_err(|error| format!("测速配置解析失败：{error}"))?;
     match route.core_id.as_str() {
@@ -3121,6 +3601,13 @@ fn connect_route(
         current.stage = "connecting".into();
         current.display_name = Some(route.name.clone());
         current.core_id = Some(route.core_id.clone());
+        if let Some(node_id) = route.id.strip_prefix("community:") {
+            current.source_type = Some("community".into());
+            current.node_id = Some(node_id.into());
+        } else {
+            current.source_type = Some("public".into());
+            current.node_id = Some(route.id.clone());
+        }
     }
     if let Ok(mut current) = active_route.lock() {
         *current = Some(route.clone());
@@ -3344,7 +3831,7 @@ fn proxy_request_latency_on_port_with_url(
     Ok((seconds * 1000.0).round() as u32)
 }
 
-fn country_name_zh(code: Option<&str>, fallback: Option<&str>) -> String {
+pub(crate) fn country_name_zh(code: Option<&str>, fallback: Option<&str>) -> String {
     let name = match code.unwrap_or_default().to_uppercase().as_str() {
         "CN" => "中国",
         "HK" => "中国香港",
@@ -3378,6 +3865,8 @@ fn country_name_zh(code: Option<&str>, fallback: Option<&str>) -> String {
         "IT" => "意大利",
         "BR" => "巴西",
         "AR" => "阿根廷",
+        // Keep a valid provider country name (for uncommon ISO codes not yet
+        // translated above) instead of incorrectly relabeling the exit as unknown.
         _ => fallback.unwrap_or("未知地区"),
     };
     name.to_string()
@@ -4038,8 +4527,19 @@ pub fn cancel_connection(
     {
         flag.store(true, Ordering::Relaxed);
     }
-    let _ = core_runtime::stop_all(runtime);
-    let _ = system_proxy::disable(&store.proxy);
+    let core_error = core_runtime::stop_all(runtime).err();
+    let proxy_error = system_proxy::disable(&store.proxy).err();
+    if let Some(error) = proxy_error {
+        if let Ok(mut state) = store.state.lock() {
+            state.connecting = false;
+            state.connected = false;
+            state.stage = "failed".into();
+            state.system_proxy_enabled = true;
+            state.error = Some(format!("断开连接时恢复 Windows 系统代理失败：{error}"));
+        }
+        emit_snapshot(app, store);
+        return Err(format!("断开连接时恢复 Windows 系统代理失败：{error}"));
+    }
     if let Ok(mut route) = store.active_route.lock() {
         *route = None;
     }
@@ -4057,8 +4557,12 @@ pub fn cancel_connection(
     state.connected = false;
     state.stage = "idle".into();
     state.core_id = None;
+    state.source_type = None;
+    state.node_id = None;
     state.display_name = None;
-    state.error = None;
+    state.error = core_error
+        .as_ref()
+        .map(|error| format!("系统代理已恢复，但部分核心进程停止失败：{error}"));
     state.download_bps = 0;
     state.upload_bps = 0;
     state.download_total = 0;
@@ -4066,7 +4570,11 @@ pub fn cancel_connection(
     state.system_proxy_enabled = false;
     drop(state);
     emit_snapshot(app, store);
-    Ok(())
+    if let Some(error) = core_error {
+        Err(format!("系统代理已恢复，但部分核心进程停止失败：{error}"))
+    } else {
+        Ok(())
+    }
 }
 
 pub fn refresh_exit_info(
@@ -4276,6 +4784,13 @@ mod tests {
     }
 
     #[test]
+    fn persisted_tun_is_disabled_when_process_is_not_elevated() {
+        assert!(!effective_tun_enabled(true, false));
+        assert!(effective_tun_enabled(true, true));
+        assert!(!effective_tun_enabled(false, true));
+    }
+
+    #[test]
     fn legacy_custom_rules_are_removed_during_normalization() {
         let normalized =
             normalize_auto_routing_settings(routing_settings("rule", "direct")).unwrap();
@@ -4426,8 +4941,9 @@ rules:
     }
 
     #[test]
-    fn only_json_socks_cores_join_parallel_probe_pool() {
+    fn dynamically_rebindable_cores_join_parallel_probe_pool() {
         for core in [
+            "mihomo",
             "xray",
             "sing-box",
             "hysteria",
@@ -4437,9 +4953,33 @@ rules:
         ] {
             assert!(supports_dynamic_probe(&route(core)), "{core}");
         }
-        for core in ["mihomo", "mieru", "shadowquic"] {
+        for core in ["mieru", "shadowquic"] {
             assert!(!supports_dynamic_probe(&route(core)), "{core}");
         }
+    }
+
+    #[test]
+    fn mihomo_probe_config_uses_isolated_dynamic_port() {
+        let path =
+            std::env::temp_dir().join(format!("kingo-mihomo-probe-{}.yaml", std::process::id()));
+        fs::write(
+            &path,
+            "mixed-port: 7890\nexternal-controller: 127.0.0.1:9090\nsecret: KiNGO\nproxies: []\nproxy-groups: []\nrules: []\n",
+        )
+        .expect("write fixture");
+        let (generated, temporary) = probe_config_for_port(
+            &route("mihomo"),
+            path.to_str().expect("fixture path"),
+            17890,
+        )
+        .expect("generate dynamic config");
+        assert!(temporary);
+        let content = fs::read_to_string(&generated).expect("read dynamic config");
+        assert!(content.contains("mixed-port: 17890"));
+        assert!(!content.contains("external-controller"));
+        assert!(!content.contains("secret:"));
+        let _ = fs::remove_file(path);
+        let _ = fs::remove_file(generated);
     }
 
     #[cfg(windows)]

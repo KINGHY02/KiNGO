@@ -24,6 +24,14 @@
     "cores-v2.0.0.zip.part019",
     "cores-v2.0.0.zip.part020"
   ],
+  "externalFiles": [
+    {
+      "path": "subs-check/subs-check.exe",
+      "url": "https://github.com/beck-8/subs-check/releases/download/v1.6.2/subs-check_Windows_x86_64.zip",
+      "archiveSha256": "F84B2D464DFFAFC794CFEBA1D53B20BE5CC41ED228AC1FC2D044B1F06827BD2C",
+      "sha256": "135A731EFD4B97DD6F8AE685224CF8D97C8BCBC07B3B8DD70D1342E21542E5A0"
+    }
+  ],
   "requiredFiles": [
     "hy2/hysteria2.exe",
     "hysteria/hysteria-tun-windows-6.0-386.exe",
