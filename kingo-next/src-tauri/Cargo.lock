@@ -2383,7 +2383,7 @@ checksum = "e2db585e1d738fc771bf08a151420d3ed193d9d895a36df7f6f8a9456b911ddc"
 
 [[package]]
 name = "kingo"
-version = "2.0.4"
+version = "2.0.5"
 dependencies = [
  "base64 0.22.1",
  "flate2",
