@@ -157,42 +157,60 @@ fn enable_inner(
         .backup
         .lock()
         .map_err(|_| "system proxy state unavailable")?;
+    let transaction_previous = ProxyBackup {
+        enabled: read_value("ProxyEnable"),
+        server: read_value("ProxyServer"),
+        auto_config_url: read_value("AutoConfigURL"),
+        override_list: read_value("ProxyOverride"),
+    };
+    let created_backup = backup.is_none();
     if backup.is_none() {
-        let previous = ProxyBackup {
-            enabled: read_value("ProxyEnable"),
-            server: read_value("ProxyServer"),
-            auto_config_url: read_value("AutoConfigURL"),
-            override_list: read_value("ProxyOverride"),
-        };
-        persist_backup(&previous)?;
-        *backup = Some(previous);
+        persist_backup(&transaction_previous)?;
+        *backup = Some(transaction_previous.clone());
     }
     let proxy_port = if socks5 {
-        state.bridge.start(port)?
+        match state.bridge.start(port) {
+            Ok(port) => port,
+            Err(error) => {
+                if created_backup {
+                    *backup = None;
+                    clear_backup();
+                }
+                return Err(error);
+            }
+        }
     } else {
         state.bridge.stop();
         port
     };
-    write_value("AutoConfigURL", "REG_SZ", "")?;
-    write_value("ProxyEnable", "REG_DWORD", "1")?;
-    write_value("ProxyServer", "REG_SZ", &format!("127.0.0.1:{proxy_port}"))?;
-    if bypass_lan {
-        write_value(
-            "ProxyOverride",
-            "REG_SZ",
-            "<local>;localhost;127.*;10.*;192.168.*;172.16.*;172.17.*;172.18.*;172.19.*;172.20.*;172.21.*;172.22.*;172.23.*;172.24.*;172.25.*;172.26.*;172.27.*;172.28.*;172.29.*;172.30.*;172.31.*",
-        )?;
+    let bypass = if bypass_lan {
+        "<local>;localhost;127.*;10.*;192.168.*;172.16.*;172.17.*;172.18.*;172.19.*;172.20.*;172.21.*;172.22.*;172.23.*;172.24.*;172.25.*;172.26.*;172.27.*;172.28.*;172.29.*;172.30.*;172.31.*"
     } else {
-        write_value("ProxyOverride", "REG_SZ", "")?;
+        ""
+    };
+    let apply = (|| {
+        write_value("AutoConfigURL", "REG_SZ", "")?;
+        write_value("ProxyEnable", "REG_DWORD", "1")?;
+        write_value("ProxyServer", "REG_SZ", &format!("127.0.0.1:{proxy_port}"))?;
+        write_value("ProxyOverride", "REG_SZ", bypass)?;
+        apply_wininet_proxy(&format!("127.0.0.1:{proxy_port}"), bypass)?;
+        Ok::<(), String>(())
+    })();
+    if let Err(error) = apply {
+        let rollback = restore_backup(transaction_previous);
+        notify_system();
+        if created_backup {
+            state.bridge.stop();
+            *backup = None;
+            clear_backup();
+        }
+        return Err(match rollback {
+            Ok(()) => format!("{error}；已恢复修改前的 Windows 系统代理"),
+            Err(rollback_error) => {
+                format!("{error}；恢复修改前的 Windows 系统代理失败：{rollback_error}")
+            }
+        });
     }
-    apply_wininet_proxy(
-        &format!("127.0.0.1:{proxy_port}"),
-        if bypass_lan {
-            "<local>;localhost;127.*;10.*;192.168.*;172.16.*;172.17.*;172.18.*;172.19.*;172.20.*;172.21.*;172.22.*;172.23.*;172.24.*;172.25.*;172.26.*;172.27.*;172.28.*;172.29.*;172.30.*;172.31.*"
-        } else {
-            ""
-        },
-    )?;
     notify_system();
     Ok(())
 }

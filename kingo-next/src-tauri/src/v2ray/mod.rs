@@ -1,7 +1,7 @@
 mod config;
 mod formatter;
 mod models;
-mod parser;
+pub(crate) mod parser;
 mod qr;
 mod settings;
 mod store;

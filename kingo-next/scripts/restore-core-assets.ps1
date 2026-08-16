@@ -13,6 +13,7 @@ $workDirectory = Join-Path $projectRoot "src-tauri\target\core-assets"
 $archivePath = Join-Path $workDirectory ([string]$manifest.archive)
 $markerPath = Join-Path $workDirectory "restored.sha256"
 $requiredFiles = @($manifest.requiredFiles)
+$externalFiles = @($manifest.externalFiles)
 
 function Get-Sha256Hash {
     param([Parameter(Mandatory = $true)][string]$Path)
@@ -32,6 +33,31 @@ function Get-Sha256Hash {
     return ([string]$hash).ToUpperInvariant()
 }
 
+function Invoke-VerifiedArchiveDownload {
+    param(
+        [Parameter(Mandatory = $true)][string]$Uri,
+        [Parameter(Mandatory = $true)][string]$Destination,
+        [int]$MaximumAttempts = 3
+    )
+
+    for ($attempt = 1; $attempt -le $MaximumAttempts; $attempt++) {
+        try {
+            if (Test-Path -LiteralPath $Destination) {
+                Remove-Item -LiteralPath $Destination -Force
+            }
+            Invoke-WebRequest -Uri $Uri -OutFile $Destination -UseBasicParsing
+            return
+        }
+        catch {
+            if ($attempt -ge $MaximumAttempts) {
+                throw
+            }
+            Write-Warning "External core download attempt $attempt failed. Retrying..."
+            Start-Sleep -Seconds ([Math]::Pow(2, $attempt))
+        }
+    }
+}
+
 function Test-CoreAssetsRestored {
     if (-not (Test-Path -LiteralPath $markerPath -PathType Leaf)) {
         return $false
@@ -41,6 +67,15 @@ function Test-CoreAssetsRestored {
     }
     foreach ($relativePath in $requiredFiles) {
         if (-not (Test-Path -LiteralPath (Join-Path $targetDirectory $relativePath) -PathType Leaf)) {
+            return $false
+        }
+    }
+    foreach ($entry in $externalFiles) {
+        $path = Join-Path $targetDirectory ([string]$entry.path)
+        if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+            return $false
+        }
+        if ((Get-Sha256Hash -Path $path) -ne ([string]$entry.sha256).ToUpperInvariant()) {
             return $false
         }
     }
@@ -88,6 +123,51 @@ Expand-Archive -LiteralPath $archivePath -DestinationPath $targetDirectory -Forc
 foreach ($relativePath in $requiredFiles) {
     if (-not (Test-Path -LiteralPath (Join-Path $targetDirectory $relativePath) -PathType Leaf)) {
         throw "Restored core asset is missing: $relativePath"
+    }
+}
+
+foreach ($entry in $externalFiles) {
+    $relativePath = [string]$entry.path
+    $url = [string]$entry.url
+    $archiveHash = ([string]$entry.archiveSha256).ToUpperInvariant()
+    $fileHash = ([string]$entry.sha256).ToUpperInvariant()
+    if (-not $url.StartsWith("https://", [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw "External core asset URL must use HTTPS: $url"
+    }
+    $targetPath = [System.IO.Path]::GetFullPath((Join-Path $targetDirectory $relativePath))
+    $targetRoot = [System.IO.Path]::GetFullPath($targetDirectory) + [System.IO.Path]::DirectorySeparatorChar
+    if (-not $targetPath.StartsWith($targetRoot, [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw "External core asset path escapes the target directory: $relativePath"
+    }
+    if ((Test-Path -LiteralPath $targetPath -PathType Leaf) -and
+        (Get-Sha256Hash -Path $targetPath) -eq $fileHash) {
+        continue
+    }
+
+    $externalArchive = Join-Path $workDirectory ("external-" + $archiveHash.Substring(0, 16) + ".zip")
+    Invoke-VerifiedArchiveDownload -Uri $url -Destination $externalArchive
+    $actualArchiveHash = Get-Sha256Hash -Path $externalArchive
+    if ($actualArchiveHash -ne $archiveHash) {
+        throw "External core archive checksum mismatch for $relativePath. Expected $archiveHash, got $actualArchiveHash."
+    }
+
+    $extractDirectory = Join-Path $workDirectory ("external-" + $fileHash.Substring(0, 16))
+    if (Test-Path -LiteralPath $extractDirectory) {
+        Remove-Item -LiteralPath $extractDirectory -Recurse -Force
+    }
+    Expand-Archive -LiteralPath $externalArchive -DestinationPath $extractDirectory -Force
+    $fileName = [System.IO.Path]::GetFileName($relativePath)
+    $extracted = Get-ChildItem -LiteralPath $extractDirectory -Recurse -File |
+        Where-Object { $_.Name -eq $fileName } |
+        Select-Object -First 1
+    if (-not $extracted) {
+        throw "External core archive does not contain $fileName."
+    }
+    New-Item -ItemType Directory -Force -Path ([System.IO.Path]::GetDirectoryName($targetPath)) | Out-Null
+    Copy-Item -LiteralPath $extracted.FullName -Destination $targetPath -Force
+    $actualFileHash = Get-Sha256Hash -Path $targetPath
+    if ($actualFileHash -ne $fileHash) {
+        throw "External core file checksum mismatch for $relativePath. Expected $fileHash, got $actualFileHash."
     }
 }
 

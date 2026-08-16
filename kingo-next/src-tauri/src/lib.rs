@@ -1,6 +1,7 @@
 mod clash_controller;
 mod clash_profiles;
 mod clash_realtime;
+mod community_nodes;
 mod core_runtime;
 mod core_update;
 mod cores;
@@ -146,6 +147,128 @@ fn update_tray_visual(app: &tauri::AppHandle, state: &AppConnectionState) {
 fn get_app_state(app: tauri::AppHandle, store: State<'_, ConnectionStore>) -> AppConnectionState {
     services::load_route_metrics(&app, &store);
     services::snapshot(&store)
+}
+
+#[tauri::command]
+fn get_community_scan_state(
+    app: tauri::AppHandle,
+    store: State<'_, community_nodes::scanner::CommunityNodeStore>,
+) -> community_nodes::models::CommunityScanState {
+    community_nodes::scanner::restored_state(&app, &store)
+}
+
+#[tauri::command]
+fn start_community_scan(
+    app: tauri::AppHandle,
+    store: State<'_, community_nodes::scanner::CommunityNodeStore>,
+    subs_check: State<'_, community_nodes::subs_check::SubsCheckRuntime>,
+    connection_store: State<'_, ConnectionStore>,
+) -> Result<community_nodes::models::CommunityScanState, String> {
+    let connection = services::snapshot(&connection_store);
+    if connection.connecting {
+        return Err("正在建立或切换连接，请完成后再获取节点".into());
+    }
+    if connection.connected && connection.source_type.as_deref() == Some("community") {
+        return Err("当前正在使用获取节点列表中的节点，请先断开连接再重新检测".into());
+    }
+    community_nodes::subs_check::start(app, &subs_check, &store)
+}
+
+#[tauri::command]
+fn stop_community_scan(
+    app: tauri::AppHandle,
+    store: State<'_, community_nodes::scanner::CommunityNodeStore>,
+    subs_check: State<'_, community_nodes::subs_check::SubsCheckRuntime>,
+) -> Result<community_nodes::models::CommunityScanState, String> {
+    community_nodes::subs_check::stop(&app, &subs_check, &store)
+}
+
+#[tauri::command]
+fn list_community_nodes(
+    app: tauri::AppHandle,
+    store: State<'_, community_nodes::scanner::CommunityNodeStore>,
+) -> Vec<community_nodes::models::CommunityNodeCandidate> {
+    community_nodes::scanner::nodes(&app, &store)
+}
+
+#[tauri::command]
+fn clear_community_nodes(
+    app: tauri::AppHandle,
+    store: State<'_, community_nodes::scanner::CommunityNodeStore>,
+    connection_store: State<'_, ConnectionStore>,
+) -> Result<(), String> {
+    let connection = services::snapshot(&connection_store);
+    if connection.connecting {
+        return Err("正在建立或切换连接，请完成后再清空节点结果".into());
+    }
+    if connection.connected && connection.source_type.as_deref() == Some("community") {
+        return Err("当前正在使用列表中的节点，请先断开连接再清空结果".into());
+    }
+    community_nodes::scanner::clear(&app, &store)
+}
+
+#[tauri::command]
+fn get_community_settings(app: tauri::AppHandle) -> community_nodes::models::CommunitySettings {
+    community_nodes::store::load_settings(&app)
+}
+
+#[tauri::command]
+fn save_community_settings(
+    app: tauri::AppHandle,
+    settings: community_nodes::models::CommunitySettings,
+    store: State<'_, community_nodes::scanner::CommunityNodeStore>,
+) -> Result<community_nodes::models::CommunitySettings, String> {
+    if matches!(
+        community_nodes::scanner::state(&store).state.as_str(),
+        "running" | "paused" | "stopping"
+    ) || community_nodes::scanner::has_active_retests(&store)
+    {
+        return Err("节点检测或复测期间不能修改检测设置".into());
+    }
+    community_nodes::store::save_settings(&app, settings)
+}
+
+#[tauri::command]
+fn retest_community_node(
+    app: tauri::AppHandle,
+    node_id: String,
+    store: State<'_, community_nodes::scanner::CommunityNodeStore>,
+) -> Result<(), String> {
+    community_nodes::scanner::retest(app, &store, node_id)
+}
+
+#[tauri::command]
+fn retest_all_community_nodes(
+    app: tauri::AppHandle,
+    store: State<'_, community_nodes::scanner::CommunityNodeStore>,
+) -> Result<usize, String> {
+    community_nodes::scanner::retest_all(app, &store)
+}
+
+#[tauri::command]
+fn connect_community_node(
+    app: tauri::AppHandle,
+    node_id: String,
+    community_store: State<'_, community_nodes::scanner::CommunityNodeStore>,
+    connection_store: State<'_, ConnectionStore>,
+    runtime: State<'_, core_runtime::CoreRuntime>,
+) -> Result<(), String> {
+    let _operation = community_store
+        .operations
+        .lock()
+        .map_err(|_| "公共节点操作状态不可用")?;
+    let scan = community_nodes::scanner::state(&community_store);
+    if matches!(scan.state.as_str(), "running" | "paused" | "stopping") {
+        return Err("公共节点批量检测期间不能连接节点，请先停止或等待检测完成".into());
+    }
+    if community_nodes::scanner::has_active_retests(&community_store) {
+        return Err("公共节点复测期间不能连接节点，请等待复测完成".into());
+    }
+    let node = community_nodes::scanner::nodes(&app, &community_store)
+        .into_iter()
+        .find(|node| node.id == node_id)
+        .ok_or_else(|| "公共节点不存在，可能已被清理".to_string())?;
+    services::start_community_connection(app, &connection_store, &runtime, node)
 }
 
 #[tauri::command]
@@ -349,7 +472,11 @@ fn update_core(
     core_id: String,
     store: State<'_, ConnectionStore>,
     runtime: State<'_, core_runtime::CoreRuntime>,
+    subs_check: State<'_, community_nodes::subs_check::SubsCheckRuntime>,
 ) -> Result<core_update::CoreUpdateResult, String> {
+    if core_id == "subs-check" && community_nodes::subs_check::is_running(&subs_check) {
+        return Err("请先停止公共节点检测，再更新 SubsCheck".into());
+    }
     let state = services::snapshot(&store);
     if state.connecting {
         return Err("正在连接或切换线路，请完成后再更新核心".into());
@@ -369,7 +496,13 @@ fn update_core(
         .and_then(|route| route.clone());
     let mut connection_stopped = false;
     let update_result = core_update::update_with_before_install(&app, &core_id, || {
-        if reconnect_after_update {
+        if core_id == "subs-check" {
+            return if community_nodes::subs_check::is_running(&subs_check) {
+                Err("公共节点检测已开始，本次 SubsCheck 更新已取消".into())
+            } else {
+                Ok(())
+            };
+        } else if reconnect_after_update {
             services::cancel_connection(&app, &store, &runtime)?;
             connection_stopped = true;
         } else {
@@ -398,9 +531,18 @@ fn update_core(
 }
 
 #[tauri::command]
-fn restore_bundled_core(app: tauri::AppHandle, core_id: String) -> Result<(), String> {
+fn restore_bundled_core(
+    app: tauri::AppHandle,
+    core_id: String,
+    subs_check: State<'_, community_nodes::subs_check::SubsCheckRuntime>,
+) -> Result<(), String> {
+    if core_id == "subs-check" && community_nodes::subs_check::is_running(&subs_check) {
+        return Err("请先停止公共节点检测，再恢复 SubsCheck 内置版本".into());
+    }
     let runtime = app.state::<core_runtime::CoreRuntime>();
-    core_runtime::stop_all(&runtime)?;
+    if core_id != "subs-check" {
+        core_runtime::stop_all(&runtime)?;
+    }
     core_update::restore_bundled(&app, &core_id)
 }
 
@@ -1252,6 +1394,8 @@ pub fn run() {
             }
         }))
         .manage(ConnectionStore::default())
+        .manage(community_nodes::scanner::CommunityNodeStore::default())
+        .manage(community_nodes::subs_check::SubsCheckRuntime::default())
         .manage(core_runtime::CoreRuntime::default())
         .manage(clash_realtime::ClashRealtimeHub::default())
         .manage(TrayMenuState::default())
@@ -1391,6 +1535,16 @@ pub fn run() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .invoke_handler(tauri::generate_handler![
             get_app_state,
+            get_community_scan_state,
+            start_community_scan,
+            stop_community_scan,
+            list_community_nodes,
+            clear_community_nodes,
+            get_community_settings,
+            save_community_settings,
+            retest_community_node,
+            retest_all_community_nodes,
+            connect_community_node,
             enable_uwp_loopback,
             list_public_routes,
             test_public_routes,
@@ -1512,6 +1666,8 @@ pub fn run() {
             return;
         }
         if matches!(event, tauri::RunEvent::ExitRequested { .. }) {
+            let subs_check = app_handle.state::<community_nodes::subs_check::SubsCheckRuntime>();
+            community_nodes::subs_check::shutdown(&subs_check);
             let runtime = app_handle.state::<core_runtime::CoreRuntime>();
             let store = app_handle.state::<ConnectionStore>();
             if let Ok(cancel) = store.cancel.lock() {
