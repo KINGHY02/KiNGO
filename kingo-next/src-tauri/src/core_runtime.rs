@@ -72,14 +72,7 @@ fn resolve_executable(
     app: &AppHandle,
     core_id: &str,
 ) -> Result<(cores::CoreProfile, PathBuf), String> {
-    let status = cores::statuses(app)?
-        .into_iter()
-        .find(|item| item.profile.id == core_id)
-        .ok_or_else(|| "核心不存在".to_string())?;
-    let executable = status
-        .executable_path
-        .ok_or_else(|| format!("{} 核心文件不存在", status.profile.name))?;
-    Ok((status.profile, PathBuf::from(executable)))
+    cores::executable(app, core_id)
 }
 
 fn configure_xray_assets(app: &AppHandle, command: &mut std::process::Command) {

@@ -164,6 +164,31 @@ pub fn profiles() -> Vec<CoreProfile> {
     ]
 }
 
+fn resource_core_id(profile: &CoreProfile) -> &str {
+    if profile.id == "hysteria2" {
+        "hy2"
+    } else {
+        &profile.id
+    }
+}
+
+pub fn executable(app: &AppHandle, core_id: &str) -> Result<(CoreProfile, PathBuf), String> {
+    let profile = profiles()
+        .into_iter()
+        .find(|profile| profile.id == core_id)
+        .ok_or_else(|| "核心不存在".to_string())?;
+    let runtime = paths::ensure(app)?;
+    let user_path = PathBuf::from(runtime.cores_dir)
+        .join(&profile.id)
+        .join(&profile.executable);
+    let executable = if user_path.is_file() {
+        user_path
+    } else {
+        paths::bundled_core_file(app, resource_core_id(&profile), &profile.executable)?
+    };
+    Ok((profile, executable))
+}
+
 pub fn statuses(app: &AppHandle) -> Result<Vec<CoreStatus>, String> {
     let runtime = paths::ensure(app)?;
     Ok(profiles()
@@ -172,18 +197,8 @@ pub fn statuses(app: &AppHandle) -> Result<Vec<CoreStatus>, String> {
             let user_path = PathBuf::from(&runtime.cores_dir)
                 .join(&profile.id)
                 .join(&profile.executable);
-            let resource_core_id = if profile.id == "hysteria2" {
-                "hy2"
-            } else {
-                &profile.id
-            };
-            let bundled_path = paths::resource_file(
-                app,
-                PathBuf::from("cores")
-                    .join(resource_core_id)
-                    .join(&profile.executable),
-            )
-            .ok();
+            let bundled_path =
+                paths::bundled_core_file(app, resource_core_id(&profile), &profile.executable).ok();
             let (available, source, executable_path) = if user_path.is_file() {
                 (
                     true,
