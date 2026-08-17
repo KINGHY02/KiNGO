@@ -84,14 +84,14 @@ fn materialize_core_payload(
     target: &Path,
     payload_hash: [u8; 32],
 ) -> Result<(), String> {
-    if target.is_file() && file_sha256(&target)? == payload_hash {
+    if target.is_file() && file_sha256(target)? == payload_hash {
         return Ok(());
     }
     let parent = target.parent().ok_or("核心运行目录无效")?;
     fs::create_dir_all(parent)
         .map_err(|error| format!("无法创建核心运行目录 {}：{error}", parent.display()))?;
     let pending = target.with_extension("exe.pending");
-    let mut source = fs::File::open(&payload)
+    let mut source = fs::File::open(payload)
         .map_err(|error| format!("无法打开内置核心载荷 {}：{error}", payload.display()))?;
     let mut output = fs::File::create(&pending)
         .map_err(|error| format!("无法释放内置核心 {}：{error}", pending.display()))?;
@@ -106,10 +106,10 @@ fn materialize_core_payload(
         return Err(format!("内置核心释放后校验失败：{}", target.display()));
     }
     if target.is_file() {
-        fs::remove_file(&target)
+        fs::remove_file(target)
             .map_err(|error| format!("无法替换内置核心 {}：{error}", target.display()))?;
     }
-    fs::rename(&pending, &target)
+    fs::rename(&pending, target)
         .map_err(|error| format!("无法安装内置核心 {}：{error}", target.display()))?;
     Ok(())
 }
