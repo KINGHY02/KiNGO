@@ -109,7 +109,7 @@ fn sha256(path: &Path) -> Result<String, String> {
 }
 
 fn bundled_core_path(app: &AppHandle) -> Result<PathBuf, String> {
-    let path = paths::resource_file(app, "cores/subs-check/subs-check.exe")?;
+    let path = paths::bundled_core_file(app, "subs-check", "subs-check.exe")?;
     let actual = sha256(&path)?;
     if actual != CORE_SHA256 {
         return Err(format!(
