@@ -121,10 +121,8 @@ mod tests {
 
     #[test]
     fn core_payload_is_materialized_and_corruption_is_repaired() {
-        let root = std::env::temp_dir().join(format!(
-            "kingo-core-payload-test-{}",
-            std::process::id()
-        ));
+        let root =
+            std::env::temp_dir().join(format!("kingo-core-payload-test-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(&root).unwrap();
         let payload = root.join("xray.exe.payload");
