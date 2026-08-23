@@ -9,6 +9,10 @@ mod geo_rules;
 mod paths;
 mod process_utils;
 mod services;
+#[cfg(not(target_os = "macos"))]
+mod system_proxy;
+#[cfg(target_os = "macos")]
+#[path = "system_proxy_macos.rs"]
 mod system_proxy;
 mod traffic_bridge;
 mod v2ray;
@@ -137,7 +141,7 @@ fn update_tray_visual(app: &tauri::AppHandle, state: &AppConnectionState) {
             let _ = handles.rule.set_checked(routing.mode != "global");
             let _ = handles.global.set_enabled(actions_enabled);
             let _ = handles.global.set_checked(routing.mode == "global");
-            let _ = handles.tun.set_enabled(actions_enabled);
+            let _ = handles.tun.set_enabled(actions_enabled && cfg!(windows));
             let _ = handles.tun.set_checked(state.tun_enabled);
         }
     }
@@ -243,6 +247,25 @@ fn retest_all_community_nodes(
     store: State<'_, community_nodes::scanner::CommunityNodeStore>,
 ) -> Result<usize, String> {
     community_nodes::scanner::retest_all(app, &store)
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PlatformInfo {
+    os: &'static str,
+    architecture: &'static str,
+    supports_tun: bool,
+    supports_uwp_loopback: bool,
+}
+
+#[tauri::command]
+fn get_platform_info() -> PlatformInfo {
+    PlatformInfo {
+        os: std::env::consts::OS,
+        architecture: std::env::consts::ARCH,
+        supports_tun: cfg!(windows),
+        supports_uwp_loopback: cfg!(windows),
+    }
 }
 
 #[tauri::command]
@@ -1433,8 +1456,18 @@ pub fn run() {
                 CheckMenuItem::with_id(app, "tray-rule", "规则模式", true, true, None::<&str>)?;
             let tray_global =
                 CheckMenuItem::with_id(app, "tray-global", "全局模式", true, false, None::<&str>)?;
-            let tray_tun =
-                CheckMenuItem::with_id(app, "tray-tun", "TUN 模式", true, false, None::<&str>)?;
+            let tray_tun = CheckMenuItem::with_id(
+                app,
+                "tray-tun",
+                if cfg!(windows) {
+                    "TUN 模式"
+                } else {
+                    "TUN 模式（仅 Windows）"
+                },
+                cfg!(windows),
+                false,
+                None::<&str>,
+            )?;
             let tray_menu = MenuBuilder::new(app)
                 .item(&tray_status)
                 .separator()
@@ -1550,6 +1583,7 @@ pub fn run() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .invoke_handler(tauri::generate_handler![
             get_app_state,
+            get_platform_info,
             get_community_scan_state,
             start_community_scan,
             stop_community_scan,

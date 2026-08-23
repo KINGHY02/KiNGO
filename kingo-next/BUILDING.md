@@ -30,3 +30,14 @@ GitHub Actions 使用仓库 Secrets 中的私钥生成签名及 `latest.json`。
 
 发布前必须确认工作树、版本号、完整构建、安装、连接、TUN、托盘和更新功能；
 用户确认前不要创建标签或推送新版本。
+
+## macOS Apple Silicon
+
+Apple Silicon 原生 DMG 的源码适配、固定核心资源、M1 CI、签名/公证门禁和已知限制见：
+
+```text
+MACOS_APPLE_SILICON_BUILD.md
+```
+
+当前 macOS 工作流生成 ad-hoc 签名的测试 artifact；未配置 Developer ID 和 Apple
+公证凭据前，不得把该 artifact 作为正式公开发行版。

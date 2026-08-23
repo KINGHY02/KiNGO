@@ -12,6 +12,25 @@ pub fn hidden_command<S: AsRef<OsStr>>(program: S) -> Command {
     command
 }
 
+pub fn curl_command() -> Command {
+    let mut command = if cfg!(windows) {
+        hidden_command("curl.exe")
+    } else {
+        hidden_command("/usr/bin/curl")
+    };
+    #[cfg(windows)]
+    command.arg("--ssl-no-revoke");
+    command
+}
+
+pub fn null_device() -> &'static str {
+    if cfg!(windows) {
+        "NUL"
+    } else {
+        "/dev/null"
+    }
+}
+
 #[cfg(windows)]
 pub fn is_elevated() -> bool {
     hidden_command("powershell.exe")
@@ -54,7 +73,12 @@ Where-Object {
         .unwrap_or_default()
 }
 
-#[cfg(not(windows))]
+#[cfg(target_os = "macos")]
+pub fn is_elevated() -> bool {
+    false
+}
+
+#[cfg(not(any(windows, target_os = "macos")))]
 pub fn is_elevated() -> bool {
     true
 }
@@ -99,12 +123,22 @@ pub fn relaunch_elevated_delayed() -> Result<(), String> {
     Ok(())
 }
 
-#[cfg(not(windows))]
+#[cfg(target_os = "macos")]
+pub fn relaunch_elevated() -> Result<(), String> {
+    Err("macOS 版本暂不提供 TUN 提权启动，请使用系统代理模式".into())
+}
+
+#[cfg(not(any(windows, target_os = "macos")))]
 pub fn relaunch_elevated() -> Result<(), String> {
     Ok(())
 }
 
-#[cfg(not(windows))]
+#[cfg(target_os = "macos")]
+pub fn relaunch_elevated_delayed() -> Result<(), String> {
+    relaunch_elevated()
+}
+
+#[cfg(not(any(windows, target_os = "macos")))]
 pub fn relaunch_elevated_delayed() -> Result<(), String> {
     Ok(())
 }

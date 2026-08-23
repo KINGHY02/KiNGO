@@ -1,6 +1,7 @@
 use crate::{
     clash_controller, clash_profiles, core_runtime, geo_rules, paths,
-    process_utils::hidden_command, system_proxy,
+    process_utils::{curl_command, hidden_command, null_device},
+    system_proxy,
 };
 use serde::{Deserialize, Serialize};
 use std::{
@@ -478,15 +479,8 @@ fn download_and_install_route(
 }
 
 fn download_route(url: &str, download_proxy: Option<&str>) -> Result<Vec<u8>, String> {
-    let mut command = hidden_command("curl.exe");
-    command.args([
-        "-fsSL",
-        "--ssl-no-revoke",
-        "--connect-timeout",
-        "8",
-        "--max-time",
-        "30",
-    ]);
+    let mut command = curl_command();
+    command.args(["-fsSL", "--connect-timeout", "8", "--max-time", "30"]);
     if let Some(proxy) = download_proxy {
         command.args(["--proxy", proxy]);
     }
@@ -1095,11 +1089,11 @@ pub fn test_speed_test_url(
         return Err("测速超时必须在 2 到 30 秒之间".into());
     }
     let timeout = timeout_seconds.to_string();
-    let output = hidden_command("curl.exe")
+    let output = curl_command()
         .args([
             "-sS",
             "-o",
-            "NUL",
+            null_device(),
             "-w",
             "%{http_code}|%{time_total}",
             "--connect-timeout",
@@ -1108,7 +1102,6 @@ pub fn test_speed_test_url(
             &timeout,
             "--range",
             "0-65535",
-            "--ssl-no-revoke",
             url.trim(),
         ])
         .output()
@@ -1161,10 +1154,19 @@ fn persist_connection_settings(
 }
 
 fn persist_route_metrics(metrics: &Arc<Mutex<HashMap<String, RouteMetric>>>) {
-    let Ok(data_dir) = std::env::var("APPDATA") else {
+    let data_dir = if cfg!(target_os = "macos") {
+        std::env::var("HOME").ok().map(|home| {
+            PathBuf::from(home)
+                .join("Library")
+                .join("Application Support")
+        })
+    } else {
+        std::env::var("APPDATA").ok().map(PathBuf::from)
+    };
+    let Some(data_dir) = data_dir else {
         return;
     };
-    let path = std::path::PathBuf::from(data_dir)
+    let path = data_dir
         .join("com.kingo.client")
         .join("routes")
         .join("metrics.json");
@@ -1299,6 +1301,7 @@ fn monitor_clash_runtime(
     });
 }
 
+#[cfg(windows)]
 fn listening_port_owner(port: u16) -> Option<String> {
     let output = hidden_command("netstat.exe")
         .args(["-ano", "-p", "tcp"])
@@ -1331,6 +1334,32 @@ fn listening_port_owner(port: u16) -> Option<String> {
         Some(process) => format!("{process}（PID {pid}）"),
         None => format!("PID {pid}"),
     })
+}
+
+#[cfg(target_os = "macos")]
+fn listening_port_owner(port: u16) -> Option<String> {
+    let output = hidden_command("/usr/sbin/lsof")
+        .args(["-nP", &format!("-iTCP:{port}"), "-sTCP:LISTEN", "-Fpc"])
+        .output()
+        .ok()?;
+    let text = String::from_utf8_lossy(&output.stdout);
+    let pid = text
+        .lines()
+        .find_map(|line| line.strip_prefix('p'))?
+        .to_string();
+    let process = text
+        .lines()
+        .find_map(|line| line.strip_prefix('c'))
+        .filter(|value| !value.is_empty());
+    Some(match process {
+        Some(process) => format!("{process}（PID {pid}）"),
+        None => format!("PID {pid}"),
+    })
+}
+
+#[cfg(not(any(windows, target_os = "macos")))]
+fn listening_port_owner(_port: u16) -> Option<String> {
+    None
 }
 
 fn ensure_clash_ports_available(runtime: &core_runtime::CoreRuntime) -> Result<(), String> {
@@ -3768,14 +3797,13 @@ fn proxy_json_request(
     url: &str,
     max_time_seconds: u32,
 ) -> Result<serde_json::Value, String> {
-    let output = hidden_command("curl.exe")
+    let output = curl_command()
         .args([
             "-fsS",
             "--connect-timeout",
             "3",
             "--max-time",
             &max_time_seconds.to_string(),
-            "--ssl-no-revoke",
             "--proxy",
             proxy,
             "-H",
@@ -3842,18 +3870,17 @@ fn proxy_request_latency_on_port_with_url(
     } else {
         format!("socks5h://127.0.0.1:{port}")
     };
-    let output = hidden_command("curl.exe")
+    let output = curl_command()
         .args([
             "-sS",
             "-o",
-            "NUL",
+            null_device(),
             "-w",
             "%{time_total}",
             "--connect-timeout",
             &connect_timeout,
             "--max-time",
             &max_time,
-            "--ssl-no-revoke",
             "--proxy",
             &proxy,
             test_url,
@@ -4717,7 +4744,7 @@ pub fn get_traffic(app: &AppHandle, store: &ConnectionStore) -> Result<TrafficSt
                 })
             })
             .unwrap_or_default();
-        let mut command = hidden_command("curl.exe");
+        let mut command = curl_command();
         command.args(["-fsS", "--connect-timeout", "1", "--max-time", "2"]);
         if !secret.is_empty() {
             command.args(["-H", &format!("Authorization: Bearer {secret}")]);

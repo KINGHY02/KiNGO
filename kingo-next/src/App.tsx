@@ -210,6 +210,12 @@ type SpeedTestSettings = {
   concurrency: number;
 };
 type SpeedTestUrlResult = { url: string; status: number; latencyMs: number };
+type PlatformInfo = {
+  os: string;
+  architecture: string;
+  supportsTun: boolean;
+  supportsUwpLoopback: boolean;
+};
 
 const LATENCY_URL_PRESETS = [
   { label: "Gstatic 204", url: "https://www.gstatic.com/generate_204" },
@@ -409,6 +415,12 @@ function App() {
   );
   const [logs, setLogs] = useState<LogEntry[]>([]);
   const [appVersion, setAppVersion] = useState("2.0.6");
+  const [platformInfo, setPlatformInfo] = useState<PlatformInfo>({
+    os: "unknown",
+    architecture: "unknown",
+    supportsTun: false,
+    supportsUwpLoopback: false,
+  });
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [motionEnabled, setMotionEnabled] = useState(() => localStorage.getItem("kingo-motion") !== "off");
   const [theme, setTheme] = useState<Theme>(() => (localStorage.getItem("kingo-theme") as Theme) || "light");
@@ -417,6 +429,7 @@ function App() {
 
   useEffect(() => {
     void getVersion().then(setAppVersion).catch(() => undefined);
+    void invoke<PlatformInfo>("get_platform_info").then(setPlatformInfo).catch(() => undefined);
   }, []);
 
   useEffect(() => {
@@ -609,6 +622,7 @@ function App() {
             onRoute={chooseRoute}
             onPage={setPage}
             motionEnabled={motionEnabled}
+            platformInfo={platformInfo}
             onMotionEnabled={(enabled) => { setMotionEnabled(enabled); localStorage.setItem("kingo-motion", enabled ? "on" : "off"); }}
           />
         )}
@@ -831,7 +845,7 @@ function shouldAcceptCommunityScan(current: CommunityScanState, incoming: Commun
   return progressRank(incoming) >= progressRank(current);
 }
 
-function CommunityNodesPage({ state }: { state: AppState }) {
+function CommunityNodesPage({ state, platformInfo }: { state: AppState; platformInfo: PlatformInfo }) {
   const [scan, setScan] = useState<CommunityScanState>(EMPTY_COMMUNITY_SCAN);
   const [nodes, setNodes] = useState<CommunityNode[]>([]);
   const [settings, setSettings] = useState<CommunitySettings>({
@@ -1054,7 +1068,7 @@ function CommunityNodesPage({ state }: { state: AppState }) {
         {error && (
           <div className="connection-alert community-connection-alert">
             <span>{error}</span>
-            {error.includes("管理员权限") && (
+            {platformInfo.supportsTun && error.includes("管理员权限") && (
               <div className="connection-alert-actions">
                 <button onClick={() => void connectWithoutTun()}>关闭 TUN 后连接</button>
                 <button className="primary-button" onClick={() => void invoke("restart_as_admin")}>管理员重启</button>
@@ -1091,6 +1105,7 @@ function Workspace({
   onRoute,
   onPage,
   motionEnabled,
+  platformInfo,
   onMotionEnabled,
 }: {
   mode: Mode;
@@ -1101,6 +1116,7 @@ function Workspace({
   onRoute: (id: string) => void;
   onPage: (page: Page) => void;
   motionEnabled: boolean;
+  platformInfo: PlatformInfo;
   onMotionEnabled: (enabled: boolean) => void;
 }) {
   const [routes, setRoutes] = useState<Route[]>([]);
@@ -1424,7 +1440,7 @@ function Workspace({
           <div className="settings-section-heading"><div><b>界面与动效</b></div></div>
           <div className="settings-list">
             <section className="settings-card"><div><b>界面动效</b>{motionEnabled ? <p className="muted">按钮、主题和侧边栏使用轻微动效。</p> : <p className="muted">界面动效已关闭。</p>}</div><button className={motionEnabled ? "toggle on" : "toggle"} onClick={() => onMotionEnabled(!motionEnabled)} aria-label="界面动效"><i /></button></section>
-            <section className="settings-card"><div><b>Windows 应用代理兼容</b><p className="muted">允许 Microsoft Store 应用访问本地代理。</p>{loopbackMessage && <small className="muted">{loopbackMessage}</small>}</div><button className="settings-action" onClick={() => void setupUwpLoopback()}>解除限制</button></section>
+            {platformInfo.supportsUwpLoopback && <section className="settings-card"><div><b>Windows 应用代理兼容</b><p className="muted">允许 Microsoft Store 应用访问本地代理。</p>{loopbackMessage && <small className="muted">{loopbackMessage}</small>}</div><button className="settings-action" onClick={() => void setupUwpLoopback()}>解除限制</button></section>}
           </div>
         </div>
         <div className="settings-section speed-settings-section">
@@ -1486,7 +1502,7 @@ function Workspace({
             </div>
           </div>
           <div className="settings-list">
-            <section className="settings-card">
+            {platformInfo.supportsTun ? <section className="settings-card">
               <div>
                 <b>TUN 虚拟网卡</b>
                 <p className="muted">接管不遵循系统代理的应用，并统一处理 DNS。</p>
@@ -1507,7 +1523,13 @@ function Workspace({
               >
                 <i />
               </button>
-            </section>
+            </section> : <section className="settings-card">
+              <div>
+                <b>macOS 系统代理</b>
+                <p className="muted">连接时由 macOS 请求管理员授权并安全备份、恢复当前网络服务的 HTTP/HTTPS 代理。Apple Silicon 首版暂不开放 TUN。</p>
+              </div>
+              <span className="setting-status">{platformInfo.architecture === "aarch64" ? "Apple Silicon" : "仅系统代理"}</span>
+            </section>}
             <section className="settings-card">
               <div>
                 <b>线路故障自动切换</b>
@@ -1528,7 +1550,7 @@ function Workspace({
             <section className="settings-card">
               <div>
                 <b>系统代理保护</b>
-                <p className="muted">断开或失败后恢复原 Windows 代理设置。</p>
+                <p className="muted">断开或失败后恢复原 {platformInfo.os === "macos" ? "macOS" : "Windows"} 代理设置。</p>
               </div>
               <span
                 className={
@@ -1710,7 +1732,7 @@ function Workspace({
         </div>
       </div>
     );
-  if (page === "community") return <CommunityNodesPage state={state} />;
+  if (page === "community") return <CommunityNodesPage state={state} platformInfo={platformInfo} />;
   if (page === "logs")
     return (
       <div className="page workspace">

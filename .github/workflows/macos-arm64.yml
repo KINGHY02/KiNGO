@@ -1,0 +1,99 @@
+name: Build macOS Apple Silicon DMG
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - "kingo-next/**"
+      - ".github/workflows/macos-arm64.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: macos-arm64-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  dmg:
+    name: macOS 15 Apple Silicon
+    runs-on: macos-15
+    defaults:
+      run:
+        shell: bash
+    env:
+      CARGO_TERM_COLOR: always
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: kingo-next/package-lock.json
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin
+
+      - name: Cache verified Apple Silicon core downloads
+        uses: actions/cache@v4
+        with:
+          path: kingo-next/src-tauri/target/core-assets/macos-arm64
+          key: macos-arm64-cores-${{ hashFiles('kingo-next/core-assets/macos-arm64.json') }}
+
+      - name: Install dependencies and verified Apple Silicon cores
+        working-directory: kingo-next
+        run: npm ci
+
+      - name: Ad-hoc sign bundled executable cores
+        working-directory: kingo-next
+        run: npm run sign:cores:macos
+
+      - name: Build frontend
+        working-directory: kingo-next
+        run: npm run build
+
+      - name: Check Rust formatting
+        working-directory: kingo-next
+        run: cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
+
+      - name: Check Rust lints on Apple Silicon
+        working-directory: kingo-next
+        run: cargo clippy --manifest-path src-tauri/Cargo.toml --target aarch64-apple-darwin --all-targets -- -D warnings
+
+      - name: Test Rust backend on Apple Silicon
+        working-directory: kingo-next
+        run: cargo test --manifest-path src-tauri/Cargo.toml --target aarch64-apple-darwin
+
+      - name: Build ad-hoc signed DMG
+        working-directory: kingo-next
+        run: npm run tauri -- build --target aarch64-apple-darwin --bundles dmg --config src-tauri/tauri.macos-arm64.conf.json
+
+      - name: Verify app architecture, signatures and disk image
+        working-directory: kingo-next
+        run: |
+          set -euo pipefail
+          bundle_root="src-tauri/target/aarch64-apple-darwin/release/bundle"
+          app="$(find "$bundle_root/macos" -maxdepth 1 -name '*.app' -print -quit)"
+          dmg="$(find "$bundle_root/dmg" -maxdepth 1 -name '*.dmg' -print -quit)"
+          test -n "$app" && test -n "$dmg"
+          file "$app/Contents/MacOS/kingo" | grep -q 'arm64'
+          codesign --verify --deep --strict --verbose=2 "$app"
+          hdiutil verify "$dmg"
+          mkdir -p artifacts/macos-arm64
+          cp "$dmg" artifacts/macos-arm64/
+          (cd artifacts/macos-arm64 && shasum -a 256 *.dmg > SHA256SUMS.txt)
+          cat artifacts/macos-arm64/SHA256SUMS.txt
+
+      - name: Upload DMG artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: KiNGO-${{ github.sha }}-macos-arm64-dmg
+          path: kingo-next/artifacts/macos-arm64/
+          if-no-files-found: error
+          retention-days: 14

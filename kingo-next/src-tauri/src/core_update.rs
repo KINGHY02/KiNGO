@@ -71,7 +71,7 @@ const REPOS: &[Repo] = &[
     Repo {
         id: "juicity",
         github: "juicity/juicity",
-        version_arg: "version",
+        version_arg: "--version",
         keywords: &["windows", "x86_64"],
         prerelease: false,
     },
@@ -104,6 +104,8 @@ struct Asset {
     name: String,
     browser_download_url: String,
     size: Option<u64>,
+    #[serde(default)]
+    digest: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -208,19 +210,54 @@ fn outdated(current: &str, latest: &str) -> bool {
     version_parts(current) < version_parts(latest)
 }
 
+fn repo_supported(repo: Repo) -> bool {
+    !cfg!(target_os = "macos") || repo.id != "hysteria"
+}
+
+fn target_keywords(repo: Repo) -> &'static [&'static str] {
+    if !cfg!(target_os = "macos") {
+        return repo.keywords;
+    }
+    match repo.id {
+        "mihomo" | "mihomo-alpha" => &["darwin", "arm64"],
+        "xray" => &["macos", "arm64"],
+        "sing-box" | "hysteria2" => &["darwin", "arm64"],
+        "naiveproxy" => &["mac", "arm64"],
+        "juicity" | "mieru" => &["macos", "arm64"],
+        "subs-check" => &["darwin", "aarch64"],
+        _ => &[],
+    }
+}
+
 fn asset_score(asset: &Asset, repo: Repo) -> i32 {
     let name = asset.name.to_ascii_lowercase();
     if name.contains("checksum")
         || name.contains("sha256")
+        || name.ends_with(".dgst")
         || name.ends_with(".sig")
-        || (!name.contains("win") && !name.contains("windows"))
     {
         return -100;
     }
-    if !(name.ends_with(".zip") || name.ends_with(".gz") || name.ends_with(".exe")) {
+    let platform_matches = if cfg!(target_os = "macos") {
+        (name.contains("darwin") || name.contains("macos") || name.contains("-mac-"))
+            && (name.contains("arm64") || name.contains("aarch64"))
+    } else {
+        name.contains("win") || name.contains("windows")
+    };
+    if !platform_matches {
+        return -100;
+    }
+    let supported_format = name.ends_with(".zip")
+        || name.ends_with(".tar.gz")
+        || name.ends_with(".tgz")
+        || name.ends_with(".tar.xz")
+        || name.ends_with(".gz")
+        || name.ends_with(".exe")
+        || !name.contains('.');
+    if !supported_format {
         return -50;
     }
-    repo.keywords
+    target_keywords(repo)
         .iter()
         .map(|key| {
             if name.contains(&key.to_ascii_lowercase()) {
@@ -249,7 +286,8 @@ pub fn check_all(app: &AppHandle) -> Result<Vec<CoreVersionInfo>, String> {
             let repo = REPOS
                 .iter()
                 .find(|repo| repo.id == status.profile.id)
-                .copied();
+                .copied()
+                .filter(|repo| repo_supported(*repo));
             let current = repo.and_then(|repo| {
                 current_version(status.executable_path.as_deref(), repo.version_arg)
             });
@@ -382,24 +420,35 @@ fn download(url: &str, target: &Path) -> Result<(), String> {
     Ok(())
 }
 
-fn find_exe(dir: &Path) -> Option<PathBuf> {
+fn find_executable(dir: &Path, expected_name: &str) -> Option<PathBuf> {
+    #[cfg(windows)]
+    let mut windows_fallback = None;
     for entry in fs::read_dir(dir).ok()?.flatten() {
         let path = entry.path();
         if path.is_dir() {
-            if let Some(found) = find_exe(&path) {
+            if let Some(found) = find_executable(&path, expected_name) {
                 return Some(found);
             }
-        } else if path
-            .extension()
-            .is_some_and(|e| e.eq_ignore_ascii_case("exe"))
-        {
+        } else if path.file_name().is_some_and(|name| name == expected_name) {
             return Some(path);
+        } else {
+            #[cfg(windows)]
+            if windows_fallback.is_none()
+                && path
+                    .extension()
+                    .is_some_and(|extension| extension.eq_ignore_ascii_case("exe"))
+            {
+                windows_fallback = Some(path);
+            }
         }
     }
+    #[cfg(windows)]
+    return windows_fallback;
+    #[cfg(not(windows))]
     None
 }
 
-fn unpack(source: &Path, dir: &Path) -> Result<PathBuf, String> {
+fn unpack(source: &Path, dir: &Path, expected_name: &str) -> Result<PathBuf, String> {
     let name = source
         .file_name()
         .and_then(|v| v.to_str())
@@ -419,16 +468,29 @@ fn unpack(source: &Path, dir: &Path) -> Result<PathBuf, String> {
         ))
         .unpack(dir)
         .map_err(|e| e.to_string())?;
+    } else if name.ends_with(".tar.xz") {
+        let status = hidden_command("/usr/bin/tar")
+            .arg("-xf")
+            .arg(source)
+            .arg("-C")
+            .arg(dir)
+            .status()
+            .map_err(|error| format!("解压核心失败：{error}"))?;
+        if !status.success() {
+            return Err(format!("解压核心失败：{status}"));
+        }
     } else if name.ends_with(".gz") {
         let output = dir.join(source.file_stem().unwrap_or_default());
         let mut decoder = GzDecoder::new(fs::File::open(source).map_err(|e| e.to_string())?);
         let mut file = fs::File::create(&output).map_err(|e| e.to_string())?;
         io::copy(&mut decoder, &mut file).map_err(|e| e.to_string())?;
         return Ok(output);
+    } else if source.is_file() && cfg!(target_os = "macos") {
+        return Ok(source.to_path_buf());
     } else {
         return Err("不支持的核心压缩格式".into());
     }
-    find_exe(dir).ok_or_else(|| "下载包中没有找到可执行文件".into())
+    find_executable(dir, expected_name).ok_or_else(|| "下载包中没有找到可执行文件".into())
 }
 
 fn file_sha256(path: &Path) -> Result<String, String> {
@@ -445,6 +507,48 @@ fn file_sha256(path: &Path) -> Result<String, String> {
         hasher.update(&buffer[..read]);
     }
     Ok(format!("{:x}", hasher.finalize()))
+}
+
+fn verify_asset_digest(asset: &Asset, path: &Path) -> Result<bool, String> {
+    let Some(expected) = asset
+        .digest
+        .as_deref()
+        .and_then(|value| value.strip_prefix("sha256:"))
+    else {
+        return Ok(false);
+    };
+    let actual = file_sha256(path)?;
+    if actual.eq_ignore_ascii_case(expected) {
+        Ok(true)
+    } else {
+        Err(format!(
+            "核心下载文件 SHA-256 校验失败（期望 {expected}，实际 {actual}）"
+        ))
+    }
+}
+
+#[cfg(unix)]
+fn make_executable(path: &Path) -> Result<(), String> {
+    use std::os::unix::fs::PermissionsExt;
+    let mut permissions = fs::metadata(path)
+        .map_err(|error| error.to_string())?
+        .permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(path, permissions).map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn make_executable(_path: &Path) -> Result<(), String> {
+    Ok(())
+}
+
+fn target_name() -> &'static str {
+    if cfg!(target_os = "macos") {
+        "macOS Apple Silicon"
+    } else {
+        "Windows x64"
+    }
 }
 
 pub fn update(app: &AppHandle, core_id: &str) -> Result<CoreUpdateResult, String> {
@@ -470,6 +574,7 @@ where
         .iter()
         .find(|r| r.id == core_id)
         .copied()
+        .filter(|repo| repo_supported(*repo))
         .ok_or("该核心暂不支持自动更新")?;
     let release = release(repo)?;
     let latest_version =
@@ -485,7 +590,8 @@ where
             }
         }
     }
-    let asset = pick_asset(&release, repo).ok_or("没有找到适合 Windows 的核心资源")?;
+    let asset = pick_asset(&release, repo)
+        .ok_or_else(|| format!("没有找到适合 {} 的核心资源", target_name()))?;
     let temp = std::env::temp_dir().join(format!("kingo-core-{}-{}", core_id, std::process::id()));
     let _ = fs::remove_dir_all(&temp);
     fs::create_dir_all(&temp).map_err(|e| e.to_string())?;
@@ -495,16 +601,17 @@ where
     // installed only when the upstream version is newer. A missing or unusual
     // checksum asset must not block the update; archive/executable validation
     // below still rejects incomplete or unsupported downloads.
-    let checksum_verified = false;
+    let checksum_verified = verify_asset_digest(&asset, &archive)?;
     let extract = temp.join("extract");
     fs::create_dir_all(&extract).map_err(|e| e.to_string())?;
-    let executable = unpack(&archive, &extract)?;
+    let executable = unpack(&archive, &extract, &profile.executable)?;
     let target_dir = PathBuf::from(paths::ensure(app)?.cores_dir).join(core_id);
     fs::create_dir_all(&target_dir).map_err(|e| e.to_string())?;
     let target = target_dir.join(profile.executable);
     let staged = target.with_extension("exe.new");
     let backup = target.with_extension("exe.bak");
     fs::copy(executable, &staged).map_err(|e| e.to_string())?;
+    make_executable(&staged)?;
     // Keep the current proxy core alive for release lookup, download, unpacking,
     // and checksum verification. The caller only stops it at this final swap.
     if let Err(error) = before_install() {
@@ -550,15 +657,24 @@ where
         }
     }
     let asset = pick_asset(&release, repo)
-        .ok_or_else(|| "上游发布中没有找到 Windows x86_64 的 SubsCheck 文件".to_string())?;
+        .ok_or_else(|| format!("上游发布中没有找到 {} 的 SubsCheck 文件", target_name()))?;
     let temp = std::env::temp_dir().join(format!("kingo-core-subs-check-{}", std::process::id()));
     let _ = fs::remove_dir_all(&temp);
     fs::create_dir_all(&temp).map_err(|error| error.to_string())?;
     let archive = temp.join(&asset.name);
     download(&asset.browser_download_url, &archive)?;
+    let checksum_verified = verify_asset_digest(&asset, &archive)?;
     let extract = temp.join("extract");
     fs::create_dir_all(&extract).map_err(|error| error.to_string())?;
-    let executable = unpack(&archive, &extract)?;
+    let executable = unpack(
+        &archive,
+        &extract,
+        if cfg!(target_os = "macos") {
+            "subs-check"
+        } else {
+            "subs-check.exe"
+        },
+    )?;
     let target = subs_check::user_core_target(app)?;
     let target_dir = target
         .parent()
@@ -567,6 +683,7 @@ where
     let staged = target.with_extension("exe.new");
     let backup = target.with_extension("exe.bak");
     fs::copy(&executable, &staged).map_err(|error| error.to_string())?;
+    make_executable(&staged)?;
     let installed_sha256 = file_sha256(&staged)?;
     before_install()?;
     if target.exists() {
@@ -595,7 +712,7 @@ where
     Ok(CoreUpdateResult {
         core_id: "subs-check".into(),
         version: release.tag_name,
-        checksum_verified: false,
+        checksum_verified,
         connection_restarted: false,
     })
 }

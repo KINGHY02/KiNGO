@@ -6,18 +6,40 @@ import { fileURLToPath } from "node:url";
 const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const sourceRoot = join(projectRoot, "src-tauri", "resources", "cores");
 const payloadRoot = join(projectRoot, "src-tauri", "resources", "core-payloads");
-const expected = [
-  "hy2/hysteria2.exe",
-  "hysteria/hysteria-tun-windows-6.0-386.exe",
-  "juicity/juicity-client.exe",
-  "mieru/mieru.exe",
-  "mihomo/mihomo.exe",
-  "naiveproxy/naive.exe",
-  "shadowquic/shadowquic.exe",
-  "sing-box/sing-box.exe",
-  "subs-check/subs-check.exe",
-  "xray/xray.exe",
-];
+const target = process.env.KINGO_TARGET_PLATFORM
+  ?? (process.platform === "win32" && process.arch === "x64"
+    ? "windows-x64"
+    : process.platform === "darwin" && process.arch === "arm64"
+      ? "macos-arm64"
+      : `${process.platform}-${process.arch}`);
+const expectedByTarget = {
+  "windows-x64": [
+    "hy2/hysteria2.exe",
+    "hysteria/hysteria-tun-windows-6.0-386.exe",
+    "juicity/juicity-client.exe",
+    "mieru/mieru.exe",
+    "mihomo/mihomo.exe",
+    "naiveproxy/naive.exe",
+    "shadowquic/shadowquic.exe",
+    "sing-box/sing-box.exe",
+    "subs-check/subs-check.exe",
+    "xray/xray.exe",
+  ],
+  "macos-arm64": [
+    "hy2/hysteria2",
+    "hysteria/hysteria",
+    "juicity/juicity-client",
+    "mieru/mieru",
+    "mihomo/mihomo",
+    "naiveproxy/naive",
+    "shadowquic/shadowquic",
+    "sing-box/sing-box",
+    "subs-check/subs-check",
+    "xray/xray",
+  ],
+};
+const expected = expectedByTarget[target];
+if (!expected) throw new Error(`No bundled core inventory is defined for ${target}`);
 
 function walk(directory) {
   return readdirSync(directory, { withFileTypes: true }).flatMap((entry) => {
@@ -27,7 +49,9 @@ function walk(directory) {
 }
 
 const executables = walk(sourceRoot)
-  .filter((path) => path.toLowerCase().endsWith(".exe"))
+  .filter((path) => target === "windows-x64"
+    ? path.toLowerCase().endsWith(".exe")
+    : !path.split(/[\\/]/).at(-1).includes("."))
   .map((path) => relative(sourceRoot, path).replaceAll("\\", "/"))
   .sort();
 if (JSON.stringify(executables) !== JSON.stringify([...expected].sort())) {
@@ -49,5 +73,8 @@ for (const name of executables) {
     sha256: createHash("sha256").update(bytes).digest("hex"),
   });
 }
-writeFileSync(join(payloadRoot, "manifest.json"), `${JSON.stringify(manifest, null, 2)}\n`);
-console.log(`Prepared ${manifest.length} bundled core payloads (${manifest.reduce((sum, item) => sum + item.bytes, 0)} bytes).`);
+writeFileSync(
+  join(payloadRoot, "manifest.json"),
+  `${JSON.stringify({ target, files: manifest }, null, 2)}\n`,
+);
+console.log(`Prepared ${manifest.length} ${target} bundled core payloads (${manifest.reduce((sum, item) => sum + item.bytes, 0)} bytes).`);
