@@ -2,25 +2,31 @@ use std::{ffi::OsStr, process::Command};
 
 /// Creates a background command that never opens a console window on Windows.
 pub fn hidden_command<S: AsRef<OsStr>>(program: S) -> Command {
-    let mut command = Command::new(program);
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
         const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        let mut command = Command::new(program);
         command.creation_flags(CREATE_NO_WINDOW);
+        command
     }
-    command
+    #[cfg(not(windows))]
+    {
+        Command::new(program)
+    }
 }
 
 pub fn curl_command() -> Command {
-    let mut command = if cfg!(windows) {
-        hidden_command("curl.exe")
-    } else {
-        hidden_command("/usr/bin/curl")
-    };
     #[cfg(windows)]
-    command.arg("--ssl-no-revoke");
-    command
+    {
+        let mut command = hidden_command("curl.exe");
+        command.arg("--ssl-no-revoke");
+        command
+    }
+    #[cfg(not(windows))]
+    {
+        hidden_command("/usr/bin/curl")
+    }
 }
 
 pub fn null_device() -> &'static str {
