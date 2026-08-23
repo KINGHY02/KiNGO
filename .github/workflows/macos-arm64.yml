@@ -79,12 +79,22 @@ jobs:
         run: |
           set -euo pipefail
           bundle_root="src-tauri/target/aarch64-apple-darwin/release/bundle"
-          app="$(find "$bundle_root/macos" -maxdepth 1 -name '*.app' -print -quit)"
           dmg="$(find "$bundle_root/dmg" -maxdepth 1 -name '*.dmg' -print -quit)"
-          test -n "$app" && test -n "$dmg"
+          test -n "$dmg"
+          hdiutil verify "$dmg"
+          mount_dir="$(mktemp -d)"
+          cleanup() {
+            hdiutil detach "$mount_dir" -quiet || true
+            rmdir "$mount_dir" || true
+          }
+          trap cleanup EXIT
+          hdiutil attach "$dmg" -readonly -nobrowse -mountpoint "$mount_dir" -quiet
+          app="$(find "$mount_dir" -maxdepth 1 -name '*.app' -print -quit)"
+          test -n "$app"
           file "$app/Contents/MacOS/kingo" | grep -q 'arm64'
           codesign --verify --deep --strict --verbose=2 "$app"
-          hdiutil verify "$dmg"
+          cleanup
+          trap - EXIT
           mkdir -p artifacts/macos-arm64
           cp "$dmg" artifacts/macos-arm64/
           (cd artifacts/macos-arm64 && shasum -a 256 *.dmg > SHA256SUMS.txt)
