@@ -967,9 +967,9 @@ function CommunityNodesPage({ state }: { state: AppState }) {
     : scan.state === "failed"
       ? "节点检测失败"
       : scan.state === "stopped"
-        ? "节点检测已停止"
+        ? `检测已停止，保留 ${scan.retainedTotal} 个节点`
         : scan.state === "stopping"
-          ? "正在停止节点检测"
+          ? "正在停止并整理结果"
           : scan.stage === "subs_check_speed"
             ? `下载测速 ${scan.speedDone} / ${scan.speedTotal || "待确定"}`
             : scan.stage === "subs_check_alive"
@@ -985,6 +985,8 @@ function CommunityNodesPage({ state }: { state: AppState }) {
     ? "点击开始获取后，将依次处理订阅、测活并进行下载测速。"
     : scan.state === "failed"
       ? scan.message ?? "检测未完成，请查看错误后重试。"
+      : scan.state === "stopped" || scan.state === "stopping"
+        ? scan.message ?? "正在整理本轮已经完成测速的节点。"
       : progressHealth ?? (scan.stage === "subs_check_fetch" || scan.stage === "subs_check_starting"
         ? "订阅获取阶段无法取得逐条进度，完成解析后将显示准确的节点测活数量。"
         : "进度条表示当前阶段，不是对整轮任务的估算。进入下一阶段后会按新阶段重新计算。");
@@ -1008,7 +1010,7 @@ function CommunityNodesPage({ state }: { state: AppState }) {
         <div><p className="muted">聚合公开订阅并在后台检测，只保留测速排名靠前的节点。</p></div>
         <div className="toolbar-actions">
           {!running && <button className="primary-button" disabled={state.connecting || (state.connected && state.sourceType === "community")} onClick={() => void runCommand("start_community_scan")}>开始获取</button>}
-          {running && <button className="danger" disabled={scan.state === "stopping"} onClick={() => void runCommand("stop_community_scan")}>{scan.state === "stopping" ? "停止中…" : "停止"}</button>}
+          {running && <button className="danger" disabled={scan.state === "stopping"} onClick={() => void runCommand("stop_community_scan")}>{scan.state === "stopping" ? "正在整理…" : "停止并保留"}</button>}
           <button disabled={running || nodes.length === 0 || retesting.size > 0 || batchRetest != null} onClick={() => void retestAllNodes()}>{batchRetest ? `批量复测 ${batchRetest.done}/${batchRetest.total || "…"}` : "复测全部"}</button>
           <button disabled={running || nodes.length === 0 || retesting.size > 0 || batchRetest != null || state.connecting || (state.connected && state.sourceType === "community")} onClick={async () => { setError(null); try { await invoke("clear_community_nodes"); setNodes([]); } catch (value) { setError(String(value)); } }}>清空结果</button>
         </div>

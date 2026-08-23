@@ -3801,9 +3801,18 @@ fn proxy_request_latency(route: &PublicRoute) -> Result<u32, String> {
 fn proxy_request_latency_with_fallbacks(route: &PublicRoute) -> Result<u32, String> {
     let settings = current_speed_test_settings();
     let urls = settings.latency_urls();
+    first_successful_latency(&urls, |url| {
+        proxy_request_latency_on_port_with_url(route, proxy_port(route), url)
+    })
+}
+
+fn first_successful_latency<F>(urls: &[String], mut probe: F) -> Result<u32, String>
+where
+    F: FnMut(&str) -> Result<u32, String>,
+{
     let mut failures = Vec::with_capacity(urls.len());
-    for url in &urls {
-        match proxy_request_latency_on_port_with_url(route, proxy_port(route), url) {
+    for url in urls {
+        match probe(url) {
             Ok(latency) => return Ok(latency),
             Err(error) => failures.push(format!("{url}: {error}")),
         }
@@ -5084,6 +5093,23 @@ rules:
                 "https://backup.example/204".to_string(),
             ]
         );
+    }
+
+    #[test]
+    fn connection_validation_uses_backup_after_primary_fails() {
+        let urls = vec!["primary".to_string(), "backup".to_string()];
+        let mut attempted = Vec::new();
+        let latency = first_successful_latency(&urls, |url| {
+            attempted.push(url.to_string());
+            if url == "primary" {
+                Err("timeout".into())
+            } else {
+                Ok(86)
+            }
+        })
+        .expect("backup endpoint should keep the connection valid");
+        assert_eq!(latency, 86);
+        assert_eq!(attempted, urls);
     }
 
     #[cfg(windows)]

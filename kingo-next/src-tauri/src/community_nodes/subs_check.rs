@@ -263,6 +263,20 @@ fn status(client: &reqwest::blocking::Client, port: u16, key: &str) -> Option<Su
         .ok()
 }
 
+fn request_graceful_stop(
+    client: &reqwest::blocking::Client,
+    port: u16,
+    key: &str,
+) -> Result<(), String> {
+    client
+        .post(format!("http://127.0.0.1:{port}/api/force-close"))
+        .header("X-API-Key", key)
+        .send()
+        .and_then(|response| response.error_for_status())
+        .map(|_| ())
+        .map_err(|error| format!("请求 SubsCheck 停止失败：{error}"))
+}
+
 fn country_and_speed(name: &str) -> (Option<String>, Option<u64>) {
     let country = Regex::new(r"(?i)(?:^|[^A-Z])([A-Z]{2})_\d+")
         .ok()
@@ -354,7 +368,7 @@ fn finish(
     runtime.running.store(false, Ordering::SeqCst);
     let stopped = runtime.stop_requested.load(Ordering::SeqCst);
     match result {
-        Ok(nodes) if !stopped => {
+        Ok(nodes) => {
             let save = store::save_nodes(app, &nodes);
             if save.is_ok() {
                 if let Ok(mut current) = store_state.nodes.lock() {
@@ -362,7 +376,16 @@ fn finish(
                 }
             }
             update_state(app, &store_state.state, |state| {
-                state.state = if save.is_ok() { "completed" } else { "failed" }.into();
+                state.state = if save.is_ok() {
+                    if stopped {
+                        "stopped"
+                    } else {
+                        "completed"
+                    }
+                } else {
+                    "failed"
+                }
+                .into();
                 state.stage = state.state.clone();
                 state.retained_total = store_state
                     .nodes
@@ -371,23 +394,23 @@ fn finish(
                     .unwrap_or_default();
                 state.completed_at = Some(now());
                 state.message = Some(match save {
+                    Ok(()) if stopped => {
+                        format!(
+                            "检测已停止，已保留 {} 个完成测速的节点",
+                            state.retained_total
+                        )
+                    }
                     Ok(()) => format!("检测完成，已导入 {} 个节点", state.retained_total),
                     Err(error) => error,
                 });
             });
         }
-        Ok(_) => update_state(app, &store_state.state, |state| {
-            state.state = "stopped".into();
-            state.stage = "stopped".into();
-            state.completed_at = Some(now());
-            state.message = Some("节点检测已停止，原有结果保持不变".into());
-        }),
         Err(error) => update_state(app, &store_state.state, |state| {
             state.state = if stopped { "stopped" } else { "failed" }.into();
             state.stage = state.state.clone();
             state.completed_at = Some(now());
             state.message = Some(if stopped {
-                "节点检测已停止，原有结果保持不变".into()
+                "检测已停止，但本轮尚无完成测速的节点；原有结果保持不变".into()
             } else {
                 error
             });
@@ -547,9 +570,27 @@ pub fn start(
                 client.map_err(|error| format!("创建 SubsCheck 状态客户端失败：{error}"))?;
             let mut observed_running = false;
             let mut startup_ticks = 0usize;
+            let mut stopping_ticks = 0usize;
             loop {
-                if worker_runtime.stop_requested.load(Ordering::SeqCst) {
-                    return Err("stopped".into());
+                let stopping = worker_runtime.stop_requested.load(Ordering::SeqCst);
+                if stopping {
+                    // SubsCheck's force-close endpoint cancels its pipeline but still
+                    // lets the collector save every node that already completed the
+                    // full speed stage. Repeat the request because an early click can
+                    // arrive while subscriptions are still being parsed, before the
+                    // upstream cancellation handle has been installed.
+                    if stopping_ticks % 2 == 0 {
+                        let _ = request_graceful_stop(&client, port, &api_key);
+                    }
+                    stopping_ticks += 1;
+                    update_state(&app, &worker_store.state, |state| {
+                        state.state = "stopping".into();
+                        state.stage = "stopping".into();
+                        state.message = Some(format!(
+                            "正在停止并整理已完成结果（已完成测速 {} 个，通过 {} 个）",
+                            state.speed_done, state.speed_succeeded
+                        ));
+                    });
                 }
                 let exited = worker_runtime
                     .child
@@ -560,13 +601,15 @@ pub fn start(
                     observed_running |= status.checking;
                     let pipeline = status.pipeline;
                     update_state(&app, &worker_store.state, |state| {
-                        state.stage = if pipeline.speed_done > 0 {
-                            "subs_check_speed".into()
-                        } else if pipeline.alive_done > 0 {
-                            "subs_check_alive".into()
-                        } else {
-                            "subs_check_fetch".into()
-                        };
+                        if !stopping {
+                            state.stage = if pipeline.speed_done > 0 {
+                                "subs_check_speed".into()
+                            } else if pipeline.alive_done > 0 {
+                                "subs_check_alive".into()
+                            } else {
+                                "subs_check_fetch".into()
+                            };
+                        }
                         // The status API exposes only the candidate count after
                         // parsing and deduplication. Keep unavailable raw/source
                         // counters empty instead of presenting inferred values.
@@ -580,16 +623,18 @@ pub fn start(
                         state.speed_total = pipeline.filter_pass.max(pipeline.speed_done);
                         state.speed_done = pipeline.speed_done;
                         state.speed_succeeded = pipeline.speed_pass;
-                        state.message = Some(format!(
-                            "候选 {} · 测活 {}/{}（通过 {}）· 测速 {}/{}（通过 {}）",
-                            pipeline.total,
-                            pipeline.alive_done,
-                            pipeline.total,
-                            pipeline.alive_pass,
-                            pipeline.speed_done,
-                            pipeline.filter_pass,
-                            pipeline.speed_pass
-                        ));
+                        if !stopping {
+                            state.message = Some(format!(
+                                "候选 {} · 测活 {}/{}（通过 {}）· 测速 {}/{}（通过 {}）",
+                                pipeline.total,
+                                pipeline.alive_done,
+                                pipeline.total,
+                                pipeline.alive_pass,
+                                pipeline.speed_done,
+                                pipeline.filter_pass,
+                                pipeline.speed_pass
+                            ));
+                        }
                     });
                     if (observed_running || output.join("all.yaml").is_file()) && !status.checking {
                         break;
@@ -604,6 +649,9 @@ pub fn start(
                 startup_ticks += 1;
                 if startup_ticks > 120 && !observed_running {
                     return Err("节点检测服务启动 60 秒后仍未进入检测状态".into());
+                }
+                if stopping && stopping_ticks > 60 {
+                    return Err("等待检测服务整理部分结果超时".into());
                 }
                 std::thread::sleep(Duration::from_millis(500));
             }
@@ -634,15 +682,10 @@ pub fn stop(
         return Err("当前没有运行中的节点检测".into());
     }
     runtime.stop_requested.store(true, Ordering::SeqCst);
-    if let Ok(mut child) = runtime.child.lock() {
-        if let Some(process) = child.as_mut() {
-            let _ = process.kill();
-        }
-    }
     update_state(app, &store_state.state, |state| {
         state.state = "stopping".into();
         state.stage = "stopping".into();
-        state.message = Some("正在停止节点检测".into());
+        state.message = Some("正在停止并整理已完成测速的节点".into());
     });
     store_state
         .state
