@@ -3,7 +3,7 @@ use super::{
     probe, ranking, speed_test, store,
 };
 use std::{
-    collections::VecDeque,
+    collections::{HashMap, VecDeque},
     sync::{
         atomic::{AtomicBool, AtomicUsize, Ordering},
         Arc, Mutex,
@@ -18,8 +18,7 @@ const RETEST_SPEED_BYTES: u64 = 4 * 1024 * 1024;
 pub struct CommunityNodeStore {
     pub state: Arc<Mutex<CommunityScanState>>,
     pub nodes: Arc<Mutex<Vec<CommunityNodeCandidate>>>,
-    retesting: Arc<Mutex<std::collections::HashSet<String>>>,
-    retest_cancel: Arc<AtomicBool>,
+    retesting: Arc<Mutex<HashMap<String, Arc<AtomicBool>>>>,
     pub(crate) operations: Arc<Mutex<()>>,
 }
 
@@ -28,8 +27,7 @@ impl Default for CommunityNodeStore {
         Self {
             state: Arc::new(Mutex::new(CommunityScanState::default())),
             nodes: Arc::new(Mutex::new(Vec::new())),
-            retesting: Arc::new(Mutex::new(std::collections::HashSet::new())),
-            retest_cancel: Arc::new(AtomicBool::new(false)),
+            retesting: Arc::new(Mutex::new(HashMap::new())),
             operations: Arc::new(Mutex::new(())),
         }
     }
@@ -156,24 +154,23 @@ pub fn retest(
         .into_iter()
         .find(|node| node.id == node_id)
         .ok_or_else(|| "公共节点不存在，可能已被清理".to_string())?;
-    {
+    let cancel = {
         let mut active = store_state
             .retesting
             .lock()
             .map_err(|_| "公共节点复测状态不可用")?;
-        if active.contains(&node.id) {
+        if active.contains_key(&node.id) {
             return Err("该节点已经在复测中".into());
         }
         if active.len() >= 2 {
             return Err("最多同时复测 2 个节点，请等待当前复测完成".into());
         }
-        if active.is_empty() {
-            store_state.retest_cancel.store(false, Ordering::SeqCst);
-        }
-        active.insert(node.id.clone());
-    }
+        let cancel = Arc::new(AtomicBool::new(false));
+        active.insert(node.id.clone(), cancel.clone());
+        cancel
+    };
     let worker_store = store_state.clone();
-    std::thread::spawn(move || retest_node_worker(app, worker_store, node, false));
+    std::thread::spawn(move || retest_node_worker(app, worker_store, node, false, cancel));
     Ok(())
 }
 
@@ -182,12 +179,12 @@ fn retest_node_worker(
     worker_store: CommunityNodeStore,
     node: CommunityNodeCandidate,
     batch: bool,
+    cancel: Arc<AtomicBool>,
 ) {
     let _ = app.emit(
         "community-node-retest",
         serde_json::json!({ "nodeId": node.id, "state": "running", "batch": batch }),
     );
-    let cancel = worker_store.retest_cancel.clone();
     let paused = Arc::new(AtomicBool::new(false));
     let latency_url = crate::services::current_speed_test_settings()
         .latency_urls()
@@ -353,7 +350,7 @@ pub fn retest_all(app: AppHandle, store_state: &CommunityNodeStore) -> Result<us
     if queued.is_empty() {
         return Err("当前没有可复测的公共节点".into());
     }
-    {
+    let cancel = {
         let mut active = store_state
             .retesting
             .lock()
@@ -361,9 +358,10 @@ pub fn retest_all(app: AppHandle, store_state: &CommunityNodeStore) -> Result<us
         if !active.is_empty() {
             return Err("请等待当前单节点复测完成后再批量复测".into());
         }
-        store_state.retest_cancel.store(false, Ordering::SeqCst);
-        active.extend(queued.iter().map(|node| node.id.clone()));
-    }
+        let cancel = Arc::new(AtomicBool::new(false));
+        active.extend(queued.iter().map(|node| (node.id.clone(), cancel.clone())));
+        cancel
+    };
     let total = queued.len();
     let queue = Arc::new(Mutex::new(VecDeque::from(queued)));
     let coordinator_store = store_state.clone();
@@ -379,13 +377,20 @@ pub fn retest_all(app: AppHandle, store_state: &CommunityNodeStore) -> Result<us
                 let queue = queue.clone();
                 let worker_store = coordinator_store.clone();
                 let completed = completed.clone();
+                let worker_cancel = cancel.clone();
                 scope.spawn(move || loop {
-                    if worker_store.retest_cancel.load(Ordering::SeqCst) {
+                    if worker_cancel.load(Ordering::SeqCst) {
                         break;
                     }
                     let node = queue.lock().ok().and_then(|mut queue| queue.pop_front());
                     let Some(node) = node else { break };
-                    retest_node_worker(app.clone(), worker_store.clone(), node, true);
+                    retest_node_worker(
+                        app.clone(),
+                        worker_store.clone(),
+                        node,
+                        true,
+                        worker_cancel.clone(),
+                    );
                     let done = completed.fetch_add(1, Ordering::SeqCst) + 1;
                     let _ = app.emit(
                         "community-retest-batch",
@@ -394,7 +399,7 @@ pub fn retest_all(app: AppHandle, store_state: &CommunityNodeStore) -> Result<us
                 });
             }
         });
-        let stopped = coordinator_store.retest_cancel.load(Ordering::SeqCst);
+        let stopped = cancel.load(Ordering::SeqCst);
         let done = completed.load(Ordering::SeqCst);
         if let Ok(mut active) = coordinator_store.retesting.lock() {
             active.clear();
@@ -411,11 +416,29 @@ pub fn retest_all(app: AppHandle, store_state: &CommunityNodeStore) -> Result<us
     Ok(total)
 }
 
+pub fn stop_retest(store_state: &CommunityNodeStore, node_id: &str) -> Result<(), String> {
+    let active = store_state
+        .retesting
+        .lock()
+        .map_err(|_| "公共节点复测状态不可用")?;
+    let cancel = active
+        .get(node_id)
+        .ok_or_else(|| "该节点当前没有正在运行的复测".to_string())?;
+    cancel.store(true, Ordering::SeqCst);
+    Ok(())
+}
+
 pub fn stop_retests(store_state: &CommunityNodeStore) -> Result<(), String> {
-    if !has_active_retests(store_state) {
+    let active = store_state
+        .retesting
+        .lock()
+        .map_err(|_| "公共节点复测状态不可用")?;
+    if active.is_empty() {
         return Err("当前没有正在运行的节点复测".into());
     }
-    store_state.retest_cancel.store(true, Ordering::SeqCst);
+    for cancel in active.values() {
+        cancel.store(true, Ordering::SeqCst);
+    }
     Ok(())
 }
 
@@ -432,8 +455,32 @@ mod tests {
     fn active_retests_can_be_cancelled() {
         let store = CommunityNodeStore::default();
         assert!(stop_retests(&store).is_err());
-        store.retesting.lock().unwrap().insert("node-1".into());
+        store
+            .retesting
+            .lock()
+            .unwrap()
+            .insert("node-1".into(), Arc::new(AtomicBool::new(false)));
         stop_retests(&store).unwrap();
-        assert!(store.retest_cancel.load(Ordering::SeqCst));
+        assert!(store
+            .retesting
+            .lock()
+            .unwrap()
+            .get("node-1")
+            .unwrap()
+            .load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn a_single_retest_can_be_cancelled_without_touching_others() {
+        let store = CommunityNodeStore::default();
+        let first = Arc::new(AtomicBool::new(false));
+        let second = Arc::new(AtomicBool::new(false));
+        store.retesting.lock().unwrap().extend([
+            ("first".into(), first.clone()),
+            ("second".into(), second.clone()),
+        ]);
+        stop_retest(&store, "first").unwrap();
+        assert!(first.load(Ordering::SeqCst));
+        assert!(!second.load(Ordering::SeqCst));
     }
 }

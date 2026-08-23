@@ -944,6 +944,11 @@ function CommunityNodesPage({ state }: { state: AppState }) {
     try { await invoke("stop_community_retests"); }
     catch (value) { setError(String(value)); }
   };
+  const stopRetest = async (nodeId: string) => {
+    setError(null);
+    try { await invoke("stop_community_retest", { nodeId }); }
+    catch (value) { setError(String(value)); }
+  };
   const connectWithoutTun = async () => {
     const nodeId = lastRequestedNode ?? state.nodeId;
     if (!nodeId) return;
@@ -1069,7 +1074,7 @@ function CommunityNodesPage({ state }: { state: AppState }) {
         <div className="community-node-head"><span>#</span><span>节点</span><span>协议</span><span>延迟</span><span>下载速度</span><span>出口 IP</span><span>操作</span></div>
         {filteredNodes.length ? filteredNodes.map((node, index) => (
           <div className={`community-node-row ${node.lastErrorDetail ? "has-error" : ""}`} key={node.id} title={`${node.originalName}\n来源 ${node.sourceIds.length} 个${node.lastErrorDetail ? `\n失败原因：${node.lastErrorDetail}` : ""}`}>
-            <span>{String(index + 1).padStart(2, "0")}</span><b>{node.displayName || node.countryName || "未知地区"}</b><span>{node.protocol.toUpperCase()}</span><span className={node.latencyMedianMs == null && node.lastErrorDetail ? "community-failed-value" : ""}>{node.latencyMedianMs == null ? node.lastErrorDetail ? "失败" : node.speedMedianKbps != null ? "待复测" : "-" : `${node.latencyMedianMs} ms`}</span><span>{node.speedMedianKbps == null ? "-" : `${(node.speedMedianKbps / 1024).toFixed(1)} MB/s`}</span><span>{node.exitIp ?? "-"}</span><span className="community-node-actions">{retesting.has(node.id) ? <button className="retesting" onClick={() => void stopRetests()}>停止</button> : <button disabled={running || batchRetest != null || state.connecting} onClick={() => void retestNode(node.id)}>复测</button>}<button className={state.connected && state.sourceType === "community" && state.nodeId === node.id ? "selected" : ""} disabled={running || retesting.has(node.id) || batchRetest != null || state.connecting || (state.connected && state.sourceType === "community" && state.nodeId === node.id)} onClick={() => void connectNode(node.id)}>{state.connected && state.sourceType === "community" && state.nodeId === node.id ? "已连接" : connectingNode === node.id && state.connecting ? "连接中" : "连接"}</button></span>
+            <span>{String(index + 1).padStart(2, "0")}</span><b>{node.displayName || node.countryName || "未知地区"}</b><span>{node.protocol.toUpperCase()}</span><span className={node.latencyMedianMs == null && node.lastErrorDetail ? "community-failed-value" : ""}>{node.latencyMedianMs == null ? node.lastErrorDetail ? "失败" : node.speedMedianKbps != null ? "待复测" : "-" : `${node.latencyMedianMs} ms`}</span><span>{node.speedMedianKbps == null ? "-" : `${(node.speedMedianKbps / 1024).toFixed(1)} MB/s`}</span><span>{node.exitIp ?? "-"}</span><span className="community-node-actions">{retesting.has(node.id) ? <button className="retesting" onClick={() => void (batchRetest ? stopRetests() : stopRetest(node.id))}>{batchRetest ? "停止全部" : "停止"}</button> : <button disabled={running || batchRetest != null || state.connecting} onClick={() => void retestNode(node.id)}>复测</button>}<button className={state.connected && state.sourceType === "community" && state.nodeId === node.id ? "selected" : ""} disabled={running || retesting.has(node.id) || batchRetest != null || state.connecting || (state.connected && state.sourceType === "community" && state.nodeId === node.id)} onClick={() => void connectNode(node.id)}>{state.connected && state.sourceType === "community" && state.nodeId === node.id ? "已连接" : connectingNode === node.id && state.connecting ? "连接中" : "连接"}</button></span>
           </div>
         )) : <div className="community-empty">{nodes.length ? "没有符合当前筛选条件的节点。" : "完成检测后，可用节点会显示在这里。"}</div>}
       </section>

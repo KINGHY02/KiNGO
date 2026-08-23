@@ -579,7 +579,7 @@ pub fn start(
                     // full speed stage. Repeat the request because an early click can
                     // arrive while subscriptions are still being parsed, before the
                     // upstream cancellation handle has been installed.
-                    if stopping_ticks % 2 == 0 {
+                    if stopping_ticks.is_multiple_of(2) {
                         let _ = request_graceful_stop(&client, port, &api_key);
                     }
                     stopping_ticks += 1;
