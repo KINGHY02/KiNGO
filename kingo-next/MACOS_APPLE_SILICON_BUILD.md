@@ -175,4 +175,12 @@ src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/
 - Windows Rust 测试：59 passed；
 - macOS 资源清单：12 个文件完成 SHA-256 校验，其中 10 个可执行文件均具有
   arm64 Mach-O magic；
-- M1 DMG：由 Pull Request CI 生成后在此补充 run、artifact、文件大小和 SHA-256。
+- 草稿 PR：<https://github.com/KINGHY02/KiNGO/pull/6>，未合并、未打标签、未发布
+  Release；
+- M1 构建：GitHub Actions run
+  <https://github.com/KINGHY02/KiNGO/actions/runs/32647718625> 全部通过，包括 macOS
+  Clippy、59 项 Rust 测试、Release 编译、DMG 校验、挂载后 arm64 主程序检查与
+  `codesign --verify --deep --strict`；
+- 交付文件：`KiNGO_2.0.8_aarch64.dmg`，144,269,126 字节；
+- SHA-256：`58a19461f8f3c8efea1f0b85a5581c4605124605a2a00e485b1be61b0c6f3d2d`，
+  下载后在 Windows 复算并与 CI 的 `SHA256SUMS.txt` 一致。
