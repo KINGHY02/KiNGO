@@ -1,7 +1,7 @@
 {
   "name": "kingo",
   "private": true,
-  "version": "2.0.7",
+  "version": "2.0.8",
   "type": "module",
   "scripts": {
     "postinstall": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/restore-core-assets.ps1",

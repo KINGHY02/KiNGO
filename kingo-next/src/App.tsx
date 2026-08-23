@@ -1225,7 +1225,7 @@ function Workspace({
         : "KiNGO 会保持代理完成下载，仅在最终替换正在使用的代理核心时短暂重连。";
     if (
       !window.confirm(
-        `更新 ${core.name} 到 ${core.latestVersion ?? "最新版本"}？\n${installImpact}\n下载文件通过 SHA-256 校验后才会安装。`,
+        `更新 ${core.name} 到 ${core.latestVersion ?? "最新版本"}？\n${installImpact}\nKiNGO 将从该核心的上游 GitHub Release 下载并安装新版本。`,
       )
     )
       return;

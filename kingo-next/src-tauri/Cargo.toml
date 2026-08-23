@@ -1,6 +1,6 @@
 [package]
 name = "kingo"
-version = "2.0.7"
+version = "2.0.8"
 description = "KiNGO multi-core proxy client"
 authors = ["KiNGO"]
 edition = "2021"

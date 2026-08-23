@@ -3637,7 +3637,11 @@ fn connect_route(
     if cancel.load(Ordering::Relaxed) {
         return Err("connection cancelled".into());
     }
-    let verified_latency = proxy_request_latency(route)?;
+    // A public node may be healthy while a single captive-portal endpoint is
+    // blocked or hijacked by its upstream network. Reuse the configured
+    // fallback list here instead of rejecting the connection after only the
+    // primary URL fails.
+    let verified_latency = proxy_request_latency_with_fallbacks(route)?;
     proxy.set_country_rules(geo_rules::load_cn_rules(app)?)?;
     let routing = get_auto_routing_settings(app);
     if tun_enabled {
@@ -3794,6 +3798,23 @@ fn proxy_request_latency(route: &PublicRoute) -> Result<u32, String> {
     proxy_request_latency_on_port(route, proxy_port(route))
 }
 
+fn proxy_request_latency_with_fallbacks(route: &PublicRoute) -> Result<u32, String> {
+    let settings = current_speed_test_settings();
+    let urls = settings.latency_urls();
+    let mut failures = Vec::with_capacity(urls.len());
+    for url in &urls {
+        match proxy_request_latency_on_port_with_url(route, proxy_port(route), url) {
+            Ok(latency) => return Ok(latency),
+            Err(error) => failures.push(format!("{url}: {error}")),
+        }
+    }
+    Err(format!(
+        "线路已启动，但 {} 个连接验证地址均不可用：{}",
+        failures.len(),
+        failures.join("；")
+    ))
+}
+
 fn proxy_request_latency_on_port(route: &PublicRoute, port: u16) -> Result<u32, String> {
     let settings = current_speed_test_settings();
     proxy_request_latency_on_port_with_url(route, port, &settings.url)
@@ -3831,7 +3852,12 @@ fn proxy_request_latency_on_port_with_url(
         .output()
         .map_err(|error| format!("无法启动线路探测：{error}"))?;
     if !output.status.success() {
-        return Err("线路代理请求失败或已超时".into());
+        let detail = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(if detail.is_empty() {
+            format!("线路代理请求失败或已超时（curl {}）", output.status)
+        } else {
+            format!("线路代理请求失败或已超时：{detail}")
+        });
     }
     let seconds: f32 = String::from_utf8_lossy(&output.stdout)
         .trim()
@@ -5037,6 +5063,27 @@ rules:
         community.slot = 17891;
         assert_eq!(proxy_port(&community), 17891);
         let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn connection_validation_keeps_primary_and_fallback_urls_in_order() {
+        let settings = SpeedTestSettings {
+            url: "https://primary.example/204".into(),
+            fallback_urls: vec![
+                "https://backup.example/204".into(),
+                "https://primary.example/204".into(),
+            ],
+            download_url: default_download_test_url(),
+            timeout_seconds: 4,
+            concurrency: 2,
+        };
+        assert_eq!(
+            settings.latency_urls(),
+            vec![
+                "https://primary.example/204".to_string(),
+                "https://backup.example/204".to_string(),
+            ]
+        );
     }
 
     #[cfg(windows)]

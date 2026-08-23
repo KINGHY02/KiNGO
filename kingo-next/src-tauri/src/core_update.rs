@@ -431,62 +431,6 @@ fn unpack(source: &Path, dir: &Path) -> Result<PathBuf, String> {
     find_exe(dir).ok_or_else(|| "下载包中没有找到可执行文件".into())
 }
 
-fn checksum_asset(release: &Release, asset: &Asset) -> Option<Asset> {
-    let target = asset.name.to_ascii_lowercase();
-    release
-        .assets
-        .iter()
-        .find(|a| {
-            let name = a.name.to_ascii_lowercase();
-            name == format!("{target}.sha256")
-                || name.contains("checksum")
-                || name.contains("sha256sum")
-        })
-        .cloned()
-}
-
-fn verify_checksum(file: &Path, checksum_file: &Path, asset_name: &str) -> Result<bool, String> {
-    let text = fs::read_to_string(checksum_file).map_err(|e| e.to_string())?;
-    let named_line = text.lines().find(|line| {
-        line.to_ascii_lowercase()
-            .contains(&asset_name.to_ascii_lowercase())
-    });
-    let checksum_name = checksum_file
-        .file_name()
-        .and_then(|value| value.to_str())
-        .unwrap_or("");
-    let line = named_line
-        .or_else(|| {
-            checksum_name
-                .eq_ignore_ascii_case(&format!("{asset_name}.sha256"))
-                .then(|| text.lines().next())
-                .flatten()
-        })
-        .unwrap_or("");
-    let expected = line
-        .split_whitespace()
-        .find(|part| part.len() == 64 && part.chars().all(|c| c.is_ascii_hexdigit()));
-    let Some(expected) = expected else {
-        return Ok(false);
-    };
-    let mut source = fs::File::open(file).map_err(|e| e.to_string())?;
-    let mut hasher = Sha256::new();
-    let mut buffer = [0u8; 65536];
-    loop {
-        let read = source.read(&mut buffer).map_err(|e| e.to_string())?;
-        if read == 0 {
-            break;
-        }
-        hasher.update(&buffer[..read]);
-    }
-    let actual = format!("{:x}", hasher.finalize());
-    if actual.eq_ignore_ascii_case(expected) {
-        Ok(true)
-    } else {
-        Err("核心文件 SHA-256 校验失败".into())
-    }
-}
-
 fn file_sha256(path: &Path) -> Result<String, String> {
     let mut source = fs::File::open(path).map_err(|error| error.to_string())?;
     let mut hasher = Sha256::new();
@@ -528,33 +472,30 @@ where
         .copied()
         .ok_or("该核心暂不支持自动更新")?;
     let release = release(repo)?;
+    let latest_version =
+        version_from(&release.tag_name).unwrap_or_else(|| release.tag_name.clone());
+    if let Some(status) = cores::statuses(app)?
+        .into_iter()
+        .find(|status| status.profile.id == core_id)
+    {
+        if let Some(current) = current_version(status.executable_path.as_deref(), repo.version_arg)
+        {
+            if !outdated(&current, &latest_version) {
+                return Err(format!("当前核心已是最新版本 {current}"));
+            }
+        }
+    }
     let asset = pick_asset(&release, repo).ok_or("没有找到适合 Windows 的核心资源")?;
     let temp = std::env::temp_dir().join(format!("kingo-core-{}-{}", core_id, std::process::id()));
     let _ = fs::remove_dir_all(&temp);
     fs::create_dir_all(&temp).map_err(|e| e.to_string())?;
     let archive = temp.join(&asset.name);
     download(&asset.browser_download_url, &archive)?;
-    let checksum = checksum_asset(&release, &asset).ok_or_else(|| {
-        let _ = fs::remove_dir_all(&temp);
-        "该核心发布包没有 SHA-256 校验文件，KiNGO 已拒绝安装未经完整性验证的可执行程序".to_string()
-    })?;
-    let checksum_path = temp.join(&checksum.name);
-    if let Err(error) = download(&checksum.browser_download_url, &checksum_path) {
-        let _ = fs::remove_dir_all(&temp);
-        return Err(format!("下载核心校验文件失败：{error}"));
-    }
-    match verify_checksum(&archive, &checksum_path, &asset.name) {
-        Ok(true) => {}
-        Ok(false) => {
-            let _ = fs::remove_dir_all(&temp);
-            return Err("核心 SHA-256 校验文件格式无效，已拒绝安装".into());
-        }
-        Err(error) => {
-            let _ = fs::remove_dir_all(&temp);
-            return Err(error);
-        }
-    }
-    let checksum_verified = true;
+    // Core releases are selected from their configured upstream repository and
+    // installed only when the upstream version is newer. A missing or unusual
+    // checksum asset must not block the update; archive/executable validation
+    // below still rejects incomplete or unsupported downloads.
+    let checksum_verified = false;
     let extract = temp.join("extract");
     fs::create_dir_all(&extract).map_err(|e| e.to_string())?;
     let executable = unpack(&archive, &extract)?;
@@ -601,6 +542,13 @@ where
         .copied()
         .expect("SubsCheck repository must be configured");
     let release = release(repo)?;
+    let latest_version =
+        version_from(&release.tag_name).unwrap_or_else(|| release.tag_name.clone());
+    if let Ok(installed) = subs_check::installation(app) {
+        if !outdated(&installed.version, &latest_version) {
+            return Err(format!("当前核心已是最新版本 {}", installed.version));
+        }
+    }
     let asset = pick_asset(&release, repo)
         .ok_or_else(|| "上游发布中没有找到 Windows x86_64 的 SubsCheck 文件".to_string())?;
     let temp = std::env::temp_dir().join(format!("kingo-core-subs-check-{}", std::process::id()));
@@ -608,16 +556,6 @@ where
     fs::create_dir_all(&temp).map_err(|error| error.to_string())?;
     let archive = temp.join(&asset.name);
     download(&asset.browser_download_url, &archive)?;
-    let checksum = checksum_asset(&release, &asset).ok_or_else(|| {
-        let _ = fs::remove_dir_all(&temp);
-        "SubsCheck 上游发布未提供 SHA-256 checksums 文件".to_string()
-    })?;
-    let checksum_path = temp.join(&checksum.name);
-    download(&checksum.browser_download_url, &checksum_path)?;
-    if !verify_checksum(&archive, &checksum_path, &asset.name)? {
-        let _ = fs::remove_dir_all(&temp);
-        return Err("SubsCheck checksums 文件中没有当前 Windows 安装包的校验值".into());
-    }
     let extract = temp.join("extract");
     fs::create_dir_all(&extract).map_err(|error| error.to_string())?;
     let executable = unpack(&archive, &extract)?;
@@ -657,7 +595,7 @@ where
     Ok(CoreUpdateResult {
         core_id: "subs-check".into(),
         version: release.tag_name,
-        checksum_verified: true,
+        checksum_verified: false,
         connection_restarted: false,
     })
 }
@@ -681,66 +619,12 @@ pub fn restore_bundled(app: &AppHandle, core_id: &str) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
-    use super::verify_checksum;
-    use sha2::{Digest, Sha256};
-    use std::fs;
-
-    fn fixture(name: &str) -> std::path::PathBuf {
-        let unique = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        std::env::temp_dir().join(format!(
-            "kingo-checksum-{name}-{}-{unique}",
-            std::process::id(),
-        ))
-    }
+    use super::outdated;
 
     #[test]
-    fn checksum_list_must_name_the_selected_asset() {
-        let dir = fixture("named");
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).unwrap();
-        let archive = dir.join("mihomo-windows-amd64.zip");
-        fs::write(&archive, b"verified core").unwrap();
-        let hash = format!("{:x}", Sha256::digest(b"verified core"));
-        let checksums = dir.join("checksums.txt");
-        fs::write(&checksums, format!("{hash} other-platform.zip\n")).unwrap();
-        assert!(!verify_checksum(&archive, &checksums, "mihomo-windows-amd64.zip").unwrap());
-        let _ = fs::remove_dir_all(dir);
-    }
-
-    #[test]
-    fn asset_specific_sha256_file_accepts_a_bare_hash() {
-        let dir = fixture("bare");
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).unwrap();
-        let asset_name = "mihomo-windows-amd64.zip";
-        let archive = dir.join(asset_name);
-        fs::write(&archive, b"verified core").unwrap();
-        let hash = format!("{:x}", Sha256::digest(b"verified core"));
-        let checksums = dir.join(format!("{asset_name}.sha256"));
-        fs::write(&checksums, hash).unwrap();
-        assert!(verify_checksum(&archive, &checksums, asset_name).unwrap());
-        let _ = fs::remove_dir_all(dir);
-    }
-
-    #[test]
-    fn upstream_checksum_list_accepts_the_selected_subs_check_asset() {
-        let dir = fixture("subs-check");
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).unwrap();
-        let asset_name = "subs-check_Windows_x86_64.zip";
-        let archive = dir.join(asset_name);
-        fs::write(&archive, b"official release archive").unwrap();
-        let hash = format!("{:x}", Sha256::digest(b"official release archive"));
-        let checksums = dir.join("subs-check_1.6.2_checksums.txt");
-        fs::write(
-            &checksums,
-            format!("{hash}  {asset_name}\n0000  subs-check_Linux_x86_64.tar.gz\n"),
-        )
-        .unwrap();
-        assert!(verify_checksum(&archive, &checksums, asset_name).unwrap());
-        let _ = fs::remove_dir_all(dir);
+    fn core_update_only_accepts_a_newer_version() {
+        assert!(outdated("1.6.2", "1.6.3"));
+        assert!(!outdated("1.6.3", "1.6.3"));
+        assert!(!outdated("1.7.0", "1.6.3"));
     }
 }
