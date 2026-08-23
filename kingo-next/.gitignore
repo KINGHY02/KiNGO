@@ -12,6 +12,7 @@ dist
 dist-ssr
 *.local
 src-tauri/resources/core-payloads/
+artifacts/
 
 # Editor directories and files
 .vscode/*

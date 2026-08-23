@@ -555,7 +555,7 @@ fn install_route_config(app: &AppHandle, route: &PublicRoute, bytes: &[u8]) -> R
         return Err(format!("新配置安装失败：{error}"));
     }
     if route.core_id == "mihomo" {
-        ensure_mihomo_controller(&target)?;
+        ensure_mihomo_controller(&target, 7890, 9090)?;
     }
     Ok(())
 }
@@ -1543,12 +1543,21 @@ pub fn start_community_connection(
     if store.routing_apply_in_progress.load(Ordering::Acquire) {
         return Err("正在切换线路或应用连接设置，请稍候".into());
     }
-    let config = crate::community_nodes::store::write_connection_config(&app, &node)?;
+    // Public-node scans can run alongside another proxy client. Fixed Clash-style
+    // ports (7890/9090) made every protocol fail whenever those ports were already
+    // occupied, so reserve a fresh pair for each connection attempt.
+    let (mixed_port, controller_port) = crate::community_nodes::probe::available_port_pair()?;
+    let config = crate::community_nodes::store::write_connection_config(
+        &app,
+        &node,
+        mixed_port,
+        controller_port,
+    )?;
     let route = PublicRoute {
         id: format!("community:{}", node.id),
         name: node.display_name.clone(),
         core_id: "mihomo".into(),
-        slot: 0,
+        slot: mixed_port as u32,
         protocol_label: node.protocol.to_uppercase(),
         config_format: "yaml".into(),
         config_path: config.to_string_lossy().into_owned(),
@@ -3893,7 +3902,12 @@ fn prepare_route(app: &AppHandle, route: &PublicRoute) -> Result<(), String> {
         fs::copy(&resource, &config).map_err(|error| format!("route cache failed: {error}"))?;
     }
     if route.core_id == "mihomo" {
-        ensure_mihomo_controller(&config)?;
+        let mixed_port = if route.id.starts_with("community:") {
+            route.slot.try_into().map_err(|_| "公共节点代理端口无效")?
+        } else {
+            7890
+        };
+        ensure_mihomo_controller(&config, mixed_port, 9090)?;
     } else if route.core_id == "xray" {
         ensure_xray_socks_inbound(&config)?;
     }
@@ -3921,7 +3935,11 @@ fn ensure_xray_socks_inbound(config: &std::path::Path) -> Result<(), String> {
     Ok(())
 }
 
-fn ensure_mihomo_controller(config: &std::path::Path) -> Result<(), String> {
+fn ensure_mihomo_controller(
+    config: &std::path::Path,
+    mixed_port: u16,
+    default_controller_port: u16,
+) -> Result<(), String> {
     let content =
         fs::read_to_string(config).map_err(|error| format!("mihomo 配置读取失败：{error}"))?;
     let lines: Vec<&str> = content.lines().collect();
@@ -3953,14 +3971,25 @@ fn ensure_mihomo_controller(config: &std::path::Path) -> Result<(), String> {
         }
         if trimmed.starts_with("mixed-port:") {
             if !mixed_port_added {
-                normalized.push("mixed-port: 7890".to_string());
+                normalized.push(format!("mixed-port: {mixed_port}"));
                 mixed_port_added = true;
             }
             continue;
         }
         if trimmed.starts_with("external-controller:") {
             if !controller_added {
-                normalized.push("external-controller: 127.0.0.1:9090".to_string());
+                let controller = if start > 0 || mixed_port == 7890 {
+                    default_controller_port
+                } else {
+                    // Community configs are generated with an available controller
+                    // port; preserve it instead of forcing the globally common 9090.
+                    trimmed
+                        .split_once(':')
+                        .and_then(|(_, value)| value.trim().rsplit_once(':'))
+                        .and_then(|(_, port)| port.parse::<u16>().ok())
+                        .unwrap_or(default_controller_port)
+                };
+                normalized.push(format!("external-controller: 127.0.0.1:{controller}"));
                 controller_added = true;
             }
             continue;
@@ -3968,10 +3997,12 @@ fn ensure_mihomo_controller(config: &std::path::Path) -> Result<(), String> {
         normalized.push((*line).to_string());
     }
     if !mixed_port_added {
-        normalized.insert(0, "mixed-port: 7890".to_string());
+        normalized.insert(0, format!("mixed-port: {mixed_port}"));
     }
     if !controller_added {
-        normalized.push("external-controller: 127.0.0.1:9090".to_string());
+        normalized.push(format!(
+            "external-controller: 127.0.0.1:{default_controller_port}"
+        ));
     }
     if !secret_added {
         normalized.push("secret: KiNGO".to_string());
@@ -4503,6 +4534,9 @@ fn runtime_config(app: &AppHandle, route: &PublicRoute) -> Result<String, String
 }
 
 fn proxy_port(route: &PublicRoute) -> u16 {
+    if route.id.starts_with("community:") {
+        return u16::try_from(route.slot).unwrap_or(7890);
+    }
     match route.core_id.as_str() {
         "mihomo" => 7890,
         "mieru" => 3080,
@@ -4980,6 +5014,29 @@ rules:
         assert!(!content.contains("secret:"));
         let _ = fs::remove_file(path);
         let _ = fs::remove_file(generated);
+    }
+
+    #[test]
+    fn community_connection_keeps_its_isolated_ports() {
+        let path = std::env::temp_dir().join(format!(
+            "kingo-community-connection-{}.yaml",
+            std::process::id()
+        ));
+        fs::write(
+            &path,
+            "mixed-port: 17891\nexternal-controller: 127.0.0.1:19091\nsecret: KiNGO\nproxies: []\nproxy-groups: []\nrules: []\n",
+        )
+        .expect("write fixture");
+        ensure_mihomo_controller(&path, 17891, 19091).expect("normalize community config");
+        let content = fs::read_to_string(&path).expect("read normalized config");
+        assert!(content.contains("mixed-port: 17891"));
+        assert!(content.contains("external-controller: 127.0.0.1:19091"));
+
+        let mut community = route("mihomo");
+        community.id = "community:test".into();
+        community.slot = 17891;
+        assert_eq!(proxy_port(&community), 17891);
+        let _ = fs::remove_file(path);
     }
 
     #[cfg(windows)]

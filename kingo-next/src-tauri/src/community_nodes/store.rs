@@ -109,6 +109,8 @@ pub fn load_scan_state(app: &AppHandle) -> Option<CommunityScanState> {
 pub fn write_connection_config(
     app: &AppHandle,
     node: &CommunityNodeCandidate,
+    mixed_port: u16,
+    controller_port: u16,
 ) -> Result<PathBuf, String> {
     let connection_dir = directory(app)?.join("connections");
     fs::create_dir_all(&connection_dir)
@@ -122,8 +124,8 @@ pub fn write_connection_config(
         serde_json::Value::String("KINGO_COMMUNITY".into()),
     );
     let config = serde_json::json!({
-        "mixed-port": 7890,
-        "external-controller": "127.0.0.1:9090",
+        "mixed-port": mixed_port,
+        "external-controller": format!("127.0.0.1:{controller_port}"),
         "secret": "KiNGO",
         "allow-lan": false,
         "mode": "rule",
