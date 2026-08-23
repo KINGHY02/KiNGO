@@ -895,8 +895,8 @@ function CommunityNodesPage({ state }: { state: AppState }) {
       }
     }).then(value => { if (disposed) value(); else cleanupRetest = value; });
     void listen<{ state: string; done: number; total: number }>("community-retest-batch", event => {
-      setBatchRetest(event.payload.state === "completed" ? null : { done: event.payload.done, total: event.payload.total });
-      if (event.payload.state === "completed") void refreshNodes();
+      setBatchRetest(event.payload.state === "running" ? { done: event.payload.done, total: event.payload.total } : null);
+      if (event.payload.state !== "running") void refreshNodes();
     }).then(value => { if (disposed) value(); else cleanupBatchRetest = value; });
     return () => { disposed = true; cleanup?.(); cleanupRetest?.(); cleanupBatchRetest?.(); };
   }, []);
@@ -938,6 +938,11 @@ function CommunityNodesPage({ state }: { state: AppState }) {
       setBatchRetest(null);
       setError(String(value));
     }
+  };
+  const stopRetests = async () => {
+    setError(null);
+    try { await invoke("stop_community_retests"); }
+    catch (value) { setError(String(value)); }
   };
   const connectWithoutTun = async () => {
     const nodeId = lastRequestedNode ?? state.nodeId;
@@ -1003,6 +1008,9 @@ function CommunityNodesPage({ state }: { state: AppState }) {
       return !keyword || [node.displayName, node.originalName, node.server, node.exitIp ?? ""].some(value => value.toLowerCase().includes(keyword));
     });
   }, [nodes, nodeSearch, countryFilter, protocolFilter, statusFilter]);
+  const activeRetestNames = nodes
+    .filter(node => retesting.has(node.id))
+    .map(node => node.displayName || node.countryName || node.originalName);
 
   return (
     <div className="page workspace community-page">
@@ -1011,7 +1019,9 @@ function CommunityNodesPage({ state }: { state: AppState }) {
         <div className="toolbar-actions">
           {!running && <button className="primary-button" disabled={state.connecting || (state.connected && state.sourceType === "community")} onClick={() => void runCommand("start_community_scan")}>开始获取</button>}
           {running && <button className="danger" disabled={scan.state === "stopping"} onClick={() => void runCommand("stop_community_scan")}>{scan.state === "stopping" ? "正在整理…" : "停止并保留"}</button>}
-          <button disabled={running || nodes.length === 0 || retesting.size > 0 || batchRetest != null} onClick={() => void retestAllNodes()}>{batchRetest ? `批量复测 ${batchRetest.done}/${batchRetest.total || "…"}` : "复测全部"}</button>
+          {batchRetest
+            ? <button className="danger" onClick={() => void stopRetests()}>停止复测</button>
+            : <button disabled={running || nodes.length === 0 || retesting.size > 0} onClick={() => void retestAllNodes()}>复测全部</button>}
           <button disabled={running || nodes.length === 0 || retesting.size > 0 || batchRetest != null || state.connecting || (state.connected && state.sourceType === "community")} onClick={async () => { setError(null); try { await invoke("clear_community_nodes"); setNodes([]); } catch (value) { setError(String(value)); } }}>清空结果</button>
         </div>
       </div>
@@ -1023,6 +1033,10 @@ function CommunityNodesPage({ state }: { state: AppState }) {
         <div><span>最终保留</span><b>{running ? "待定" : nodes.length}</b><small>{running ? `当前列表为上轮 ${nodes.length} 个` : `目标 ${settings.retainCount} 个`}</small></div>
       </section>
       <section className="community-task-card">
+        {(batchRetest || retesting.size > 0) && <div className="community-retest-status">
+          <div><b>{batchRetest ? `批量复测 ${batchRetest.done} / ${batchRetest.total || "准备中"}` : "节点复测中"}</b><small>{activeRetestNames.length > 0 ? `正在复测：${activeRetestNames.join("、")}` : "正在准备下一个节点"}</small></div>
+          <button className="danger" onClick={() => void stopRetests()}>停止</button>
+        </div>}
         <div className="community-task-heading"><div><b>{taskTitle}</b><small>{taskDetail}</small></div><strong>{progressKnown ? `${percent}%` : scan.state === "running" ? "处理中" : "0%"}</strong></div>
         <div className="community-stage-track" aria-label="节点检测阶段">
           {["订阅处理", "节点测活", "下载测速"].map((label, index) => <span key={label} className={stageIndex > index ? "done" : stageIndex === index && running ? "current" : ""}>{label}</span>)}
@@ -1055,7 +1069,7 @@ function CommunityNodesPage({ state }: { state: AppState }) {
         <div className="community-node-head"><span>#</span><span>节点</span><span>协议</span><span>延迟</span><span>下载速度</span><span>出口 IP</span><span>操作</span></div>
         {filteredNodes.length ? filteredNodes.map((node, index) => (
           <div className={`community-node-row ${node.lastErrorDetail ? "has-error" : ""}`} key={node.id} title={`${node.originalName}\n来源 ${node.sourceIds.length} 个${node.lastErrorDetail ? `\n失败原因：${node.lastErrorDetail}` : ""}`}>
-            <span>{String(index + 1).padStart(2, "0")}</span><b>{node.displayName || node.countryName || "未知地区"}</b><span>{node.protocol.toUpperCase()}</span><span className={node.latencyMedianMs == null && node.lastErrorDetail ? "community-failed-value" : ""}>{node.latencyMedianMs == null ? node.lastErrorDetail ? "失败" : node.speedMedianKbps != null ? "待复测" : "-" : `${node.latencyMedianMs} ms`}</span><span>{node.speedMedianKbps == null ? "-" : `${(node.speedMedianKbps / 1024).toFixed(1)} MB/s`}</span><span>{node.exitIp ?? "-"}</span><span className="community-node-actions"><button disabled={retesting.has(node.id) || running || batchRetest != null || state.connecting} onClick={() => void retestNode(node.id)}>{retesting.has(node.id) ? "复测中" : "复测"}</button><button className={state.connected && state.sourceType === "community" && state.nodeId === node.id ? "selected" : ""} disabled={running || retesting.has(node.id) || batchRetest != null || state.connecting || (state.connected && state.sourceType === "community" && state.nodeId === node.id)} onClick={() => void connectNode(node.id)}>{state.connected && state.sourceType === "community" && state.nodeId === node.id ? "已连接" : connectingNode === node.id && state.connecting ? "连接中" : "连接"}</button></span>
+            <span>{String(index + 1).padStart(2, "0")}</span><b>{node.displayName || node.countryName || "未知地区"}</b><span>{node.protocol.toUpperCase()}</span><span className={node.latencyMedianMs == null && node.lastErrorDetail ? "community-failed-value" : ""}>{node.latencyMedianMs == null ? node.lastErrorDetail ? "失败" : node.speedMedianKbps != null ? "待复测" : "-" : `${node.latencyMedianMs} ms`}</span><span>{node.speedMedianKbps == null ? "-" : `${(node.speedMedianKbps / 1024).toFixed(1)} MB/s`}</span><span>{node.exitIp ?? "-"}</span><span className="community-node-actions">{retesting.has(node.id) ? <button className="retesting" onClick={() => void stopRetests()}>停止</button> : <button disabled={running || batchRetest != null || state.connecting} onClick={() => void retestNode(node.id)}>复测</button>}<button className={state.connected && state.sourceType === "community" && state.nodeId === node.id ? "selected" : ""} disabled={running || retesting.has(node.id) || batchRetest != null || state.connecting || (state.connected && state.sourceType === "community" && state.nodeId === node.id)} onClick={() => void connectNode(node.id)}>{state.connected && state.sourceType === "community" && state.nodeId === node.id ? "已连接" : connectingNode === node.id && state.connecting ? "连接中" : "连接"}</button></span>
           </div>
         )) : <div className="community-empty">{nodes.length ? "没有符合当前筛选条件的节点。" : "完成检测后，可用节点会显示在这里。"}</div>}
       </section>

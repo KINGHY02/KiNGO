@@ -246,6 +246,13 @@ fn retest_all_community_nodes(
 }
 
 #[tauri::command]
+fn stop_community_retests(
+    store: State<'_, community_nodes::scanner::CommunityNodeStore>,
+) -> Result<(), String> {
+    community_nodes::scanner::stop_retests(&store)
+}
+
+#[tauri::command]
 fn connect_community_node(
     app: tauri::AppHandle,
     node_id: String,
@@ -1544,6 +1551,7 @@ pub fn run() {
             save_community_settings,
             retest_community_node,
             retest_all_community_nodes,
+            stop_community_retests,
             connect_community_node,
             enable_uwp_loopback,
             list_public_routes,
