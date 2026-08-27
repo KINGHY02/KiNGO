@@ -1,0 +1,272 @@
+name: Publish KiNGO Windows and macOS
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Stable version X.Y.Z; all source version files must already match"
+        required: true
+        type: string
+      release_mode:
+        description: "Draft is recommended until both platform artifacts are reviewed"
+        required: true
+        default: draft
+        type: choice
+        options:
+          - draft
+          - public
+      confirmation:
+        description: "Type RELEASE for draft or PUBLISH for public"
+        required: true
+        type: string
+  pull_request:
+    paths:
+      - ".github/workflows/release-all.yml"
+      - ".github/workflows/release.yml"
+      - ".github/workflows/macos-arm64.yml"
+      - ".github/workflows/macos-arm64-notarized.yml"
+      - "kingo-next/CROSS_PLATFORM_RELEASE_PLAN.md"
+      - "kingo-next/scripts/release-tools.mjs"
+      - "kingo-next/src-tauri/tauri.macos-arm64.notarized.conf.json"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: controlled-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  policy:
+    name: Controlled release workflow policy
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 20
+
+      - name: Validate release configuration policy
+        working-directory: kingo-next
+        run: |
+          node - <<'NODE'
+          const fs = require('fs');
+          const main = JSON.parse(fs.readFileSync('src-tauri/tauri.conf.json', 'utf8'));
+          const testMac = JSON.parse(fs.readFileSync('src-tauri/tauri.macos-arm64.conf.json', 'utf8'));
+          const releaseMac = JSON.parse(fs.readFileSync('src-tauri/tauri.macos-arm64.notarized.conf.json', 'utf8'));
+          if (!main.bundle.targets.includes('nsis')) throw new Error('Windows NSIS target is required');
+          if (main.bundle.createUpdaterArtifacts !== true) throw new Error('Windows updater artifacts must be enabled');
+          if (testMac.bundle.createUpdaterArtifacts !== false) throw new Error('Test DMG must not generate updater artifacts');
+          if (testMac.bundle.macOS.signingIdentity !== '-') throw new Error('Test DMG must stay ad-hoc signed');
+          if (!releaseMac.bundle.targets.includes('dmg')) throw new Error('Production DMG target is required');
+          if (releaseMac.bundle.createUpdaterArtifacts !== true) throw new Error('Production macOS updater artifacts are required');
+          if (releaseMac.bundle.macOS.hardenedRuntime !== true) throw new Error('Production hardened runtime is required');
+          if (Object.hasOwn(releaseMac.bundle.macOS, 'signingIdentity')) throw new Error('Production must not pin an ad-hoc identity');
+
+          const workflow = fs.readFileSync('../.github/workflows/release-all.yml', 'utf8');
+          for (const marker of ['workflow_dispatch:', 'release-production', '--require-newer', 'gh release create', '--draft']) {
+            if (!workflow.includes(marker)) throw new Error(`Missing controlled release marker: ${marker}`);
+          }
+          const macWorkflow = fs.readFileSync('../.github/workflows/macos-arm64-notarized.yml', 'utf8');
+          if (!macWorkflow.includes('environment: macos-production')) throw new Error('macos-production gate is required');
+          NODE
+
+      - name: Test release metadata tooling
+        working-directory: kingo-next
+        run: npm run release:self-test
+
+      - name: Validate current source version agreement
+        working-directory: kingo-next
+        run: |
+          version="$(node -p "require('./package.json').version")"
+          node scripts/release-tools.mjs validate-version "$version"
+
+      - name: Validate macOS signing script syntax
+        working-directory: kingo-next
+        run: bash -n scripts/sign-macos-cores.sh
+
+  preflight:
+    name: Validate release authorization and version
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    outputs:
+      source_sha: ${{ steps.gate.outputs.source_sha }}
+      version: ${{ steps.gate.outputs.version }}
+      tag: ${{ steps.gate.outputs.tag }}
+      release_mode: ${{ steps.gate.outputs.release_mode }}
+    steps:
+      - name: Check out source and tags
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+
+      - name: Enforce master, confirmation and monotonic version
+        id: gate
+        working-directory: kingo-next
+        env:
+          REQUESTED_VERSION: ${{ inputs.version }}
+          RELEASE_MODE: ${{ inputs.release_mode }}
+          RELEASE_CONFIRMATION: ${{ inputs.confirmation }}
+        run: |
+          set -euo pipefail
+          if [[ "$GITHUB_REF" != "refs/heads/master" ]]; then
+            echo "Controlled releases must be dispatched from master, received $GITHUB_REF." >&2
+            exit 1
+          fi
+
+          expected_confirmation="RELEASE"
+          if [[ "$RELEASE_MODE" == "public" ]]; then
+            expected_confirmation="PUBLISH"
+          fi
+          if [[ "$RELEASE_CONFIRMATION" != "$expected_confirmation" ]]; then
+            echo "Confirmation must be exactly $expected_confirmation for $RELEASE_MODE mode." >&2
+            exit 1
+          fi
+
+          git fetch --force origin master --tags
+          remote_master="$(git ls-remote origin refs/heads/master | awk '{print $1}')"
+          if [[ -z "$remote_master" || "$GITHUB_SHA" != "$remote_master" ]]; then
+            echo "The selected commit is not the current origin/master tip." >&2
+            echo "Selected: $GITHUB_SHA" >&2
+            echo "Remote:   ${remote_master:-missing}" >&2
+            exit 1
+          fi
+
+          node scripts/release-tools.mjs validate-version "$REQUESTED_VERSION" --require-newer
+          {
+            echo "source_sha=$GITHUB_SHA"
+            echo "release_mode=$RELEASE_MODE"
+          } >> "$GITHUB_OUTPUT"
+
+  windows:
+    name: Build signed Windows release assets
+    if: github.event_name == 'workflow_dispatch'
+    needs: preflight
+    permissions:
+      contents: read
+    uses: ./.github/workflows/release.yml
+    with:
+      release_build: true
+      source_sha: ${{ needs.preflight.outputs.source_sha }}
+      version: ${{ needs.preflight.outputs.version }}
+    secrets: inherit
+
+  macos:
+    name: Build notarized macOS release assets
+    if: github.event_name == 'workflow_dispatch'
+    needs: preflight
+    permissions:
+      contents: read
+    uses: ./.github/workflows/macos-arm64-notarized.yml
+    with:
+      release_build: true
+      source_sha: ${{ needs.preflight.outputs.source_sha }}
+      version: ${{ needs.preflight.outputs.version }}
+      confirmation: RELEASE
+    secrets: inherit
+
+  release:
+    name: Create verified Tag and GitHub Release
+    if: github.event_name == 'workflow_dispatch'
+    needs:
+      - preflight
+      - windows
+      - macos
+    runs-on: ubuntu-latest
+    environment:
+      name: release-production
+      url: ${{ steps.publish.outputs.url }}
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    env:
+      RELEASE_VERSION: ${{ needs.preflight.outputs.version }}
+      RELEASE_TAG: ${{ needs.preflight.outputs.tag }}
+      RELEASE_MODE: ${{ needs.preflight.outputs.release_mode }}
+      SOURCE_SHA: ${{ needs.preflight.outputs.source_sha }}
+
+    steps:
+      - name: Check out verified source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ needs.preflight.outputs.source_sha }}
+
+      - name: Download both platform artifacts
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: release-*
+          path: release-assets
+          merge-multiple: true
+
+      - name: Verify assets and generate unified release metadata
+        run: |
+          node kingo-next/scripts/release-tools.mjs prepare \
+            release-assets \
+            "$RELEASE_VERSION" \
+            "$GITHUB_REPOSITORY" \
+            "$SOURCE_SHA"
+          cat release-assets/SHA256SUMS.txt
+          node -e "const x=require('./release-assets/latest.json'); if(!x.platforms['windows-x86_64']||!x.platforms['darwin-aarch64']) process.exit(1)"
+
+      - name: Attest release assets
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
+        with:
+          subject-path: release-assets/*
+
+      - name: Create Tag and Release after all gates pass
+        id: publish
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          mapfile -d '' assets < <(find release-assets -maxdepth 1 -type f -print0 | sort -z)
+          if (( ${#assets[@]} < 12 )); then
+            echo "Expected at least 12 release assets, found ${#assets[@]}." >&2
+            exit 1
+          fi
+
+          args=(
+            "$RELEASE_TAG"
+            "${assets[@]}"
+            --target "$SOURCE_SHA"
+            --title "KiNGO $RELEASE_TAG"
+            --generate-notes
+            --fail-on-no-commits
+          )
+          if [[ "$RELEASE_MODE" == "draft" ]]; then
+            args+=(--draft)
+          fi
+          gh release create "${args[@]}"
+
+          url="$(gh release view "$RELEASE_TAG" --json url --jq .url)"
+          is_draft="$(gh release view "$RELEASE_TAG" --json isDraft --jq .isDraft)"
+          expected_draft=false
+          if [[ "$RELEASE_MODE" == "draft" ]]; then
+            expected_draft=true
+          fi
+          if [[ "$is_draft" != "$expected_draft" ]]; then
+            echo "Release visibility verification failed." >&2
+            exit 1
+          fi
+
+          tag_sha="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$RELEASE_TAG" --jq .object.sha)"
+          if [[ "$tag_sha" != "$SOURCE_SHA" ]]; then
+            echo "Tag points to $tag_sha instead of $SOURCE_SHA." >&2
+            exit 1
+          fi
+          for required in \
+            "KiNGO-Setup-${RELEASE_VERSION}-x64.exe" \
+            "KiNGO-${RELEASE_VERSION}-macOS-arm64.dmg" \
+            "KiNGO-${RELEASE_VERSION}-macOS-arm64.app.tar.gz" \
+            latest.json \
+            SHA256SUMS.txt \
+            RELEASE-MANIFEST.json; do
+            gh release view "$RELEASE_TAG" --json assets --jq '.assets[].name' | grep -Fx "$required" >/dev/null
+          done
+          echo "url=$url" >> "$GITHUB_OUTPUT"
+          echo "Created $RELEASE_MODE release: $url"

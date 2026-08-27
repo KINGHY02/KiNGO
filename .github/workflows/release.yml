@@ -1,17 +1,46 @@
-name: Build and release KiNGO
+name: Build Windows x64
 
 on:
+  workflow_call:
+    inputs:
+      release_build:
+        description: "Build signed updater assets for the controlled release workflow"
+        required: true
+        type: boolean
+      source_sha:
+        description: "Exact source commit to build"
+        required: true
+        type: string
+      version:
+        description: "Stable release version without a leading v"
+        required: true
+        type: string
+    secrets:
+      TAURI_SIGNING_PRIVATE_KEY:
+        required: true
+      TAURI_SIGNING_PRIVATE_KEY_PASSWORD:
+        required: false
   pull_request:
     paths:
       - "README.md"
       - "kingo-next/**"
       - ".github/workflows/release.yml"
+      - ".github/workflows/release-all.yml"
   push:
-    tags:
-      - "v*"
+    branches:
+      - master
+    paths:
+      - "README.md"
+      - "kingo-next/**"
+      - ".github/workflows/release.yml"
+      - ".github/workflows/release-all.yml"
 
 permissions:
-  contents: write
+  contents: read
+
+concurrency:
+  group: windows-x64-${{ github.ref }}-${{ inputs.release_build || false }}
+  cancel-in-progress: ${{ !inputs.release_build }}
 
 jobs:
   windows:
@@ -20,20 +49,27 @@ jobs:
     defaults:
       run:
         shell: pwsh
+    env:
+      SOURCE_SHA: ${{ inputs.source_sha || github.sha }}
+      RELEASE_VERSION: ${{ inputs.version }}
 
     steps:
       - name: Check out source
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ inputs.source_sha || github.sha }}
 
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 20
           cache: npm
           cache-dependency-path: kingo-next/package-lock.json
 
       - name: Set up Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c
+        with:
+          toolchain: stable
 
       - name: Install frontend dependencies
         working-directory: kingo-next
@@ -51,29 +87,98 @@ jobs:
         working-directory: kingo-next
         run: cargo test --manifest-path src-tauri/Cargo.toml
 
-      - name: Build pull request installer
-        if: github.event_name == 'pull_request'
+      - name: Build validation installer
+        if: ${{ !inputs.release_build }}
         working-directory: kingo-next
         run: npm run tauri -- build --bundles nsis --config src-tauri/tauri.pr.conf.json
 
-      - name: Build and publish tagged release
-        if: startsWith(github.ref, 'refs/tags/v')
-        uses: tauri-apps/tauri-action@v1
+      - name: Collect validation installer
+        if: ${{ !inputs.release_build }}
+        working-directory: kingo-next
+        run: |
+          $bundle = Join-Path $PWD "src-tauri/target/release/bundle/nsis"
+          $installers = @(Get-ChildItem -LiteralPath $bundle -File -Filter "*.exe")
+          if ($installers.Count -ne 1) {
+            throw "Expected exactly one NSIS installer, found $($installers.Count)."
+          }
+          $output = Join-Path $PWD "artifacts/windows-x64"
+          New-Item -ItemType Directory -Force -Path $output | Out-Null
+          Copy-Item -LiteralPath $installers[0].FullName -Destination $output
+          $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $installers[0].FullName).Hash.ToLowerInvariant()
+          "$hash  $($installers[0].Name)" | Set-Content -LiteralPath (Join-Path $output "SHA256SUMS.txt") -Encoding utf8NoBOM
+
+      - name: Confirm updater signing secret
+        if: ${{ inputs.release_build }}
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:TAURI_SIGNING_PRIVATE_KEY)) {
+            throw "Missing required secret: TAURI_SIGNING_PRIVATE_KEY"
+          }
+
+      - name: Validate release version
+        if: ${{ inputs.release_build }}
+        working-directory: kingo-next
+        run: node scripts/release-tools.mjs validate-version $env:RELEASE_VERSION
+
+      - name: Build signed updater installer
+        if: ${{ inputs.release_build }}
+        working-directory: kingo-next
+        env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: npm run tauri -- build --bundles nsis
+
+      - name: Collect signed Windows release assets
+        if: ${{ inputs.release_build }}
+        working-directory: kingo-next
+        run: |
+          $bundle = Join-Path $PWD "src-tauri/target/release/bundle/nsis"
+          $installers = @(Get-ChildItem -LiteralPath $bundle -File -Filter "*.exe")
+          if ($installers.Count -ne 1) {
+            throw "Expected exactly one NSIS installer, found $($installers.Count)."
+          }
+          $signature = "$($installers[0].FullName).sig"
+          if (-not (Test-Path -LiteralPath $signature -PathType Leaf)) {
+            throw "Missing updater signature: $signature"
+          }
+          if ((Get-Item -LiteralPath $signature).Length -lt 100) {
+            throw "Updater signature is unexpectedly small."
+          }
+
+          $output = Join-Path $PWD "artifacts/release-windows-x64"
+          New-Item -ItemType Directory -Force -Path $output | Out-Null
+          $publicName = "KiNGO-Setup-$env:RELEASE_VERSION-x64.exe"
+          $publicInstaller = Join-Path $output $publicName
+          $publicSignature = "$publicInstaller.sig"
+          Copy-Item -LiteralPath $installers[0].FullName -Destination $publicInstaller
+          Copy-Item -LiteralPath $signature -Destination $publicSignature
+
+          $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $publicInstaller).Hash.ToLowerInvariant()
+          "$hash  $publicName" | Set-Content -LiteralPath (Join-Path $output "WINDOWS-SHA256SUMS.txt") -Encoding utf8NoBOM
+          @(
+            "Source commit: $env:SOURCE_SHA"
+            "Version: $env:RELEASE_VERSION"
+            "Installer: $publicName"
+            "Installer bytes: $((Get-Item -LiteralPath $publicInstaller).Length)"
+            "Installer SHA-256: $hash"
+            "Updater signature bytes: $((Get-Item -LiteralPath $publicSignature).Length)"
+          ) | Set-Content -LiteralPath (Join-Path $output "WINDOWS-BUILD-REPORT.txt") -Encoding utf8NoBOM
+
+      - name: Upload validation installer
+        if: ${{ !inputs.release_build }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          projectPath: kingo-next
-          tagName: ${{ github.ref_name }}
-          releaseName: "KiNGO ${{ github.ref_name }}"
-          releaseBody: |
-            KiNGO 2.0 新架构 Windows x64 安装包。
-            已安装支持软件内更新的 KiNGO 版本可直接在“设置 → 软件更新”完成下载、验证、安装和自动重启。
-            首次安装仍可下载 `KiNGO-Setup-*-x64.exe`。本版本未使用 Windows 代码签名证书，首次运行时仍可能显示 SmartScreen 提示。
-          generateReleaseNotes: true
-          releaseDraft: false
-          prerelease: false
-          uploadUpdaterJson: true
-          args: --bundles nsis
-          releaseAssetNamePattern: "KiNGO-Setup-[version]-[arch][ext]"
+          name: KiNGO-${{ github.sha }}-windows-x64-nsis
+          path: kingo-next/artifacts/windows-x64/
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload signed Windows release assets
+        if: ${{ inputs.release_build }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-windows-x64
+          path: kingo-next/artifacts/release-windows-x64/
+          if-no-files-found: error
+          retention-days: 30

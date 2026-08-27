@@ -9,6 +9,7 @@
     "prepare:cores": "node scripts/prepare-core-payloads.mjs",
     "cores:macos-arm64": "node scripts/restore-core-assets.mjs --target macos-arm64",
     "sign:cores:macos": "bash scripts/sign-macos-cores.sh",
+    "release:self-test": "node scripts/release-tools.mjs self-test",
     "build": "npm run prepare:cores && tsc && vite build",
     "check": "npm run build && cargo check --manifest-path src-tauri/Cargo.toml",
     "test": "cargo test --manifest-path src-tauri/Cargo.toml",

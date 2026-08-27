@@ -1,6 +1,6 @@
 # KiNGO macOS Apple Silicon DMG 构建与发布方案
 
-更新时间：2026-08-23
+更新时间：2026-08-27
 
 ## 1. 目标与交付边界
 
@@ -134,9 +134,11 @@ src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/
 
 ## 7. 正式签名、公证与发布
 
-测试工作流使用 `signingIdentity: "-"`。正式发行准备由仅支持手动触发的
-`.github/workflows/macos-arm64-notarized.yml` 承担；它只上传经过签名、公证验证的
-Actions artifact，不会创建、修改或发布 GitHub Release。
+测试工作流使用 `signingIdentity: "-"`。正式签名构建由
+`.github/workflows/macos-arm64-notarized.yml` 承担：既可以输入 `NOTARIZE` 独立生成
+公证 Artifact，也可以被统一的 `.github/workflows/release-all.yml` 复用。只有统一
+工作流中的 Windows 和 macOS job 全部通过，最后的 Release job 才能创建 Tag 和
+Draft/Public Release。完整发布方案见 `CROSS_PLATFORM_RELEASE_PLAN.md`。
 
 先在 GitHub 的 `macos-production` Environment 配置人工审批和以下 Secrets：
 
@@ -148,17 +150,24 @@ Actions artifact，不会创建、修改或发布 GitHub Release。
 - `APPLE_API_KEY`：App Store Connect API Key ID；
 - `APPLE_API_PRIVATE_KEY`：对应 `AuthKey_<KEY_ID>.p8` 的完整内容。
 
-执行时在 Actions 选择 `Build notarized macOS Apple Silicon DMG` 和待构建的
-tag/commit，输入精确确认词 `NOTARIZE`。工作流会：
+仓库级 Secret `TAURI_SIGNING_PRIVATE_KEY` 及其可选密码用于生成 macOS 软件内更新包
+签名。`release-production` Environment 保护最终 Tag/Release job，建议同样配置人工
+审批。
+
+独立验证时在 Actions 选择 `Build notarized macOS Apple Silicon DMG` 和待构建的
+tag/commit，输入精确确认词 `NOTARIZE`。正式双平台发布则从默认分支运行
+`Publish KiNGO Windows and macOS`，输入新版本号、发布模式和对应确认词。macOS
+工作流会：
 
 1. 验证确认词和五项必需 Secrets；
 2. 在临时 Keychain 导入 `.p12`，把 `.p8` 写入 Runner 临时目录；
 3. 用同一 Developer ID 对 10 个内嵌 Mach-O 核心签名；
-4. 通过 `tauri.macos-arm64.notarized.conf.json` 构建、提交 Apple 公证并 stapling；
+4. 通过 `tauri.macos-arm64.notarized.conf.json` 构建 DMG 和 `.app.tar.gz` updater，
+   提交 Apple 公证并 stapling；
 5. 挂载最终 DMG，验证主程序及 10 个核心的 Developer ID、arm64 架构、stapling、
    Gatekeeper 和磁盘镜像；
-6. 上传 DMG、`SHA256SUMS.txt` 和 `SIGNING-REPORT.txt`，最后删除临时 Keychain、
-   `.p12` 与 `.p8`。
+6. 上传 DMG、updater、`.sig`、`MACOS-SHA256SUMS.txt` 和
+   `MACOS-SIGNING-REPORT.txt`，最后删除临时 Keychain、`.p12` 与 `.p8`。
 
 确认词不匹配、Secrets 缺失、证书不含 Developer ID Application identity、公证或
 任一门禁失败时，工作流都会失败，不会降级上传 ad-hoc “正式版”。
@@ -199,4 +208,8 @@ tag/commit，输入精确确认词 `NOTARIZE`。工作流会：
 - 交付文件：`KiNGO_2.0.8_aarch64.dmg`，144,269,126 字节；
 - SHA-256：`58a19461f8f3c8efea1f0b85a5581c4605124605a2a00e485b1be61b0c6f3d2d`，
   下载后在 Windows 复算并与 CI 的 `SHA256SUMS.txt` 一致。
-- 正式公证路径：手动工作流与独立配置已准备；未提供 Apple Developer 凭据前不执行。
+- 正式公证路径：工作流与独立配置已准备；正式配置同时生成 macOS updater artifact；
+  未提供 Apple Developer 凭据前不执行。
+- 受控双平台发布：统一编排、版本门禁、双平台 `latest.json`、SHA-256、来源 manifest
+  和 GitHub artifact attestation 已写入 `CROSS_PLATFORM_RELEASE_PLAN.md` 对应实现；
+  未合并到默认分支、未配置生产 Environments 前不创建新 Tag 或 Release。
