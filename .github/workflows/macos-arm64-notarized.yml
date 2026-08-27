@@ -1,0 +1,346 @@
+name: Build notarized macOS Apple Silicon DMG
+
+on:
+  workflow_call:
+    inputs:
+      release_build:
+        description: "Produce normalized assets for the controlled release workflow"
+        required: true
+        type: boolean
+      source_sha:
+        description: "Exact source commit to build"
+        required: true
+        type: string
+      version:
+        description: "Stable release version without a leading v"
+        required: true
+        type: string
+      confirmation:
+        description: "Authorization forwarded by the controlled release workflow"
+        required: true
+        type: string
+  workflow_dispatch:
+    inputs:
+      confirmation:
+        description: "Type NOTARIZE to authorize a signed and notarized artifact build"
+        required: true
+        type: string
+  pull_request:
+    paths:
+      - ".github/workflows/macos-arm64-notarized.yml"
+      - ".github/workflows/release-all.yml"
+      - "kingo-next/src-tauri/tauri.macos-arm64.notarized.conf.json"
+      - "kingo-next/scripts/release-tools.mjs"
+      - "kingo-next/scripts/sign-macos-cores.sh"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: macos-arm64-notarized-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  guard:
+    name: Notarization workflow policy
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Validate notarized Tauri configuration
+        working-directory: kingo-next
+        run: |
+          node -e "
+            const fs = require('fs');
+            const config = JSON.parse(fs.readFileSync('src-tauri/tauri.macos-arm64.notarized.conf.json', 'utf8'));
+            const bundle = config.bundle;
+            const mac = bundle?.macOS;
+            if (!bundle?.targets?.includes('dmg')) throw new Error('DMG target is required');
+            if (bundle.createUpdaterArtifacts !== true) throw new Error('Updater artifacts must be enabled');
+            if (mac?.minimumSystemVersion !== '12.0') throw new Error('Minimum macOS version must be 12.0');
+            if (mac?.hardenedRuntime !== true) throw new Error('Hardened runtime must be enabled');
+            if (Object.hasOwn(mac, 'signingIdentity')) throw new Error('Production config must not pin an ad-hoc identity');
+          "
+
+      - name: Validate core signing script syntax
+        working-directory: kingo-next
+        run: bash -n scripts/sign-macos-cores.sh
+
+  dmg:
+    name: Notarized macOS 15 Apple Silicon
+    if: github.event_name != 'pull_request'
+    runs-on: macos-15
+    environment: macos-production
+    defaults:
+      run:
+        shell: bash
+    env:
+      CARGO_TERM_COLOR: always
+      CARGO_INCREMENTAL: 0
+      RELEASE_BUILD: ${{ inputs.release_build || false }}
+      RELEASE_VERSION: ${{ inputs.version }}
+      SOURCE_SHA: ${{ inputs.source_sha || github.sha }}
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ inputs.source_sha || github.sha }}
+
+      - name: Confirm authorization and required secrets
+        env:
+          RELEASE_CONFIRMATION: ${{ inputs.confirmation }}
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_PRIVATE_KEY: ${{ secrets.APPLE_API_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          expected_confirmation="NOTARIZE"
+          if [[ "$RELEASE_BUILD" == "true" ]]; then
+            expected_confirmation="RELEASE"
+          fi
+          if [[ "$RELEASE_CONFIRMATION" != "$expected_confirmation" ]]; then
+            echo "Refusing production signing: confirmation must be exactly $expected_confirmation." >&2
+            exit 1
+          fi
+          missing=()
+          for name in \
+            APPLE_CERTIFICATE \
+            APPLE_CERTIFICATE_PASSWORD \
+            APPLE_API_ISSUER \
+            APPLE_API_KEY \
+            APPLE_API_PRIVATE_KEY \
+            TAURI_SIGNING_PRIVATE_KEY; do
+            [[ -n "${!name:-}" ]] || missing+=("$name")
+          done
+          if (( ${#missing[@]} > 0 )); then
+            printf 'Missing required secret: %s\n' "${missing[@]}" >&2
+            exit 1
+          fi
+
+      - name: Set up Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: kingo-next/package-lock.json
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c
+        with:
+          toolchain: stable
+          targets: aarch64-apple-darwin
+
+      - name: Cache verified Apple Silicon core downloads
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: kingo-next/src-tauri/target/core-assets/macos-arm64
+          key: macos-arm64-cores-${{ hashFiles('kingo-next/core-assets/macos-arm64.json') }}
+
+      - name: Install dependencies and verified Apple Silicon cores
+        working-directory: kingo-next
+        run: npm ci
+
+      - name: Validate release version
+        if: ${{ inputs.release_build }}
+        working-directory: kingo-next
+        run: node scripts/release-tools.mjs validate-version "$RELEASE_VERSION"
+
+      - name: Import Developer ID certificate and notarization key
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_PRIVATE_KEY: ${{ secrets.APPLE_API_PRIVATE_KEY }}
+          REQUESTED_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+        run: |
+          set -euo pipefail
+          certificate_path="$RUNNER_TEMP/kingo-developer-id.p12"
+          api_key_path="$RUNNER_TEMP/AuthKey_${APPLE_API_KEY}.p8"
+          keychain_path="$RUNNER_TEMP/kingo-signing.keychain-db"
+          keychain_password="$(openssl rand -hex 24)"
+
+          {
+            echo "APPLE_API_KEY_PATH=$api_key_path"
+            echo "KINGO_CERT_PATH=$certificate_path"
+            echo "KINGO_KEYCHAIN_PATH=$keychain_path"
+          } >> "$GITHUB_ENV"
+
+          printf '%s' "$APPLE_CERTIFICATE" |
+            openssl base64 -d -A -out "$certificate_path"
+          printf '%s\n' "$APPLE_API_PRIVATE_KEY" > "$api_key_path"
+          chmod 600 "$certificate_path" "$api_key_path"
+
+          security create-keychain -p "$keychain_password" "$keychain_path"
+          security set-keychain-settings -lut 21600 "$keychain_path"
+          security unlock-keychain -p "$keychain_password" "$keychain_path"
+          security import "$certificate_path" \
+            -k "$keychain_path" \
+            -P "$APPLE_CERTIFICATE_PASSWORD" \
+            -A -t cert -f pkcs12
+          security set-key-partition-list \
+            -S apple-tool:,apple: \
+            -s \
+            -k "$keychain_password" \
+            "$keychain_path"
+          security list-keychains -d user -s "$keychain_path"
+          security default-keychain -d user -s "$keychain_path"
+
+          imported_identity="$(security find-identity -v -p codesigning "$keychain_path" |
+            awk '/Developer ID Application/ { print $2; exit }')"
+          if [[ -z "$imported_identity" ]]; then
+            echo "The certificate does not contain a Developer ID Application identity." >&2
+            exit 1
+          fi
+
+          signing_identity="$imported_identity"
+          if [[ -n "$REQUESTED_SIGNING_IDENTITY" ]]; then
+            if ! security find-identity -v -p codesigning "$keychain_path" |
+              grep -F -- "$REQUESTED_SIGNING_IDENTITY" >/dev/null; then
+              echo "APPLE_SIGNING_IDENTITY does not match the imported certificate." >&2
+              exit 1
+            fi
+            signing_identity="$REQUESTED_SIGNING_IDENTITY"
+          fi
+
+          {
+            echo "APPLE_SIGNING_IDENTITY=$signing_identity"
+          } >> "$GITHUB_ENV"
+
+      - name: Sign bundled executable cores with Developer ID
+        working-directory: kingo-next
+        run: npm run sign:cores:macos
+
+      - name: Build frontend
+        working-directory: kingo-next
+        run: npm run build
+
+      - name: Check Rust formatting
+        working-directory: kingo-next
+        run: cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
+
+      - name: Check Rust lints on Apple Silicon
+        working-directory: kingo-next
+        run: cargo clippy --manifest-path src-tauri/Cargo.toml --target aarch64-apple-darwin --all-targets -- -D warnings
+
+      - name: Test Rust backend on Apple Silicon
+        working-directory: kingo-next
+        run: cargo test --manifest-path src-tauri/Cargo.toml --target aarch64-apple-darwin
+
+      - name: Build signed and notarized DMG
+        working-directory: kingo-next
+        env:
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: npm run tauri -- build --target aarch64-apple-darwin --bundles dmg --config src-tauri/tauri.macos-arm64.notarized.conf.json
+
+      - name: Verify Developer ID, stapling, Gatekeeper and disk image
+        working-directory: kingo-next
+        run: |
+          set -euo pipefail
+          bundle_root="src-tauri/target/aarch64-apple-darwin/release/bundle"
+          dmg="$(find "$bundle_root/dmg" -maxdepth 1 -name '*.dmg' -print -quit)"
+          test -n "$dmg"
+          updater_archive="$(find "$bundle_root/macos" -maxdepth 1 -name '*.app.tar.gz' -print -quit)"
+          test -n "$updater_archive"
+          updater_signature="${updater_archive}.sig"
+          test -s "$updater_signature"
+          hdiutil verify "$dmg"
+
+          mount_dir="$(mktemp -d)"
+          cleanup_mount() {
+            hdiutil detach "$mount_dir" -quiet || true
+            rmdir "$mount_dir" || true
+          }
+          trap cleanup_mount EXIT
+          hdiutil attach "$dmg" -readonly -nobrowse -mountpoint "$mount_dir" -quiet
+          app="$(find "$mount_dir" -maxdepth 1 -name '*.app' -print -quit)"
+          test -n "$app"
+
+          file "$app/Contents/MacOS/kingo" | grep -q 'arm64'
+          codesign --verify --deep --strict --verbose=2 "$app"
+          signature="$(codesign -dvvv "$app" 2>&1)"
+          grep -q '^Authority=Developer ID Application:' <<< "$signature"
+          grep -Eq '^TeamIdentifier=[A-Z0-9]{10}$' <<< "$signature"
+
+          core_count=0
+          while IFS= read -r -d '' candidate; do
+            if file "$candidate" | grep -q 'Mach-O 64-bit executable arm64'; then
+              codesign --verify --strict --verbose=2 "$candidate"
+              core_signature="$(codesign -dvvv "$candidate" 2>&1)"
+              grep -q '^Authority=Developer ID Application:' <<< "$core_signature"
+              core_count=$((core_count + 1))
+            fi
+          done < <(find "$app/Contents/Resources" -type f -print0)
+          [[ "$core_count" -eq 10 ]]
+
+          xcrun stapler validate "$app"
+          spctl --assess --type execute --verbose=4 "$app"
+
+          mkdir -p artifacts/macos-arm64-notarized
+          if [[ "$RELEASE_BUILD" == "true" ]]; then
+            public_dmg="artifacts/macos-arm64-notarized/KiNGO-${RELEASE_VERSION}-macOS-arm64.dmg"
+            public_updater="artifacts/macos-arm64-notarized/KiNGO-${RELEASE_VERSION}-macOS-arm64.app.tar.gz"
+          else
+            public_dmg="artifacts/macos-arm64-notarized/$(basename "$dmg")"
+            public_updater="artifacts/macos-arm64-notarized/$(basename "$updater_archive")"
+          fi
+          cp "$dmg" "$public_dmg"
+          cp "$updater_archive" "$public_updater"
+          cp "$updater_signature" "${public_updater}.sig"
+          app_version="$(node -p "require('./package.json').version")"
+          report_version="${RELEASE_VERSION:-$app_version}"
+          {
+            echo "Source commit: $SOURCE_SHA"
+            echo "Version: $report_version"
+            echo "Embedded Apple Silicon cores: $core_count"
+            echo "DMG: $(basename "$public_dmg")"
+            echo "Updater archive: $(basename "$public_updater")"
+            echo "$signature"
+          } > artifacts/macos-arm64-notarized/MACOS-SIGNING-REPORT.txt
+          (
+            cd artifacts/macos-arm64-notarized
+            shasum -a 256 *.dmg *.app.tar.gz > MACOS-SHA256SUMS.txt
+          )
+          cat artifacts/macos-arm64-notarized/MACOS-SHA256SUMS.txt
+
+          cleanup_mount
+          trap - EXIT
+
+      - name: Upload standalone notarized artifact
+        if: ${{ !inputs.release_build }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: KiNGO-${{ github.sha }}-macos-arm64-notarized-dmg
+          path: kingo-next/artifacts/macos-arm64-notarized/
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload notarized macOS release assets
+        if: ${{ inputs.release_build }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-macos-arm64
+          path: kingo-next/artifacts/macos-arm64-notarized/
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Remove temporary signing material
+        if: always()
+        run: |
+          set +e
+          if [[ -n "${KINGO_KEYCHAIN_PATH:-}" ]]; then
+            security delete-keychain "$KINGO_KEYCHAIN_PATH"
+          fi
+          for path in "${KINGO_CERT_PATH:-}" "${APPLE_API_KEY_PATH:-}"; do
+            if [[ -n "$path" ]]; then
+              rm -f -- "$path"
+            fi
+          done

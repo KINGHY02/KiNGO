@@ -29,13 +29,21 @@ pub struct CoreStatus {
     pub executable_path: Option<String>,
 }
 
+fn platform_executable(windows: &str, macos: &str) -> String {
+    if cfg!(target_os = "macos") {
+        macos.into()
+    } else {
+        windows.into()
+    }
+}
+
 pub fn profiles() -> Vec<CoreProfile> {
     vec![
         CoreProfile {
             id: "mihomo".into(),
             name: "mihomo".into(),
             family: "mihomo".into(),
-            executable: "mihomo.exe".into(),
+            executable: platform_executable("mihomo.exe", "mihomo"),
             config_format: "yaml".into(),
             default_http_port: Some(7890),
             default_socks_port: Some(7891),
@@ -48,7 +56,7 @@ pub fn profiles() -> Vec<CoreProfile> {
             id: "mihomo-alpha".into(),
             name: "mihomo Alpha".into(),
             family: "mihomo".into(),
-            executable: "mihomo-alpha.exe".into(),
+            executable: platform_executable("mihomo-alpha.exe", "mihomo-alpha"),
             config_format: "yaml".into(),
             default_http_port: Some(7890),
             default_socks_port: Some(7891),
@@ -61,7 +69,7 @@ pub fn profiles() -> Vec<CoreProfile> {
             id: "xray".into(),
             name: "Xray".into(),
             family: "xray".into(),
-            executable: "xray.exe".into(),
+            executable: platform_executable("xray.exe", "xray"),
             config_format: "json".into(),
             default_http_port: None,
             default_socks_port: Some(10808),
@@ -74,7 +82,7 @@ pub fn profiles() -> Vec<CoreProfile> {
             id: "sing-box".into(),
             name: "sing-box".into(),
             family: "sing-box".into(),
-            executable: "sing-box.exe".into(),
+            executable: platform_executable("sing-box.exe", "sing-box"),
             config_format: "json".into(),
             default_http_port: None,
             default_socks_port: Some(20808),
@@ -87,7 +95,7 @@ pub fn profiles() -> Vec<CoreProfile> {
             id: "hysteria2".into(),
             name: "Hysteria 2".into(),
             family: "hysteria2".into(),
-            executable: "hysteria2.exe".into(),
+            executable: platform_executable("hysteria2.exe", "hysteria2"),
             config_format: "json".into(),
             default_http_port: None,
             default_socks_port: Some(1080),
@@ -100,7 +108,7 @@ pub fn profiles() -> Vec<CoreProfile> {
             id: "hysteria".into(),
             name: "Hysteria".into(),
             family: "hysteria".into(),
-            executable: "hysteria-tun-windows-6.0-386.exe".into(),
+            executable: platform_executable("hysteria-tun-windows-6.0-386.exe", "hysteria"),
             config_format: "json".into(),
             default_http_port: None,
             default_socks_port: Some(1080),
@@ -113,7 +121,7 @@ pub fn profiles() -> Vec<CoreProfile> {
             id: "naiveproxy".into(),
             name: "NaiveProxy".into(),
             family: "naiveproxy".into(),
-            executable: "naive.exe".into(),
+            executable: platform_executable("naive.exe", "naive"),
             config_format: "json".into(),
             default_http_port: None,
             default_socks_port: Some(1080),
@@ -126,7 +134,7 @@ pub fn profiles() -> Vec<CoreProfile> {
             id: "juicity".into(),
             name: "Juicity".into(),
             family: "juicity".into(),
-            executable: "juicity-client.exe".into(),
+            executable: platform_executable("juicity-client.exe", "juicity-client"),
             config_format: "json".into(),
             default_http_port: None,
             default_socks_port: Some(1080),
@@ -139,7 +147,7 @@ pub fn profiles() -> Vec<CoreProfile> {
             id: "mieru".into(),
             name: "Mieru".into(),
             family: "mieru".into(),
-            executable: "mieru.exe".into(),
+            executable: platform_executable("mieru.exe", "mieru"),
             config_format: "json".into(),
             default_http_port: None,
             default_socks_port: Some(3080),
@@ -152,7 +160,7 @@ pub fn profiles() -> Vec<CoreProfile> {
             id: "shadowquic".into(),
             name: "ShadowQUIC".into(),
             family: "shadowquic".into(),
-            executable: "shadowquic.exe".into(),
+            executable: platform_executable("shadowquic.exe", "shadowquic"),
             config_format: "yaml".into(),
             default_http_port: None,
             default_socks_port: Some(4080),

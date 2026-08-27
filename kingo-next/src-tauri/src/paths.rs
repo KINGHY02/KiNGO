@@ -111,6 +111,16 @@ fn materialize_core_payload(
     }
     fs::rename(&pending, target)
         .map_err(|error| format!("无法安装内置核心 {}：{error}", target.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut permissions = fs::metadata(target)
+            .map_err(|error| format!("无法读取内置核心权限 {}：{error}", target.display()))?
+            .permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(target, permissions)
+            .map_err(|error| format!("无法设置内置核心执行权限 {}：{error}", target.display()))?;
+    }
     Ok(())
 }
 

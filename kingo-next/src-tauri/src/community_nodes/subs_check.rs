@@ -22,6 +22,7 @@ use std::{
 use tauri::{AppHandle, Emitter};
 
 pub(crate) const CORE_VERSION: &str = "1.6.2";
+#[cfg(windows)]
 const CORE_SHA256: &str = "135a731efd4b97dd6f8ae685224cf8d97c8bcbc07b3b8dd70d1342e21542e5a0";
 const UPSTREAM_SPEED_TEST_URL: &str = "https://github.com/AaronFeng753/Waifu2x-Extension-GUI/releases/download/v2.21.12/Waifu2x-Extension-GUI-v2.21.12-Portable.7z";
 
@@ -109,20 +110,31 @@ fn sha256(path: &Path) -> Result<String, String> {
 }
 
 fn bundled_core_path(app: &AppHandle) -> Result<PathBuf, String> {
-    let path = paths::bundled_core_file(app, "subs-check", "subs-check.exe")?;
-    let actual = sha256(&path)?;
-    if actual != CORE_SHA256 {
-        return Err(format!(
-            "SubsCheck 核心校验失败（期望 {CORE_SHA256}，实际 {actual}）"
-        ));
+    let path = paths::bundled_core_file(app, "subs-check", subs_check_executable())?;
+    #[cfg(windows)]
+    {
+        let actual = sha256(&path)?;
+        if actual != CORE_SHA256 {
+            return Err(format!(
+                "SubsCheck 核心校验失败（期望 {CORE_SHA256}，实际 {actual}）"
+            ));
+        }
     }
     Ok(path)
+}
+
+fn subs_check_executable() -> &'static str {
+    if cfg!(target_os = "macos") {
+        "subs-check"
+    } else {
+        "subs-check.exe"
+    }
 }
 
 fn user_core_paths(app: &AppHandle) -> Result<(PathBuf, PathBuf), String> {
     let directory = PathBuf::from(paths::ensure(app)?.cores_dir).join("subs-check");
     Ok((
-        directory.join("subs-check.exe"),
+        directory.join(subs_check_executable()),
         directory.join("version.json"),
     ))
 }

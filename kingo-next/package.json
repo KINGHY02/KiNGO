@@ -4,9 +4,12 @@
   "version": "2.0.8",
   "type": "module",
   "scripts": {
-    "postinstall": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/restore-core-assets.ps1",
+    "postinstall": "node scripts/restore-core-assets.mjs",
     "dev": "vite",
     "prepare:cores": "node scripts/prepare-core-payloads.mjs",
+    "cores:macos-arm64": "node scripts/restore-core-assets.mjs --target macos-arm64",
+    "sign:cores:macos": "bash scripts/sign-macos-cores.sh",
+    "release:self-test": "node scripts/release-tools.mjs self-test",
     "build": "npm run prepare:cores && tsc && vite build",
     "check": "npm run build && cargo check --manifest-path src-tauri/Cargo.toml",
     "test": "cargo test --manifest-path src-tauri/Cargo.toml",

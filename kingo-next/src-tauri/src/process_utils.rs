@@ -2,14 +2,39 @@ use std::{ffi::OsStr, process::Command};
 
 /// Creates a background command that never opens a console window on Windows.
 pub fn hidden_command<S: AsRef<OsStr>>(program: S) -> Command {
-    let mut command = Command::new(program);
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
         const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        let mut command = Command::new(program);
         command.creation_flags(CREATE_NO_WINDOW);
+        command
     }
-    command
+    #[cfg(not(windows))]
+    {
+        Command::new(program)
+    }
+}
+
+pub fn curl_command() -> Command {
+    #[cfg(windows)]
+    {
+        let mut command = hidden_command("curl.exe");
+        command.arg("--ssl-no-revoke");
+        command
+    }
+    #[cfg(not(windows))]
+    {
+        hidden_command("/usr/bin/curl")
+    }
+}
+
+pub fn null_device() -> &'static str {
+    if cfg!(windows) {
+        "NUL"
+    } else {
+        "/dev/null"
+    }
 }
 
 #[cfg(windows)]
@@ -54,7 +79,12 @@ Where-Object {
         .unwrap_or_default()
 }
 
-#[cfg(not(windows))]
+#[cfg(target_os = "macos")]
+pub fn is_elevated() -> bool {
+    false
+}
+
+#[cfg(not(any(windows, target_os = "macos")))]
 pub fn is_elevated() -> bool {
     true
 }
@@ -99,12 +129,22 @@ pub fn relaunch_elevated_delayed() -> Result<(), String> {
     Ok(())
 }
 
-#[cfg(not(windows))]
+#[cfg(target_os = "macos")]
+pub fn relaunch_elevated() -> Result<(), String> {
+    Err("macOS 版本暂不提供 TUN 提权启动，请使用系统代理模式".into())
+}
+
+#[cfg(not(any(windows, target_os = "macos")))]
 pub fn relaunch_elevated() -> Result<(), String> {
     Ok(())
 }
 
-#[cfg(not(windows))]
+#[cfg(target_os = "macos")]
+pub fn relaunch_elevated_delayed() -> Result<(), String> {
+    relaunch_elevated()
+}
+
+#[cfg(not(any(windows, target_os = "macos")))]
 pub fn relaunch_elevated_delayed() -> Result<(), String> {
     Ok(())
 }

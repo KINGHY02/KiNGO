@@ -9,7 +9,11 @@ mod store;
 pub use models::*;
 pub use settings::V2raySettings;
 
-use crate::{core_runtime, process_utils::hidden_command, services, system_proxy};
+use crate::{
+    core_runtime,
+    process_utils::{curl_command, null_device},
+    services, system_proxy,
+};
 use std::{
     collections::VecDeque,
     io::{Read, Write},
@@ -376,7 +380,7 @@ fn curl_proxy_output(
 ) -> Result<String, String> {
     let timeout = timeout.to_string();
     let proxy = format!("socks5h://127.0.0.1:{port}");
-    let mut command = hidden_command("curl.exe");
+    let mut command = curl_command();
     command.args([
         "-fsS",
         "--connect-timeout",
@@ -387,7 +391,7 @@ fn curl_proxy_output(
         &proxy,
     ]);
     if let Some(format) = write_out {
-        command.args(["-o", "NUL", "-w", format]);
+        command.args(["-o", null_device(), "-w", format]);
     }
     let output = command
         .arg(url)
@@ -407,7 +411,7 @@ fn curl_proxy_output_cancelable(
 ) -> Result<String, String> {
     let timeout = timeout.to_string();
     let proxy = format!("socks5h://127.0.0.1:{port}");
-    let mut command = hidden_command("curl.exe");
+    let mut command = curl_command();
     command.args([
         "-fsS",
         "--connect-timeout",
@@ -418,7 +422,7 @@ fn curl_proxy_output_cancelable(
         &proxy,
     ]);
     if let Some(format) = write_out {
-        command.args(["-o", "NUL", "-w", format]);
+        command.args(["-o", null_device(), "-w", format]);
     }
     let mut child = command
         .arg(url)
@@ -936,7 +940,7 @@ fn wait_for_port(port: u16, timeout: Duration) -> bool {
 }
 
 fn query_exit(port: u16) -> Option<(String, String)> {
-    let output = hidden_command("curl.exe")
+    let output = curl_command()
         .args([
             "-fsS",
             "--connect-timeout",

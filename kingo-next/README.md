@@ -24,7 +24,7 @@ npm run bundle
 src-tauri\target\release\bundle\nsis\
 ```
 
-正式发布同时生成 Tauri 软件内更新包、`.sig` 签名和 `latest.json`。更新签名私钥不得进入仓库：
+正式发布由 GitHub 的 `Publish KiNGO Windows and macOS` 手动工作流统一完成；普通源码推送只生成测试 Artifact，不创建 Tag 或 Release。正式流程从同一个 Git SHA 生成 Windows x64 NSIS、已签名公证的 macOS arm64 DMG、两端软件内更新包、`.sig`、双平台 `latest.json` 和 SHA-256 清单。详细方案见 [`CROSS_PLATFORM_RELEASE_PLAN.md`](CROSS_PLATFORM_RELEASE_PLAN.md)。更新签名私钥不得进入仓库：
 
 - 本机私钥默认保存在 `%USERPROFILE%\.kingo-signing\kingo-updater.key`，仅当前 Windows 用户可读取。
 - GitHub 仓库需配置 `TAURI_SIGNING_PRIVATE_KEY` Secret，内容为私钥文件全文。
@@ -38,7 +38,7 @@ $env:TAURI_SIGNING_PRIVATE_KEY = Get-Content "$env:USERPROFILE\.kingo-signing\ki
 npm run bundle
 ```
 
-Pull Request 构建使用 `src-tauri/tauri.pr.conf.json` 关闭更新产物生成，因此不会向不受信任的PR暴露发布私钥。
+Pull Request 构建使用 `src-tauri/tauri.pr.conf.json` 关闭更新产物生成，因此不会向不受信任的 PR 暴露发布私钥。正式发布默认创建 Draft Release；只有明确选择公开模式并输入 `PUBLISH` 才直接公开。
 
 如需重新生成安装器图片和应用图标：
 

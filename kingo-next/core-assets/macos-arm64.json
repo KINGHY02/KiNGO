@@ -1,0 +1,115 @@
+{
+  "target": "macos-arm64",
+  "platform": "darwin",
+  "architecture": "arm64",
+  "entries": [
+    {
+      "id": "mihomo",
+      "version": "v1.19.20",
+      "url": "https://github.com/MetaCubeX/mihomo/releases/download/v1.19.20/mihomo-darwin-arm64-v1.19.20.gz",
+      "sha256": "1d404f4e32ba18cd175132b52cb92ac321c9bf60d2dcc5d87794c36a48e26e64",
+      "format": "gzip",
+      "files": [
+        { "target": "mihomo/mihomo" }
+      ]
+    },
+    {
+      "id": "xray",
+      "version": "v26.3.27",
+      "url": "https://github.com/XTLS/Xray-core/releases/download/v26.3.27/Xray-macos-arm64-v8a.zip",
+      "sha256": "2e93a67e8aa1936ecefb307e120830fcbd4c643ab9b1c46a2d0838d5f8409eaf",
+      "format": "archive",
+      "files": [
+        { "source": "xray", "target": "xray/xray" },
+        { "source": "geoip.dat", "target": "xray/geoip.dat", "executable": false },
+        { "source": "geosite.dat", "target": "xray/geosite.dat", "executable": false }
+      ]
+    },
+    {
+      "id": "sing-box",
+      "version": "v1.13.13",
+      "url": "https://github.com/SagerNet/sing-box/releases/download/v1.13.13/sing-box-1.13.13-darwin-arm64.tar.gz",
+      "sha256": "4ac414d4ede9ec21bc79d8ccf40b4679429203b9e06ad96d2d8d34c0fe940558",
+      "format": "archive",
+      "files": [
+        {
+          "source": "sing-box-1.13.13-darwin-arm64/sing-box",
+          "target": "sing-box/sing-box"
+        }
+      ]
+    },
+    {
+      "id": "hysteria2",
+      "version": "v2.9.2",
+      "url": "https://github.com/HyNetworks/hysteria/releases/download/app/v2.9.2/hysteria-darwin-arm64",
+      "sha256": "a08b087f4a7544d07e6dd94280bc1baa23f6ab67d314e4578aa717209917b3eb",
+      "format": "plain",
+      "files": [
+        { "target": "hy2/hysteria2" }
+      ]
+    },
+    {
+      "id": "hysteria",
+      "version": "v1.3.5",
+      "url": "https://github.com/HyNetworks/hysteria/releases/download/v1.3.5/hysteria-darwin-arm64",
+      "sha256": "ccb705e4171eaf243c163a32d408080f4d4df7293670a8ed1ddce34002057e0c",
+      "format": "plain",
+      "files": [
+        { "target": "hysteria/hysteria" }
+      ]
+    },
+    {
+      "id": "naiveproxy",
+      "version": "v148.0.7778.96-5",
+      "url": "https://github.com/klzgrad/naiveproxy/releases/download/v148.0.7778.96-5/naiveproxy-v148.0.7778.96-5-mac-arm64-arm64.tar.xz",
+      "sha256": "9a9e7722a038c0cd9775cabdfccfecbb39139839250bd0f77bb855b086f4e691",
+      "format": "archive",
+      "files": [
+        {
+          "source": "naiveproxy-v148.0.7778.96-5-mac-arm64-arm64/naive",
+          "target": "naiveproxy/naive"
+        }
+      ]
+    },
+    {
+      "id": "juicity",
+      "version": "v0.5.0",
+      "url": "https://github.com/juicity/juicity/releases/download/v0.5.0/juicity-macos-arm64.zip",
+      "sha256": "75f5a5ff8cdfd6872fa63479e6bc1ec517fb6ddbe807c39e7657abb4e20f0595",
+      "format": "archive",
+      "files": [
+        { "source": "juicity-client", "target": "juicity/juicity-client" }
+      ]
+    },
+    {
+      "id": "mieru",
+      "version": "v3.33.0",
+      "url": "https://github.com/enfein/mieru/releases/download/v3.33.0/mieru_3.33.0_macos_arm64.tar.gz",
+      "sha256": "cc8c385bc350dba7544cfbdff3238405039a06b9f5283f3a3f432eac7860c5d5",
+      "format": "archive",
+      "files": [
+        { "source": "mieru", "target": "mieru/mieru" }
+      ]
+    },
+    {
+      "id": "shadowquic",
+      "version": "v0.3.3",
+      "url": "https://github.com/spongebob888/shadowquic/releases/download/v0.3.3/shadowquic-aarch64-darwin",
+      "sha256": "ff014ee71f931d8d6c2b04e35970f38d72e00b81871e2ce43aeaf39515017ead",
+      "format": "plain",
+      "files": [
+        { "target": "shadowquic/shadowquic" }
+      ]
+    },
+    {
+      "id": "subs-check",
+      "version": "v1.6.2",
+      "url": "https://github.com/beck-8/subs-check/releases/download/v1.6.2/subs-check_Darwin_aarch64.tar.gz",
+      "sha256": "5c3c6d946bb1c9a8ef6cf8abe8f0094773fb118c6ccef4fffb1371df335d7c63",
+      "format": "archive",
+      "files": [
+        { "source": "subs-check", "target": "subs-check/subs-check" }
+      ]
+    }
+  ]
+}
