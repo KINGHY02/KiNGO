@@ -6,6 +6,7 @@ on:
     paths:
       - "kingo-next/**"
       - ".github/workflows/macos-arm64.yml"
+      - ".github/workflows/macos-arm64-notarized.yml"
 
 permissions:
   contents: read

@@ -134,19 +134,34 @@ src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/
 
 ## 7. 正式签名、公证与发布
 
-当前仓库没有 Apple 签名 secrets，因此 CI 测试版使用 `signingIdentity: "-"`。
-正式发布前由 Apple Developer Account Holder 提供以下 GitHub Secrets：
+测试工作流使用 `signingIdentity: "-"`。正式发行准备由仅支持手动触发的
+`.github/workflows/macos-arm64-notarized.yml` 承担；它只上传经过签名、公证验证的
+Actions artifact，不会创建、修改或发布 GitHub Release。
+
+先在 GitHub 的 `macos-production` Environment 配置人工审批和以下 Secrets：
 
 - `APPLE_CERTIFICATE`：Developer ID Application `.p12` 的 Base64；
 - `APPLE_CERTIFICATE_PASSWORD`：导出密码；
-- `APPLE_SIGNING_IDENTITY`：证书 identity；
-- `APPLE_API_ISSUER`、`APPLE_API_KEY`、`APPLE_API_KEY_PATH`，或 Tauri 支持的
-  Apple ID 公证凭据组合；
-- 现有 `TAURI_SIGNING_PRIVATE_KEY` 继续用于 Tauri updater 产物签名。
+- `APPLE_SIGNING_IDENTITY`：可选；证书 identity 或 SHA-1，未配置时从 `.p12`
+  中唯一的 Developer ID Application identity 推导；
+- `APPLE_API_ISSUER`：App Store Connect API Issuer ID；
+- `APPLE_API_KEY`：App Store Connect API Key ID；
+- `APPLE_API_PRIVATE_KEY`：对应 `AuthKey_<KEY_ID>.p8` 的完整内容。
 
-正式工作流必须先用同一 Developer ID 对 10 个内嵌 Mach-O 核心签名，再签应用，
-提交 Apple 公证并 stapling。Apple secrets 未配置或公证失败时，工作流必须失败，
-不得降级后继续上传“正式版”。
+执行时在 Actions 选择 `Build notarized macOS Apple Silicon DMG` 和待构建的
+tag/commit，输入精确确认词 `NOTARIZE`。工作流会：
+
+1. 验证确认词和五项必需 Secrets；
+2. 在临时 Keychain 导入 `.p12`，把 `.p8` 写入 Runner 临时目录；
+3. 用同一 Developer ID 对 10 个内嵌 Mach-O 核心签名；
+4. 通过 `tauri.macos-arm64.notarized.conf.json` 构建、提交 Apple 公证并 stapling；
+5. 挂载最终 DMG，验证主程序及 10 个核心的 Developer ID、arm64 架构、stapling、
+   Gatekeeper 和磁盘镜像；
+6. 上传 DMG、`SHA256SUMS.txt` 和 `SIGNING-REPORT.txt`，最后删除临时 Keychain、
+   `.p12` 与 `.p8`。
+
+确认词不匹配、Secrets 缺失、证书不含 Developer ID Application identity、公证或
+任一门禁失败时，工作流都会失败，不会降级上传 ad-hoc “正式版”。
 
 ## 8. 发布门禁
 
@@ -184,3 +199,4 @@ src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/
 - 交付文件：`KiNGO_2.0.8_aarch64.dmg`，144,269,126 字节；
 - SHA-256：`58a19461f8f3c8efea1f0b85a5581c4605124605a2a00e485b1be61b0c6f3d2d`，
   下载后在 Windows 复算并与 CI 的 `SHA256SUMS.txt` 一致。
+- 正式公证路径：手动工作流与独立配置已准备；未提供 Apple Developer 凭据前不执行。
